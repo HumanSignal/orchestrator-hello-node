@@ -1,4 +1,4 @@
-# lspo-hello-node — your first external node
+# orchestrator-hello-node — your first external node
 
 This repository is a **template for a pipeline step that runs on your own machine**, in
 your own container, built from your own code. The orchestrator never sees the code: it
