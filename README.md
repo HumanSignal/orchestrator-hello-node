@@ -68,23 +68,35 @@ The **runner** is our process; it is the only thing that talks to the orchestrat
 enrols once, then polls for work, starts your container, streams its logs back, and
 reports the result. It listens on no port — all connections are outbound.
 
+The setup command in step 2 prints this line already filled in. It looks like:
+
 ```bash
-docker run -d --name lspo-runner \
+docker run -d --name lspo-agent \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  -v lspo-runner-state:/var/lib/lspo \
-  -e LSPO_API_URL='https://<your-orchestrator>' \
-  -e LSPO_POOL_TOKEN='<the token printed in step 2>' \
-  <runner image>
+  --group-add $(getent group docker | cut -d: -f3) \
+  -v lspo-agent-state:/var/lib/lspo-agent \
+  -e LSPO_AGENT_API_URL='https://<your-orchestrator>' \
+  -e LSPO_AGENT_POOL='<pool name from step 2>' \
+  -e LSPO_AGENT_REGISTRATION_TOKEN='<the token printed in step 2>' \
+  -e LSPO_AGENT_NAME=$(hostname) \
+  -e LSPO_AGENT_MAX_CONCURRENT_JOBS=1 \
+  --stop-timeout 300 \
+  lspo-agent:dev
 ```
 
-After the first successful start you can **delete `LSPO_POOL_TOKEN`**: the runner has
-saved its own identity in the volume and boots from that. Keeping the shared pool secret
-on the machine longer than necessary buys you nothing.
+Every setting is `LSPO_AGENT_*`; the runner's own README is the authoritative list. Two
+details in that command are not decoration: `--group-add` is how a non-root process
+reaches the Docker socket (the runner refuses to start without it, rather than failing on
+its first job), and the state volume holds the runner's identity.
+
+After the first successful start you can **delete `LSPO_AGENT_REGISTRATION_TOKEN`**: the
+runner boots from the identity in that volume. Keeping the shared pool secret on the
+machine longer than necessary buys you nothing.
 
 Check it enrolled:
 
 ```bash
-docker logs lspo-runner | head
+docker logs lspo-agent | head
 ```
 
 ## 4. Point a pipeline node at it
@@ -165,9 +177,9 @@ to your own job's prefix by the storage service itself, not by our politeness.
 
 | Symptom | Cause | What to do |
 |---|---|---|
-| Runner logs `401` at startup | the pool token is wrong, or an old `LSPO_AGENT_TOKEN` is still in the environment | remove the stale variable; the saved identity in the volume is enough |
+| Runner logs `401` at startup | the pool token is wrong, or an old `LSPO_AGENT_TOKEN` is still set in the environment (it wins over the saved identity) | remove the stale variable; the saved identity in the volume is enough |
 | Runner keeps logging "nothing to do" | no queued work for this pool, the pool is at its concurrency ceiling, or the node points at a different deployment | check the deployment id on the node |
-| Execution sits at **Waiting for runner** | no runner is enrolled in that pool, or it cannot reach the orchestrator | `docker logs lspo-runner` |
+| Execution sits at **Waiting for runner** | no runner is enrolled in that pool, or it cannot reach the orchestrator | `docker logs lspo-agent` |
 | Run fails with "no completion marker" | your container exited without writing `__lspo_complete.json` | write the marker on the failure path too, with `"status": "failed"` |
 | Run fails naming a hash mismatch | the file changed after you hashed it | hash the bytes you actually wrote, and write the marker afterwards |
 | Container cannot reach the upload URL | credentials expired, or egress is blocked | check the clock on the machine and outbound HTTPS |
