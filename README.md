@@ -75,13 +75,17 @@ The **runner** is our process; it is the only thing that talks to the orchestrat
 enrols once, then polls for work, starts your container, streams its logs back, and
 reports the result. It listens on no port — all connections are outbound.
 
-The setup command in step 2 prints this line already filled in. It looks like:
+The setup command in step 2 prints this line already filled in, together with the one
+that has to run before it. It looks like:
 
 ```bash
+mkdir -p /srv/lspo-agent && chmod 1777 /srv/lspo-agent
+
 docker run -d --name lspo-agent \
   -v /var/run/docker.sock:/var/run/docker.sock \
   --group-add $(getent group docker | cut -d: -f3) \
-  -v lspo-agent-state:/var/lib/lspo-agent \
+  -v /srv/lspo-agent:/srv/lspo-agent \
+  -e LSPO_AGENT_WORKDIR=/srv/lspo-agent/state \
   -e LSPO_AGENT_API_URL='https://<your-orchestrator>' \
   -e LSPO_AGENT_POOL='<pool name from step 2>' \
   -e LSPO_AGENT_REGISTRATION_TOKEN='<the token printed in step 2>' \
@@ -92,12 +96,20 @@ docker run -d --name lspo-agent \
 ```
 
 Every setting is `LSPO_AGENT_*`; the runner's own README is the authoritative list. Two
-details in that command are not decoration: `--group-add` is how a non-root process
+details in that command are not decoration. `--group-add` is how a non-root process
 reaches the Docker socket (the runner refuses to start without it, rather than failing on
-its first job), and the state volume holds the runner's identity.
+its first job). And the state directory is a **plain folder on this machine, mounted at
+the same path inside the runner** — not a Docker volume, and that is not a style choice:
+the runner hands paths under it to your Docker service when it attaches each job's
+credentials into your container, and your Docker service looks those paths up on the
+machine. A volume has no location there, and Docker's answer to a path it cannot find is
+to create an empty folder rather than to complain — so your step would start with an empty
+credentials directory and fail on a missing file, while every log said the credentials had
+been written. The runner creates its own `state` folder inside the one you made, because
+it tightens that folder's permissions and only an owner may do that.
 
 After the first successful start you can **delete `LSPO_AGENT_REGISTRATION_TOKEN`**: the
-runner boots from the identity in that volume. Keeping the shared pool secret on the
+runner boots from the identity in that folder. Keeping the shared pool secret on the
 machine longer than necessary buys you nothing.
 
 Check it enrolled:
