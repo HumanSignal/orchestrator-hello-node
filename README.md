@@ -43,6 +43,13 @@ also a digest:
 docker image inspect --format='{{.Id}}' hello-node:dev   # → sha256:…
 ```
 
+Register that bare `sha256:…` id as-is. One honest caveat: an image id only *resolves* on
+a machine that already holds the image — it is exactly as immutable as a registry digest,
+but there is nothing to pull. Fine for this demo, where the runner and the image share one
+machine; the moment your pool spans a second machine, push to a registry and register the
+`…@sha256:…` repo digest instead. The setup command prints this same warning when you hand
+it a bare id, and refuses nothing.
+
 ## 2. Register the node with the orchestrator
 
 On the orchestrator (locally: from the repo root; in a deployment: inside the `web`
