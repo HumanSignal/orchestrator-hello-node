@@ -2,46 +2,64 @@
 
 Measured, not reasoned about. Every line below is the observed behaviour of the image
 built from this repository's own `Dockerfile`, run as a container against the harness in
-`conformance/`, on Linux with Docker 28.4.
+`conformance/`, on Linux with Docker 28.4, with the citations checked against orchestrator
+commit `e4c25192`.
 
 ```
 LSPO_ORCHESTRATOR_SRC=… LSPO_ORCHESTRATOR_REF=origin/master python -m pytest --red-for-real -q
-→ 20 failed, 100 passed in 144s
+→ 20 failed, 109 passed in 148s
 
 python -m pytest -q                     # CI mode, no orchestrator sources present
-→ 99 passed, 1 skipped, 20 xfailed in 141s
+→ 108 passed, 1 skipped, 20 xfailed in 149s
 ```
 
 The 20 failures are exactly the 20 tests marked `expected_red_until_fixed`. Nothing else
-fails. The one skip is the verbatim citation check, which needs a checkout of the
-orchestrator; with `LSPO_ORCHESTRATOR_SRC` set it runs and passes, which is how the second
-line above reaches 100.
+fails, and nothing skips for a reason that depends on the node. The one skip is the
+verbatim citation check, which needs a checkout of the orchestrator; with
+`LSPO_ORCHESTRATOR_SRC` set it runs and passes, which is how the first line above reaches
+109.
 
 | Group | Tests | Today |
 |---|---|---|
 | `expected_red_until_fixed` | 20 | fail |
 | `conforms_today` | 21 | pass |
-| `subject_is_platform` | 59 | pass |
-| `harness_self_test` | 20 | pass |
+| `subject_is_platform` | 67 | pass |
+| `harness_self_test` | 21 | pass |
 
-**Re-measured from zero.** These are not an edit of the previous run's numbers. Tests were
-removed, split, relabelled and rewritten between the two, and the fake store the node is
-measured against had a whole behaviour taken out of it.
+**Re-measured from zero, again.** These are not an edit of the previous run's numbers. Six
+assertions were rewritten this round; the fake store gained a behaviour it did not have (it
+can now say when it has finished); and three platform rules that had drifted past this
+harness's re-implementation were mirrored, which is where the eight extra
+`subject_is_platform` cases come from. **The same twenty tests are red, for the same
+reasons.** No label moved, no claim was withdrawn, and the contract-defect count is
+unchanged at six.
+
+**Several tests can now SKIP, and a skip is a finding of a different kind.** Where a rule
+constrains something optional — a marker, a `result.json`, an object that may or may not
+have been produced yet — a run in which that thing does not exist is an *inapplicable*
+condition, not a pass and not a failure. Those tests say so, naming which legal choice the
+step made. None of them skips against the node as it stands; if one starts to, the run
+summary is where it shows up.
 
 ---
 
-## Read this first: the claim "this node violates the contract" is now 6, down from 23
+## Read this first: the claim "this node violates the contract" is 6, down from 23
 
 The first version of this harness asserted **23 defects**. The second cut that to 10 by
 withdrawing five claims outright and relabelling the rest. A third review found the
 remaining ten still over-claimed, and named the cause: the harness kept calling something
 a CONTRACT rule because the rule was *about that area*, not because the rule, read
-literally, made the node's behaviour a violation.
+literally, made the node's behaviour a violation. Six survived that test and all six still
+stand — the fourth review changed no label and withdrew no claim.
 
-The test applied this round is that one sentence. *Does the quoted rule, read literally,
-make the observed behaviour a violation?* Not "is there a rule nearby". Not "would a good
-node do this". If the rule says "a marker, if written, must …", then a test requiring a
-marker to exist is not resting on it. Where the answer was arguable, the test was demoted.
+The test is that one sentence. *Does the quoted rule, read literally, make the observed
+behaviour a violation?* Not "is there a rule nearby". Not "would a good node do this". If
+the rule says "a marker, if written, must …", then a test requiring a marker to exist is
+not resting on it. Where the answer was arguable, the test was demoted.
+
+What the fourth review found was the same habit one level down, inside tests whose LABELS
+were right: a test that names the prohibited outcome correctly and then also insists on one
+particular way of avoiding it. That is the subject of the next section.
 
 | Basis | Meaning | Expected-red today |
 |---|---|---|
@@ -52,7 +70,44 @@ marker to exist is not resting on it. Where the answer was arguable, the test wa
 **Every one of the twenty is still red and still worth fixing.** What changed is what may
 be written down as a requirement, and the answer is now six things.
 
-### What moved this round, and why
+### What moved this round: assert the prohibition, never prescribe the remedy
+
+A contract test says *"this run must not exhibit the prohibited outcome"*, and every other
+outcome passes. The moment it also says "and it must exit 0", or "and this optional
+document must exist", it has stopped describing the contract and started describing one
+particular conforming implementation — so a **correct fix goes red for the wrong reason**.
+That is worse than having no test at all, and it was the single cause of three of the five
+findings this round. The other two were bugs in the harness itself, and they are at the
+bottom of this document.
+
+Six assertions were rewritten from *must do X* into *must not do Y*:
+
+| Test | Was | Is now |
+|---|---|---|
+| the `result.json` ceiling | the run exits 0, **and** a result document exists, **and** it is under 1 MiB | no result document over 1 MiB reaches the store. Failing loudly instead of writing one is what the cited rule says it wants; writing none is legal, and skips |
+| two ports carrying one filename | the run exits 0 **and** the marker parses | if a marker was written, it parses. Noticing the collision and refusing the job — with a valid failure marker or with none — is conformant |
+| salvage after a failure | something landed, **and** the marker names it | *if* something landed, the marker names it. A step that verifies every input before producing anything has nothing to inventory, and that is an inapplicable condition, not a failure |
+| neither input survives the other | the run exits 0 **and** both bodies are in the store | the same, but a run that refused the job skips: nothing was silently overwritten, and refusing is one of the fixes this test promises not to pre-empt |
+| the inventory names real keys | the run exits 0, **and** the inventory is non-empty, **and** every relpath in it exists | every relpath the marker inventories names an object the store holds. No marker, or an empty inventory, skips |
+| unknown fields are ignored (the manifest, and its envelope twin) | the run *with* the extra fields exits 0 | the same job runs twice and the two outcomes must **match**. "Adding a field is not a breaking change" is a claim about a difference; "this node succeeds" was never part of it |
+
+The last one is the shape worth copying. When a rule is about a difference, measure the
+difference — an absolute assertion in its place quietly imports a second requirement that
+nobody wrote down.
+
+**Where the line was drawn, because it can be drawn absurdly.** Read literally enough, the
+contract requires a step to produce nothing at all, so *every* test here is inapplicable to
+a node that does nothing — which would leave a suite that proves nothing. The bar used is:
+**could a plausible fix of this node legitimately make this premise false?** Refusing a
+job with colliding filenames, verifying every input before writing anything, failing rather
+than writing an oversized document — yes, all three, and all three are now accommodated. An
+ordinary two-input job completing at all: no fix under discussion changes that, so those
+premises stay assertions. The one place this line is uncomfortable is that several tests
+would fail a node which stopped verifying its input hashes; verifying is not required by
+the contract, but it is this node's own advertised behaviour, asserted in its own right, so
+those tests are entitled to assume it.
+
+### What moved in the round before, and why
 
 **Removed — the harness was modelling something that cannot happen.** One rotation test
 required the step to retry an upload that the store had *accepted* and then refused. To
@@ -142,9 +197,12 @@ empty list is the whole defect.
 
 An empty inventory does not mean "nothing was produced". It means "everything produced is
 stranded in a staging directory nobody will look at again". On a wide batch that is hours
-of work. The test now asks first whether a marker exists at all, because writing one is
-not required — what is required is that a marker which *does* exist inventories every
-object the step produced.
+of work. The test is doubly conditional, because two entirely different things are optional
+here: writing a marker at all, and having produced anything by the time the failure lands.
+A step that verifies every input *before* it writes anything fails this job with an empty
+store — nothing to inventory, nothing omitted, so the test skips rather than demanding this
+node keep its present order of work. What is required is that a marker which *does* exist
+inventories every object that *does* exist.
 
 ### 3. A transient store refusal on an upload is reported as permanent
 
@@ -192,6 +250,10 @@ writes no marker, or a marker that omits `exit_code`, is conformant and the test
 The run exits 0 and publishes **nothing**, because the whole document is refused at parse
 time. That is the worst possible shape for a failure: everything looked fine from outside.
 
+The rule forbids exactly one thing — writing a document the collector cannot parse — so
+that is all the test asserts. Refusing the job on the collision is conformant, with a valid
+failure marker or with none at all, and the test says nothing about the exit code.
+
 The second consequence — one input's bytes silently overwritten by the other's — is
 tracked separately as reference quality, because *which* output path an object belongs on
 is the step's own business.
@@ -213,6 +275,11 @@ orchestrator was happy to write (3 MiB, well inside the 8 MiB manifest ceiling) 
 document the contract's own reader is forbidden to read. **Honest caveat:** nothing in the
 current collection path calls `read_result`, so today the oversized document is written and
 never read.
+
+The test forbids the oversized document and nothing else. `external/io.py` explicitly wants
+a producer to *"fail loudly at the point of the mistake"*, so ending the run non-zero is a
+conforming fix and the exit code is not asserted; `result.json` is optional, so writing none
+skips. An earlier version required both, which would have failed either correct fix.
 
 ---
 
@@ -254,7 +321,9 @@ upload neither its outputs nor the failure marker that would explain why. Two th
 worth separating from that. The exit code it uses to report the refusal **is** a contract
 violation, and it is defect 3 above under its own citation. And what these tests do *not*
 require is re-reading the file before every transfer — checking the stated `expires_at`,
-or re-reading on a refusal, or both, are all correct answers.
+or re-reading on a refusal, or both, are all correct answers. The one sentence that would
+turn this pair into a contract claim, and the scoping it needs to be true, is at the bottom
+of this document under "One demotion I would argue about".
 
 ### Not leaking credentials — 1 test red, 1 green
 
@@ -277,7 +346,7 @@ none, so SIGTERM is dropped on the floor and the process carries on working.
 |---|---|
 | `test_a_step_that_cannot_be_stopped_costs_the_whole_grace_period` | `docker had to wait the full 30s grace (30.2s measured) and then SIGKILL it` — half a minute of a runner slot per cancelled job. |
 | `test_a_step_stopped_during_a_download_does_not_claim_it_succeeded` | The marker says `succeeded`, inside a launch the orchestrator has recorded as cancelled. |
-| `test_a_step_stopped_during_an_upload_inventories_what_it_left_behind` | Same. Rebuilt this round around TWO inputs so that one output has genuinely landed when the signal arrives — with one input the inventory check was vacuous. |
+| `test_a_step_stopped_during_an_upload_inventories_what_it_left_behind` | Same. Rebuilt around TWO inputs so that one output has genuinely landed when the signal arrives (with one, the inventory check was vacuous), and it now waits for the store to go quiet before reading it — see the harness bugs below for why that mattered. |
 | `test_a_cancelled_step_stops_taking_on_new_work` | `after being asked to stop, the step went on to fetch 3 of 3 inputs`. |
 
 **What is NOT at stake:** the run is recorded as cancelled either way. `agent/runner.py`
@@ -355,7 +424,47 @@ Most were formatting artefacts on the harness's side, fixed in the matcher. Thre
   result as source text;
 * one silently dropped an interpolated value out of the middle of a quoted error message.
 
-All 38 citations in the suite now match `origin/master` verbatim.
+All 38 citations in the suite match `e4c25192` verbatim. (One `basis_contract` citation was
+withdrawn this round and one added, so the count is unchanged by coincidence. The withdrawn
+one quoted a real sentence about credentials expiring and used it to support a claim about
+*when a store authorizes a request* — which that sentence, and no other in the platform,
+says anything about. The check could not have caught that; only a reader can.)
+
+### The check earned itself this round: it caught the platform moving
+
+Everything it had found before was a formatting artefact on this side or a
+quotation-that-was-really-a-paraphrase. This round it caught what it was built for — the
+platform reworded a rule and a restatement here went stale — and it did so within minutes
+of the change landing. `origin/master` moved from `d8a78355` to `e4c25192` (*"the
+container's own output, and the eight other holes in the log/artifact path"*) while this
+round was being measured, and that commit touches three of the eleven files this harness is
+allowed to cite.
+
+One citation stopped matching: the progress-line rule quoted
+`str(payload.get('phase') or '')[:64]`, and the agent now writes
+`phase = without_control_characters(str(payload.get('phase') or ''))` before truncating.
+That is not a cosmetic rewording. The phase travels in the **heartbeat, which is the
+request that renews the lease**; the server's field refuses control characters and a
+refusal fails the whole heartbeat — so a step that puts one in its phase every interval
+never renews its lease, and its execution is parked for ever.
+
+Three platform rules had drifted away from this harness's re-implementation, and all three
+are mirrored now:
+
+| The platform now | This harness had |
+|---|---|
+| refuses a relpath containing **any** control character — U+0000 above all, because no filesystem can hold it in a name | refused only a line break |
+| refuses an output-port name that is empty, blank, or carries a control character (`check_port_name`, new) | did not look at port names |
+| drops control characters from a progress phase before truncating it | truncated the raw string |
+
+Names are **refused**; prose (an `error`, a phase) is **cleaned**. The asymmetry is the
+platform's and it is deliberate: a cleaned identifier would quietly name a different file
+or match a different port, while a cleaned message is still the run's account of itself.
+
+The lesson for anyone reading the numbers in this document: **they are measured against a
+named commit**, and the citation check is the only thing that notices when that commit
+stops being the one the citations describe. Run it with `LSPO_ORCHESTRATOR_REF` set to the
+commit the node is deployed against.
 
 **What neither check can do — and it is the important half.** They establish that the
 sentence exists, not that it *supports* the assertion. Every over-claim corrected in this
@@ -366,7 +475,7 @@ judgement *possible* by forcing the sentence into the open where a reader can we
 
 ---
 
-## One demotion I would argue about
+## One demotion I would argue about — and the sentence that would settle it
 
 Calling the credential-expiry tests "reference quality" is the weakest label in this
 document, and I want it on the record rather than buried.
@@ -379,16 +488,43 @@ document. A step that cannot is unusable for anything but short work, and "the c
 permits it" is a thin thing to say about that.
 
 But the rule genuinely is not written. Every sentence in the platform's sources describes
-what the *agent* does; none places a duty on the workload. Under the test applied this
-round — *does the quoted rule, read literally, make this a violation?* — the honest answer
-is no, and inventing an obligation because it is obviously implied is the exact habit this
-round was called to break.
+what the *agent* does; none places a duty on the workload. Under the test applied here —
+*does the quoted rule, read literally, make this a violation?* — the honest answer is no,
+and inventing an obligation because it is obviously implied is the exact habit these
+rounds were called to break.
 
-The clean resolution is not a label. It is one sentence in `external/contract.py` saying
-what a workload owes: *read the credentials file when you need credentials; do not cache
-it past its stated `expires_at`.* Then the test moves back to `basis_contract` with a
-citation, and no reader has to reconstruct the argument. **That is a request to the
-platform, not a change this repository can make.**
+### The proposed platform change
+
+The clean resolution is not a label. It is one sentence in the platform's own sources —
+`external/contract.py` is where a workload author would look for it — saying what a
+workload owes:
+
+> A workload may cache an envelope until its `expires_at`; before initiating a credentialed
+> request at or after that instant it must reopen the file named by `LSPO_CREDENTIALS_FILE`
+> and use the current envelope, while a request initiated before that instant may complete
+> without re-reading or retrying solely because that instant passes.
+
+**That is a request to the orchestrator repository, not a change this one can make.**
+
+The scoping is the whole content of it, and an earlier draft — *"read the credentials file
+when you need credentials; do not cache it past its stated `expires_at`"* — was rejected in
+review for being broader than anybody wants in two directions. "Read it when you need
+credentials" reads as *before every transfer*, which would make a step that holds a live
+envelope across ten uploads non-conformant for no benefit; a re-read per object is pure
+cost, and the agent refreshes precisely "so the workload never has to handle an expired
+file". And "do not cache past expiry" reads as *abort what you have already started*, which
+asks for the one thing nothing can deliver: a presigned request already in flight cannot be
+re-signed, and the store will not refuse it either — it authorized the request when it
+arrived. The sentence above says only what a workload can actually act on: **look again
+before you begin; never abandon something already begun.**
+
+Until that sentence exists, nothing in this repository may carry `basis_contract` on it —
+including the obvious candidate, "beginning a request with an envelope that has already
+expired". That is a self-inflicted 403, not a violation of any written rule, and labelling
+it as one would be this harness making the same mistake a fourth time. When the sentence
+lands, two things follow mechanically: the two rotation tests move from
+`basis_reference_quality` to `basis_contract` with it as their citation, and the
+begin-after-expiry case becomes worth splitting out as a test of its own.
 
 ---
 
@@ -411,7 +547,10 @@ platform, not a change this repository can make.**
   mostly *restatements* — this harness's copy of a rule, checked against itself. Nobody
   runs this suite against the orchestrator, so a change there cannot turn these red by
   itself. The verbatim citation check is the closest thing to a tripwire, and it only runs
-  where the sources are present. Two tests really do exercise the mechanism with real
+  where the sources are present — **it fired for the first time this round**, on a rule
+  the platform reworded while the baseline was being measured (see "The check earned itself
+  this round"). It catches a rule whose WORDS changed; a rule whose words stayed and whose
+  behaviour changed would still pass. Two tests really do exercise the mechanism with real
   containers: the bind-mounted-file test and the 0700-permissions test.
 * **Generation fencing.** That a superseded runner physically cannot write into the live
   attempt's directory is a property of the staging prefix and the upload policy, not of the
@@ -429,6 +568,47 @@ platform, not a change this repository can make.**
 ## The harness's own bugs, found and fixed
 
 ### This round
+
+**The cancellation ledger was read before the interrupted upload had settled.** The test
+that asks whether a stopped step accounts for what it left behind held the *second* upload
+open for twelve seconds, signalled the container, and then read the store immediately. But
+this store — like a real one — has the whole body in hand before it answers: the object is
+committed and the acknowledgement goes to a socket nobody is reading any more. So the
+reading taken at the instant the container died was **not** the state collection would
+eventually see. Measured directly, with a container killed the moment its second upload
+arrived:
+
+```
+ledger read the instant the container died : ['outputs/one.csv']
+ledger once the store went quiet           : ['outputs/one.csv', 'outputs/two.csv']
+objects that landed AFTER the old snapshot : ['outputs/two.csv']
+```
+
+A step that wrote a marker naming only the first object would have **passed** that test and
+left the second one stranded — precisely the outcome the test exists to catch, because
+salvage publishes exactly what a marker names and nothing else. Every request is now on an
+in-flight ledger, `Endpoint.settle()` blocks until it is empty, and the cancellation test
+reads the store only afterwards. Neither remedy is prescribed: a step may drain what it
+started and inventory it, or ensure nothing it did not account for is left behind. (Naming
+an object that turns out to be absent is safe on the platform's side — salvage is
+"best-effort about OBJECTS" and drops one it cannot verify. An object nobody named is never
+looked at at all.)
+
+**An upload was authorized against the clock at the END of its body, not the start.** The
+store stamped a POST's arrival after reading and parsing the whole multipart body, so a
+credential that expired *while the bytes were still on the wire* refused an upload that had
+begun inside its lifetime. That is the revocation model this harness spent the previous
+round removing, surviving in the one place nobody looked. The self-test that was supposed
+to cover it did not: it delayed the request with a hook, and hooks run *after* the body has
+been read — it proved that a delay after arrival changes nothing, which was never in
+question, and it carried a `basis_contract` citation about credentials expiring, which says
+nothing about when a store authorizes. Arrival is now stamped before the first byte of the
+body is read; the self-test sends a body in two halves across the expiry instant over a raw
+socket; and it is labelled `basis_our_policy`, because **when a store authorizes is a fact
+about S3 and no orchestrator source states it**. Reverting the stamp turns that test red, on
+the assertion that the credential was still live when the request arrived.
+
+### The round before
 
 **`docker stop`'s return code was discarded.** A failed stop returns in a fraction of a
 second having done nothing — which reads to a cancellation test as a step that shut down
@@ -459,10 +639,17 @@ flight, which makes the fresh file strictly older than anything the step can do 
 response. A test that randomly fails the right answer is worse than no test.
 
 **One cancellation test was vacuous for the property in its name.** "Everything that
-landed is inventoried" compared an empty set against the marker: the store records an
-upload when it answers, not when the bytes arrive, so with a single input nothing had
-landed at the moment the step was signalled. It now uses two inputs and holds the *second*
-upload, so one acknowledged object is on the ledger — and it asserts that there is one.
+landed is inventoried" compared an empty set against the marker: with a single input,
+nothing had been recorded at the moment the step was signalled. It now uses two inputs and
+holds the *second* upload, so one object is genuinely on the ledger.
+
+The explanation written down at the time was **wrong**, and it is worth leaving the
+correction here rather than quietly editing it: the note said the store "records an upload
+when it answers, not when the bytes arrive". It does not. It records the upload once the
+body has arrived and the policy allows it, and answers *afterwards* — which is what a real
+store does, and which is exactly why the object still lands when the client has already
+been killed. Believing the tidier version is what left the next round's bug in place for a
+round.
 
 **A citation could name a file and quote nothing.** Described above.
 

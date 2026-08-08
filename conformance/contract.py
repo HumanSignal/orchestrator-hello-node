@@ -34,9 +34,11 @@ The rules, in one place:
   a considered "never retry me".
 * A sha256 is exactly 64 lowercase hex characters, with no ``sha256:`` prefix and no
   trailing newline.
-* A relpath is relative and canonical: no leading ``/``, no backslash, no line break,
-  no ``.`` or ``..`` component, and no empty component (so ``a//b`` and a trailing
-  ``/`` are both refused).
+* A relpath is relative and canonical: no leading ``/``, no backslash, **no control
+  character at all**, no ``.`` or ``..`` component, and no empty component (so ``a//b``
+  and a trailing ``/`` are both refused). A relpath and an output-port name are
+  IDENTIFIERS, so they are refused rather than cleaned — a cleaned one would quietly
+  name a different file, or match a different declared port.
 * ``schema_version`` may be OMITTED — it defaults to 1. If present it must be a real
   integer: ``true`` is refused even though Python would call it equal to 1, and so are
   ``1.0`` and ``"1"``. A version this build has no parser for is refused by number.
@@ -124,6 +126,14 @@ CREDENTIALS_FILE_MODE = 0o600
 
 SHA256_PATTERN = re.compile(r'[0-9a-f]{64}')
 
+#: Every C0 control character, tab and newline included. A relpath and a port name are
+#: identifiers, and there is no reading of a tab inside one that is layout somebody meant.
+#: The platform refuses names on exactly this set (``external/text.py``
+#: ``ANY_CONTROL_CHARACTER``); it generalised the older "no line break" rule when U+0000
+#: turned out to be worse than a forged digest listing — no filesystem can hold it in a
+#: name, so such a relpath cannot name a file that exists.
+CONTROL_CHARACTER = re.compile(r'[\x00-\x1f]')
+
 #: Contract versions this harness can read. The real gate lives in
 #: ``external/versioning.py``; the shape of it — default to 1 when unstamped, refuse a
 #: non-integer, refuse an integer with no parser — is what is re-stated here.
@@ -156,13 +166,29 @@ def check_relpath(value: object, where: str) -> str:
         raise ContractViolation(f'{where}: relpath {value!r} must be relative, not absolute')
     if '\\' in value:
         raise ContractViolation(f'{where}: relpath {value!r} must use "/" separators, not "\\"')
-    if '\n' in value or '\r' in value:
-        raise ContractViolation(f'{where}: relpath {value!r} must not contain a line break')
+    if CONTROL_CHARACTER.search(value):
+        raise ContractViolation(f'{where}: relpath {value!r} must not contain a control character')
     parts = value.split('/')
     if any(part in ('.', '..') for part in parts):
         raise ContractViolation(f'{where}: relpath {value!r} must not contain "." or ".." components')
     if any(part == '' for part in parts):
         raise ContractViolation(f'{where}: relpath {value!r} must not contain an empty path component')
+    return value
+
+
+def check_port_name(value: object, where: str) -> str:
+    """A port name is an identifier twice over, so it is refused rather than cleaned.
+
+    A downstream step selects its input by matching this string, and collection stores it
+    on the delivered artifact as its ``payload_kind`` — so a cleaned name might match a
+    DIFFERENT declared port, and handing the next step somebody else's file is worse than
+    handing it nothing. A NUL is additionally unstorable: the artifact list lands in a
+    Postgres ``jsonb`` column, which refuses the whole statement over that character.
+    """
+    if not isinstance(value, str) or not value.strip():
+        raise ContractViolation(f'{where}: an output port name must not be empty or whitespace-only, got {value!r}')
+    if CONTROL_CHARACTER.search(value):
+        raise ContractViolation(f'{where}: output port name {value!r} must not contain control characters')
     return value
 
 
@@ -294,6 +320,7 @@ def validate_marker(document: object, *, raw_bytes: bytes | None = None) -> dict
         raise ContractViolation(f'marker.produced_ports must be an object, got {type(ports).__name__}')
     known = {obj['relpath'] for obj in objects}
     for port, relpaths in ports.items():
+        check_port_name(port, 'marker.produced_ports')
         if not isinstance(relpaths, list):
             raise ContractViolation(f'produced_ports[{port!r}] must be a list, got {type(relpaths).__name__}')
         seen: set[str] = set()

@@ -14,8 +14,15 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import re
 
 from conformance.contract import INJECTED_ENV, PROGRESS_PREFIX
+
+#: Every C0 control character EXCEPT tab and newline — what the platform takes out of the
+#: PROSE it carries (``external/text.py`` ``CONTROL_CHARACTERS``). Tab and newline stay:
+#: they are layout somebody meant. Note the deliberate difference from a NAME, which is
+#: refused rather than cleaned on the whole of C0 — see ``conformance.contract``.
+CONTROL_CHARACTERS_IN_PROSE = re.compile(r'[\x00-\x08\x0b-\x1f]')
 
 
 class EnvRefused(Exception):
@@ -75,7 +82,13 @@ def absorb_progress(line: str) -> dict | None:
     A MALFORMED progress line is not consumed: it goes to the log as ordinary output,
     where its author can see what they wrote. Swallowing it would make a typo look
     identical to a step that simply reports no progress. ``fraction`` must be a number
-    between 0 and 1 inclusive; ``phase`` is optional and truncated to 64 characters.
+    between 0 and 1 inclusive; ``phase`` is optional, has its control characters DROPPED,
+    and is then truncated to 64 characters.
+
+    The scrub is not cosmetic and it is not ours: the phase travels in the heartbeat,
+    which is the request that renews the lease, and the server's field refuses control
+    characters. A refusal there fails the whole heartbeat — so a step emitting such a
+    phase every interval never renews its lease, and the execution is parked for ever.
     """
     if not line.startswith(PROGRESS_PREFIX):
         return None
@@ -86,7 +99,8 @@ def absorb_progress(line: str) -> dict | None:
         return None
     if not 0.0 <= fraction <= 1.0:
         return None
-    return {'fraction': fraction, 'phase': str(payload.get('phase') or '')[:64]}
+    phase = CONTROL_CHARACTERS_IN_PROSE.sub('', str(payload.get('phase') or ''))
+    return {'fraction': fraction, 'phase': phase[:64]}
 
 
 def split_log(lines: list[str]) -> tuple[list[str], list[dict]]:

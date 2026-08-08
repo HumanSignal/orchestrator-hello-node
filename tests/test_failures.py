@@ -233,13 +233,19 @@ def test_what_a_failed_run_already_produced_is_still_salvageable(make_job):
     """A failure after a successful upload must not throw that upload away.
 
     Setup:    three inputs; the SECOND is served with bytes that do not match its pin,
-              so the step fails after it has already copied the first one.
+              so a step that works through them in order fails after it has already
+              copied the first one.
     Action:   run.
-    Validate: **if** the step wrote a marker, its inventory names what really landed —
-              the first output — so collection can salvage and publish it.
+    Validate: **if** anything landed, and **if** the step wrote a marker, that marker's
+              inventory names what landed — so collection can salvage and publish it.
 
-    The condition matters: no rule requires a failed step to write a marker. What the
-    rule requires is that a marker's ``objects`` be "every object produced", so an
+    Both conditions matter, and the first is not a formality. A step that verifies every
+    input BEFORE it produces anything fails this job having written nothing, and there is
+    then no object an inventory could be omitting: the rule has nothing to constrain, so
+    this skips. Requiring something to have landed would be requiring this node to keep
+    its current order of work, which no rule asks of it. The second condition is the
+    familiar one: no rule requires a failed step to write a marker at all. What the rule
+    does require is that a marker's ``objects`` be "every object produced", so an
     inventory that omits something the step really wrote is a document contradicting its
     own definition.
 
@@ -260,8 +266,13 @@ def test_what_a_failed_run_already_produced_is_still_salvageable(make_job):
     assert result.exit_code != 0, 'the run was supposed to fail'
 
     landed = [key for key in job.endpoint.keys_in_order() if key.startswith('outputs/')]
-    assert landed, 'nothing was uploaded before the failure, so this test proves nothing'
-
+    if not landed:
+        pytest.skip(
+            'nothing had been uploaded when the run failed, so there is no produced object an inventory '
+            'could be omitting. A step that verifies all of its inputs before it writes anything reaches '
+            'this state legitimately, and the rule this test restates constrains an inventory of objects '
+            'that exist — not the order a step chooses to work in'
+        )
     inventoried = {obj['relpath'] for obj in _marker_if_the_step_wrote_one(job)['objects']}
     assert set(landed) <= inventoried, (
         f'{sorted(set(landed) - inventoried)} were uploaded and then abandoned: the failure marker '

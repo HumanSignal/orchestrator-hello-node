@@ -41,6 +41,8 @@ from __future__ import annotations
 
 import time
 
+import pytest
+
 from conformance import contract, docker
 from conformance.fakes3 import delay_when, matching
 from conformance.job import InputSpec
@@ -103,17 +105,25 @@ def test_a_step_stopped_during_an_upload_inventories_what_it_left_behind(make_jo
     """Setup:    TWO inputs, with the store holding the SECOND upload open for twelve
               seconds — so the first output has genuinely landed and been acknowledged
               before anything is signalled.
-    Action:   wait until the second upload has arrived, then stop the container.
-    Validate: it stops inside the grace, does not claim success, and the marker it leaves
-              inventories every object that actually landed.
+    Action:   wait until the second upload has arrived, stop the container, then **wait
+              for the store to finish everything it is still holding**.
+    Validate: it stops inside the grace, does not claim success, and no object the store
+              ends up holding is missing from the marker the step left.
 
-    **Two inputs, and that is the whole design of this test.** With one, the object whose
-    upload is being held has not been recorded yet — this store, like a real one, records
-    an upload when it answers, not when the bytes arrive — so "everything that landed is
-    inventoried" would compare an empty set against whatever the marker says and be true
-    however the step behaved. It failed today only because of the assertions above it.
-    Holding the SECOND upload puts one acknowledged object on the ledger, which is what
-    the step then has to account for.
+    **The store is read only after it settles, and that is the whole design of this
+    test.** The reading that matters is the one the COLLECTOR will take, and that is not
+    the state of the store at the instant the container died. A body that has fully
+    arrived is committed and answered afterwards; killing the client in between does not
+    un-write the object, it only means nobody hears the acknowledgement. Snapshotting
+    immediately would let a step write a marker naming the first object, exit, and leave
+    the second landing a moment later — unnamed, therefore never published, which is
+    exactly the outcome this test exists to catch. ``Endpoint.settle`` closes that window.
+
+    **Two remedies, neither of them prescribed.** A step may drain what it has already
+    started and inventory it, or it may make sure nothing it did not account for is left
+    behind. Naming an object that turns out not to be there is safe on the platform's
+    side: ``_salvage_what_the_step_produced`` is "best-effort about OBJECTS" and drops one
+    it cannot verify, while an object nobody named is never looked at at all.
 
     Cancelling during a write is the harder half: the step has produced something, so the
     marker it leaves is not merely a status — it is the inventory that decides whether
@@ -129,11 +139,17 @@ def test_a_step_stopped_during_an_upload_inventories_what_it_left_behind(make_jo
     result = container.collect()
 
     _assert_stopped_cleanly(job, result, grace_used)
-    landed = [key for key in job.endpoint.keys_in_order() if key.startswith('outputs/')]
-    assert landed, (
-        'no upload had been acknowledged when the step stopped, so there is nothing an inventory could '
-        'be missing and this test would prove nothing'
+    assert job.endpoint.settle(timeout=HELD_OPEN_SECONDS + docker.STOP_GRACE_SECONDS), (
+        'the store was still handling a request when this test gave up waiting for it, so the objects it '
+        'holds are still changing and nothing read from it now is the state collection would see'
     )
+    landed = [key for key in job.endpoint.keys_in_order() if key.startswith('outputs/')]
+    if not landed:
+        pytest.skip(
+            'the step left no output object behind at all, so there is nothing an inventory could be '
+            'missing — a step that abandons an unfinished transfer rather than accounting for it has '
+            'answered this question the other legal way'
+        )
     uploaded = job.endpoint.keys_in_order()
     assert contract.MARKER_FILENAME in uploaded, (
         f'the step left no marker at all, so the {len(landed)} object(s) it had already written are '
@@ -141,8 +157,8 @@ def test_a_step_stopped_during_an_upload_inventories_what_it_left_behind(make_jo
     )
     inventoried = {obj['relpath'] for obj in job.marker()['objects']}
     assert set(landed) <= inventoried, (
-        f'{sorted(set(landed) - inventoried)} landed before the step stopped but its marker does not '
-        f'inventory them, so salvage will publish none of them'
+        f'{sorted(set(landed) - inventoried)} are in the store and not in the marker the step left, so '
+        f'salvage will publish none of them'
     )
 
 
@@ -217,8 +233,9 @@ def _wait_for_upload_number(job, wanted: int, timeout: float = 60.0) -> bool:
 
     ``Endpoint.wait_for`` answers "has any upload arrived yet?" and stays answered, which
     is not the question when a test needs to signal the container during a specific one.
-    The counter is stamped when the request arrives, before any hook runs, so this
-    returns while the upload is still in flight.
+    The counter is stamped once the body has been read and before any hook runs — so this
+    returns while the upload is still in flight, with the bytes already at the store and
+    the answer not yet sent, which is the moment worth interrupting.
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:

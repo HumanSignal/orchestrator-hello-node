@@ -39,6 +39,26 @@ then a test requiring a marker to EXIST is not resting on it. When in doubt, dem
 have taken the contract-labelled count from 23 to 10 to 6; each fall was a correction, not
 a regression. See the top of `CONFORMANCE-BASELINE.md`.
 
+**And a test asserts the PROHIBITION, never the remedy.** Write "this run must not exhibit
+the prohibited outcome" and let every other outcome pass. The moment a test adds "and it
+must exit 0", or "and this optional document must exist", it has stopped describing the
+contract and started describing one particular conforming implementation — so the next
+person's **correct** fix goes red for the wrong reason, and the obvious response to a red
+test that should be green is to weaken the code until it passes. Two questions catch it:
+
+* *is there a conforming implementation that would fail this?* Refusing a job it cannot do
+  safely, failing loudly instead of writing a document, checking every input before
+  producing anything — all conformant, and all of them broke assertions here.
+* *is the premise something a plausible fix could legitimately make false?* If so it is a
+  condition (`pytest.skip`, saying which legal choice the step made), not a failure. If
+  only a node that does nothing at all could make it false, it is a premise and stays an
+  assertion — otherwise this reasoning empties the suite, since the contract requires no
+  step to produce anything.
+
+When the rule is about a difference — *"adding a field is not a breaking change"* — run
+the job both ways and compare. Asserting that the second run succeeds smuggles in a
+requirement nobody wrote.
+
 If a test you expected to fail passes, that is not a test to adjust — it is either a bug
 in the harness or a mistake in the analysis, and which one it is matters.
 
@@ -78,7 +98,7 @@ mechanism, with real containers: the bind-mounted-file test and the 0700-permiss
 |---|---|
 | `contract.py` | The wire contract, **re-implemented from the specification**, not vendored from the orchestrator. A harness that shares code with the system it judges inherits that system's bugs and stops being able to see them. The price is drift, which is why `fixtures/` exists. |
 | `fixtures/` | The orchestrator's three frozen golden version-1 documents, copied byte for byte. Validating them is the one *measurement* that `contract.py` still agrees with the real parser. |
-| `fakes3.py` | The fake object store: presigned-style GETs, presigned-POST uploads with the whole signed form checked, one key prefix, arrival order recorded, credentials that expire. See its module docstring for where it is stricter than S3 and where it now matches it exactly. |
+| `fakes3.py` | The fake object store: presigned-style GETs, presigned-POST uploads with the whole signed form checked, one key prefix, arrival order recorded, credentials that expire, and an in-flight ledger so a test can wait for the store to finish (`settle()`) instead of reading it mid-request. See its module docstring for where it is stricter than S3 and where it now matches it exactly. |
 | `job.py` | One synthetic job: the credential envelope, `invocation.json`, the credentials directory, and the atomic `os.replace` swap that models a refresh. |
 | `docker.py` | Container lifecycle through the `docker` CLI — the one interface that is unarguably outside the node. A container that has not exited reports **no** exit code, never docker's misleading `0`. |
 | `platform_rules.py` | Rules that belong to the agent, written down so they are executable: the environment merge and its allowlist, exit-code classification, progress-line absorption. |
@@ -103,10 +123,20 @@ markers, the seams between adjacent Python string literals, and which quote char
 used. It reads the citations out of the test files with `ast`, not off the collected
 tests, so the answer does not get weaker when you narrow the selection.
 
+**Run it against the commit the node is deployed against.** It has now caught what it was
+built for: `origin/master` moved mid-round, one cited rule had been reworded, and the check
+named it within minutes. Three platform rules had drifted past this harness's own
+re-implementation (control characters in a relpath, in a port name, and in a progress
+phase) and all three are mirrored — see `CONFORMANCE-BASELINE.md`. Nothing else in this
+repository notices a platform change, so a green run with `LSPO_ORCHESTRATOR_SRC` unset
+proves nothing about drift.
+
 **What it cannot do**, and it is the important half: it establishes that the sentence
 exists, not that it SUPPORTS the assertion. Every over-claim corrected in this harness so
-far cited a real file and quoted a real sentence. That step stays with a reviewer; what
-the check buys is that the sentence is out in the open where a reader can weigh it.
+far cited a real file and quoted a real sentence — including one withdrawn this round,
+whose sentence was about credentials expiring and whose claim was about when a store
+authorizes a request. That step stays with a reviewer; what the check buys is that the
+sentence is out in the open where a reader can weigh it.
 
 ## Credentials: expiry, not revocation
 
@@ -116,9 +146,18 @@ in the mounted directory — but **issuing a new envelope does not revoke the ol
 Nothing can: a signature over a deadline cannot be taken back.
 
 This endpoint models exactly that. A credential is refused when its own expiry has passed,
-judged **once, at the moment the request ARRIVES** (as S3 authorizes a request when it
-receives it), never merely because a newer one exists, and never after the request has
-already been accepted. Two moments are modelled, and they are not interchangeable:
+judged **once, when the request's HEADERS arrive — before its body has been read**, as S3
+authorizes the request it receives rather than re-checking a large upload on the way out.
+Never merely because a newer credential exists, and never after the request has already
+been accepted. That last detail is not a nicety: this store used to stamp a POST's arrival
+*after* parsing its whole body, so a credential expiring while the bytes were still on the
+wire refused an upload that began inside its lifetime — revocation in expiry's clothes,
+surviving in the one place the self-test could not look, because a hook runs after the body
+too. It is proven now by sending a body in two halves across the expiry instant. **When a
+store authorizes is a fact about S3, not a platform rule** — no orchestrator source states
+it — so that self-test is labelled `basis_our_policy`, not `basis_contract`.
+
+Two moments are modelled, and they are not interchangeable:
 
 * an envelope that **runs out** while the step is working — the file on disk has been
   refreshed, the copy in the step's memory has not;

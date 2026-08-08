@@ -258,22 +258,63 @@ def test_one_relpath_cannot_be_inventoried_twice():
     'external/contract.py check_relpath: "no . or .. components. Traversal is the one that really '
     'matters: ../../etc/x in a marker would otherwise ask a reader to fetch, or a writer to overwrite, '
     'a file outside the run." — plus the empty-component rule, because "two spellings of one path would '
-    'be two inventory entries for one file".'
+    'be two inventory entries for one file", and the whole of C0: "no CONTROL CHARACTER, which '
+    'generalises the old \'no line break\' rule to the whole of C0", since "U+0000 is worse than that — '
+    'no filesystem can hold it in a name, so such a relpath cannot name a file that exists".'
 )
 @pytest.mark.parametrize(
     'relpath',
-    ['/absolute.csv', 'a\\b.csv', 'a//b.csv', 'trailing/', '../escape.csv', './here.csv', 'line\nbreak.csv', ''],
+    [
+        '/absolute.csv',
+        'a\\b.csv',
+        'a//b.csv',
+        'trailing/',
+        '../escape.csv',
+        './here.csv',
+        'line\nbreak.csv',
+        'nul\x00byte.csv',
+        'tab\tinside.csv',
+        '',
+    ],
 )
 def test_relpaths_that_cannot_be_resolved_are_refused(relpath):
     """A relpath is resolved against a staging prefix by whoever reads it.
 
     Setup:    each spelling that is ambiguous, non-relative, or able to point outside
-              the prefix.
+              the prefix — including the two the platform added when it generalised its
+              line-break rule to every control character.
     Action:   validate it.
     Validate: refused.
+
+    Refused, never cleaned, and that asymmetry is the point: a relpath is an IDENTIFIER,
+    so a cleaned one would quietly name a different file. Free-form text in the same
+    document (an ``error`` message, a progress phase) is cleaned instead, because nothing
+    resolves anything by it.
     """
     with pytest.raises(contract.ContractViolation):
         contract.check_relpath(relpath, 'test')
+
+
+@subject_is_platform
+@traces_to(
+    'external/contract.py check_port_name: "A port name is an IDENTIFIER twice over: a downstream step '
+    'selects its input by matching this string, and collection stores it on the delivered artifact as '
+    'its payload_kind. So it is refused rather than cleaned … a cleaned name might match a DIFFERENT '
+    'declared port, and handing the next step somebody else\'s file is worse than handing it nothing. A '
+    'NUL in one is additionally unstorable: the artifact list lands in a Postgres jsonb column, which '
+    'refuses the whole statement over that character."'
+)
+@pytest.mark.parametrize('port', ['', '   ', 'out\x00put', 'out\nput'])
+def test_an_output_port_name_that_is_not_a_name_is_refused(port):
+    """Setup: a marker delivering a file on a port whose name is empty, blank or carries
+    a control character. Action: validate. Validate: refused.
+
+    New on the platform's side, and mirrored here because a harness whose parser is laxer
+    than the real one blesses documents production would reject.
+    """
+    marker = _marker(objects=[_object('outputs/a.csv')], produced_ports={port: ['outputs/a.csv']})
+    with pytest.raises(contract.ContractViolation, match='port name'):
+        contract.validate_marker(marker)
 
 
 @subject_is_platform

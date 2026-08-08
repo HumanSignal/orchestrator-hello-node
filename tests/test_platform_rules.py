@@ -128,8 +128,11 @@ def test_a_variable_outside_the_allowlist_fails_the_job_rather_than_being_skippe
 @subject_is_platform
 @traces_to(
     'agent/logbuf.py _absorb_progress: prefix "@lspo:progress " (with the trailing space), '
-    '"fraction = float(payload[\'fraction\'])", "if not 0.0 <= fraction <= 1.0: return False", and '
-    'phase "str(payload.get(\'phase\') or \'\')[:64]".'
+    '"fraction = float(payload[\'fraction\'])", "if not 0.0 <= fraction <= 1.0: return False", and a '
+    'phase that is CLEANED before it is truncated — "phase = without_control_characters('
+    'str(payload.get(\'phase\') or \'\'))" then "self._progress = {\'fraction\': fraction, \'phase\': '
+    'phase[:64]}", because "the phase … travels in the heartbeat — the request that RENEWS THE LEASE. '
+    'The server\'s field refuses control characters, and a refusal there fails the whole heartbeat".'
 )
 @pytest.mark.parametrize(
     ('line', 'expected'),
@@ -137,6 +140,11 @@ def test_a_variable_outside_the_allowlist_fails_the_job_rather_than_being_skippe
         ('@lspo:progress {"fraction": 0.4, "phase": "encoding"}', {'fraction': 0.4, 'phase': 'encoding'}),
         ('@lspo:progress {"fraction": 1}', {'fraction': 1.0, 'phase': ''}),
         ('@lspo:progress {"fraction": 0}', {'fraction': 0.0, 'phase': ''}),
+        # A phase carrying the byte a Postgres row cannot hold: dropped, not replaced and
+        # not a reason to refuse the sample — the line is prose, not an identifier.
+        ('@lspo:progress {"fraction": 0.5, "phase": "enc\\u0000od\\u0007ing"}', {'fraction': 0.5, 'phase': 'encoding'}),
+        # Tab and newline are layout somebody meant, and they stay.
+        ('@lspo:progress {"fraction": 0.5, "phase": "a\\tb"}', {'fraction': 0.5, 'phase': 'a\tb'}),
     ],
 )
 def test_a_well_formed_progress_line_is_consumed(line, expected):
@@ -144,6 +152,11 @@ def test_a_well_formed_progress_line_is_consumed(line, expected):
 
     It is consumed rather than logged because it is instrumentation, not output: it goes
     to the Runs UI on the next heartbeat instead of into the log.
+
+    The last two cases are the rule this harness was BEHIND until the citation check
+    caught it: the agent now drops control characters from the phase before truncating
+    it, because that string travels in the heartbeat that renews the lease and a server
+    that refuses the field fails the whole heartbeat.
     """
     assert platform_rules.absorb_progress(line) == expected
 

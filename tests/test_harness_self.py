@@ -9,8 +9,10 @@ These tests hold the harness to the claims the rest of the suite leans on:
 
 * the prefix fence, the POST policy and the credential check really refuse;
 * a credential expires when it says it will — and, crucially, does NOT die merely
-  because a newer one was issued, nor after its request has already been accepted;
+  because a newer one was issued, nor because its body took longer to arrive than it
+  had left to live;
 * a fresh envelope really replaces the file, atomically, and a reader really sees it;
+* the store knows what it has not finished, and says so until it has;
 * the order objects arrive in is really arrival order, and a re-upload really wins;
 * a container that never exits is reported as a container that never exited, and a
   container that has vanished is never reported as a result at all;
@@ -27,12 +29,15 @@ import hashlib
 import json
 import os
 import pathlib
+import socket
+import threading
+import time
 
 import pytest
 import requests
 
 from conformance import citations, contract, docker
-from conformance.fakes3 import Blob, Endpoint
+from conformance.fakes3 import Blob, Endpoint, delay_when, matching
 from conformance.job import InputSpec, Job
 from conformance.markers import harness_self_test, our_policy, traces_to
 
@@ -61,6 +66,55 @@ def post(store: Endpoint, token: str, key: str, data: bytes, *, drop: tuple[str,
     fields = {name: value for name, value in policy['fields'].items() if name not in drop}
     fields['key'] = key
     return requests.post(policy['url'], data=fields, files={'file': ('part', data)}, timeout=30)
+
+
+def post_in_two_halves(store: Endpoint, token: str, key: str, data: bytes, *, pause_s: float) -> int:
+    """POST over a raw socket, pausing in the MIDDLE of the body. Returns the status.
+
+    Neither ``requests`` nor the endpoint's hooks can express this. ``requests`` sends a
+    body as fast as the socket takes it, and a hook runs only once the whole body has
+    been read — so the one thing that matters here, time passing WHILE the bytes are
+    arriving, is unreachable through either. Hence the hand-built multipart body and the
+    bare socket.
+    """
+    policy = store.post_policy(LOCALHOST, token, PREFIX)
+    fields = dict(policy['fields'])
+    fields['key'] = key
+    body, content_type = _multipart_body(fields, data)
+    head = (
+        f'POST /upload HTTP/1.1\r\nHost: {LOCALHOST}:{store.port}\r\n'
+        f'Content-Type: {content_type}\r\nContent-Length: {len(body)}\r\nConnection: close\r\n\r\n'
+    ).encode('utf-8')
+    middle = len(body) // 2
+    with socket.create_connection((LOCALHOST, store.port), timeout=60) as sock:
+        sock.sendall(head + body[:middle])
+        time.sleep(pause_s)
+        sock.sendall(body[middle:])
+        answer = b''
+        while True:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            answer += chunk
+    assert answer.startswith(b'HTTP/'), f'the store never answered the slow upload; it said {answer!r}'
+    return int(answer.split()[1])
+
+
+def _multipart_body(fields: dict[str, str], data: bytes) -> tuple[bytes, str]:
+    """A ``multipart/form-data`` body built by hand, so a test can send it in pieces."""
+    boundary = 'conformance-boundary'
+    parts = [
+        f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode('utf-8')
+        for name, value in fields.items()
+    ]
+    parts.append(
+        f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="part"\r\n'
+        f'Content-Type: application/octet-stream\r\n\r\n'.encode('utf-8')
+        + data
+        + b'\r\n'
+    )
+    parts.append(f'--{boundary}--\r\n'.encode('utf-8'))
+    return b''.join(parts), f'multipart/form-data; boundary={boundary}'
 
 
 @harness_self_test
@@ -165,37 +219,73 @@ def test_a_credential_expires_but_is_not_revoked_by_a_newer_one(endpoint):
 
 
 @harness_self_test
-@traces_to(
-    'runners/credentials.py: the envelope carries "one presigned POST policy that admits uploads under '
-    'this launch\'s generation prefix and nowhere else" and "the moment all of that stops working". '
-    'Nothing in it, and nothing in agent/creds.py, un-authorizes a request that was already accepted — '
-    'so this store must not either, and this proves it does not.'
+@our_policy(
+    'WHEN a store authorizes a request is a property of S3, and no orchestrator source describes it — so '
+    'this is a modelling choice of this harness, and labelling it as a contract rule (which the previous '
+    'version of this test did, under a citation about credentials EXPIRING) claimed an authority that '
+    'does not exist. The choice: a presigned request is authorized ONCE, when it arrives, before its body '
+    'has been read — which is what S3 does with the signature and policy in the request it receives. '
+    'Judging expiry after the last byte instead un-authorizes a transfer that was legitimate when it '
+    'began, and every rotation test built on that would be demanding a step retry a transfer nothing on '
+    'the platform asks it to retry. ' + _INSTRUMENT
 )
-def test_an_accepted_request_is_never_refused_afterwards(endpoint):
-    """The revocation model, gone for good, proven rather than asserted in a comment.
+def test_a_credential_that_expires_while_the_bytes_arrive_still_uploads(endpoint):
+    """Expiry DURING an upload, proven by sending the body across the expiry instant.
 
-    Setup:    a credential that expires DURING an upload — one second of life, and a hook
-              that holds the request open for two before the store answers.
-    Action:   post.
-    Validate: accepted. The credential was live when the request arrived, and an issuer
-              cannot take a signature back once it is in flight.
+    Setup:    a credential good for one second, and a POST whose body is sent in two
+              halves with a two-and-a-half second pause in the middle — so the credential
+              is alive when the request line arrives and long dead before the last byte.
+    Action:   post, slowly, over a raw socket.
+    Validate: accepted and recorded — and, so this cannot pass for the wrong reason, that
+              the credential really was live on arrival and really is dead now.
 
-    The version of this endpoint before this round could express the opposite: a hook
-    could set an expiry to minus infinity after the body had been read, and the request
-    was authorized a second time on the way out. That is revocation, production has no
-    way to produce it, and a rotation test built on it demanded that a step retry a
-    transfer the store had already taken.
+    **This test found a bug in this store, which is the reason it is written this way.**
+    The version before it held the request open with a HOOK, and hooks run only after the
+    whole multipart body has been read and parsed: it proved that a delay AFTER arrival
+    changes nothing, which was never in question, while the store was in fact stamping a
+    POST's arrival after its body — so a credential expiring mid-upload refused a transfer
+    that had begun inside its lifetime. Sending the body itself across the expiry is the
+    only way to ask the question the name claims to ask.
     """
-    from conformance.fakes3 import delay_when, matching
-
     token = endpoint.mint(ttl_s=1.0)
-    endpoint.hooks.on_request.append(delay_when(matching('upload', index=1), 2.0))
 
-    response = post(endpoint, token, PREFIX + 'outputs/a.csv', b'x')
+    status = post_in_two_halves(endpoint, token, PREFIX + 'outputs/a.csv', b'x' * 64, pause_s=2.5)
 
-    assert response.status_code == 204, response.text
+    arrived_at = endpoint.requests[-1].arrived_at
+    assert endpoint.is_live(token, at=arrived_at), 'the credential had already expired when the request arrived'
+    assert not endpoint.is_live(token), 'the credential was supposed to expire while the body was arriving'
+    assert status == 204, f'the store refused an upload that began inside its credential\'s life: HTTP {status}'
     assert endpoint.uploaded('outputs/a.csv') is not None
-    assert not endpoint.is_live(token), 'the credential was supposed to have expired by now'
+
+
+@harness_self_test
+@our_policy(
+    'A cancellation test reads this store only once settle() calls it quiet, and if settle() answered '
+    'early that test would be back to the racy snapshot it was rebuilt to stop being — passing a step '
+    'that wrote its inventory and left an object landing behind it. This is exactly the kind of helper '
+    'that looks obviously right and can be silently wrong, so it is measured. ' + _INSTRUMENT
+)
+def test_the_store_calls_itself_busy_until_what_it_holds_is_answered(endpoint):
+    """Setup:    an upload the store holds open for two seconds, posted from a thread.
+    Action:   ask the store to settle, first with too short a deadline and then with a
+              long enough one.
+    Validate: the short call reports it is still busy; the long one waits out the upload
+              and reports quiet, with the object recorded by then.
+    """
+    token = endpoint.mint()
+    endpoint.hooks.on_request.append(delay_when(matching('upload', index=1), 2.0))
+    uploader = threading.Thread(
+        target=post, args=(endpoint, token, PREFIX + 'outputs/a.csv', b'held open'), daemon=True
+    )
+    uploader.start()
+    try:
+        assert endpoint.wait_for('upload', timeout=30), 'the upload never reached the store'
+
+        assert endpoint.settle(timeout=0.2) is False, 'settle answered while a request was still in flight'
+        assert endpoint.settle(timeout=30) is True, 'settle never saw the store go quiet'
+        assert endpoint.uploaded('outputs/a.csv') is not None, 'the store went quiet without recording the upload'
+    finally:
+        uploader.join(timeout=30)
 
 
 @harness_self_test

@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from conformance import contract, platform_rules
 from conformance.job import InputSpec
 from conformance.markers import (
@@ -70,23 +72,39 @@ def test_params_reach_the_step_unchanged(make_job, sample_input):
 def test_unknown_fields_in_the_manifest_are_ignored_not_rejected(make_job, sample_input):
     """A newer orchestrator adds keys to ``invocation.json``; an older image must not care.
 
-    Setup:    a manifest carrying fields that do not exist in this version of the contract.
-    Action:   run.
-    Validate: the step finishes normally.
+    Setup:    the SAME job twice — once with a plain manifest, once with a manifest
+              carrying two fields that do not exist in this version of the contract.
+    Action:   run both.
+    Validate: the extra fields changed nothing. Whatever the node does with this job, it
+              does the same thing with the fields present.
+
+    **Compared rather than asserted, because the rule is about a difference.** "Adding a
+    field is not a breaking change" is a statement about two runs, and a test that simply
+    required the second to exit 0 would be requiring this node to succeed — a demand the
+    contract never makes, and one that would fail an implementation which legitimately
+    refuses this job for some entirely unrelated reason.
 
     The manifest is one of the documents that rule is about — it is a contract model, and
     "adding one is not [a breaking change]" is a promise made to the reader of it. The
     credential envelope is NOT one of those models, which is why it has a test of its own
     below rather than sharing this citation.
     """
-    job = make_job(
+    plain = make_job(inputs=[sample_input]).run()
+    if plain.exit_code != 0:
+        pytest.skip(
+            f'this node does not complete an ordinary job (exit {plain.exit_code}), so comparing the two '
+            f'runs would be comparing two failures and would pass whatever the extra fields did'
+        )
+    extended = make_job(
         inputs=[sample_input],
         manifest_extra={'scheduling_class': 'batch', 'tenant': {'id': 4}},
-    )
-    result = job.run()
+    ).run()
 
-    assert result.exit_code == 0, result.output
-    assert job.marker()['status'] == 'succeeded'
+    assert extended.exit_code == plain.exit_code, (
+        f'the same job exited {plain.exit_code} with a plain manifest and {extended.exit_code} with two '
+        f'unknown fields added to it, so adding a field to the manifest IS a breaking change for this '
+        f'node:\n{extended.output}'
+    )
 
 
 @conforms_today
@@ -101,19 +119,31 @@ def test_unknown_fields_in_the_manifest_are_ignored_not_rejected(make_job, sampl
     'the envelope first, where the oldest customer images will see it.'
 )
 def test_unknown_fields_in_the_credential_envelope_are_ignored_not_rejected(make_job, sample_input):
-    """Setup:    an envelope, and every input entry inside it, carrying invented fields.
-    Action:   run.
-    Validate: the step finishes normally.
+    """Setup:    the same job twice — once ordinary, once with an envelope, and every
+              input entry inside it, carrying invented fields.
+    Action:   run both.
+    Validate: the extra fields changed nothing.
+
+    Compared rather than asserted, for the reason given on the manifest test above: the
+    expectation is that adding a key makes no difference, and "the run succeeds" is a
+    different and stronger claim than the one being made.
     """
-    job = make_job(
+    plain = make_job(inputs=[sample_input]).run()
+    if plain.exit_code != 0:
+        pytest.skip(
+            f'this node does not complete an ordinary job (exit {plain.exit_code}); two failures compared '
+            f'against each other would agree no matter what the extra keys did'
+        )
+    extended = make_job(
         inputs=[sample_input],
         envelope_extra={'issued_by': 'a newer orchestrator', 'refresh_hint_s': 300},
         input_extra={'content_type': 'text/csv', 'etag': 'W/"abc"'},
-    )
-    result = job.run()
+    ).run()
 
-    assert result.exit_code == 0, result.output
-    assert job.marker()['status'] == 'succeeded'
+    assert extended.exit_code == plain.exit_code, (
+        f'the same job exited {plain.exit_code} with an ordinary envelope and {extended.exit_code} with '
+        f'unknown keys added to it and to its input entries:\n{extended.output}'
+    )
 
 
 @conforms_today
@@ -127,12 +157,16 @@ def test_the_result_document_has_the_shape_the_contract_declares(make_job, sampl
     contract result document — version 1, with ``metrics`` and ``summary`` objects.
 
     What is in those two objects is entirely the step's business; this asserts the shape
-    and nothing about the contents.
+    and nothing about the contents. A step that writes no result document at all breaks
+    no rule — the contract describes the document, it does not require one — so that case
+    skips rather than failing, and the exit code is not asserted: the shape rule binds a
+    document whenever one is written, whatever the run went on to do.
     """
     job = make_job(inputs=[sample_input])
-    result = job.run()
-    assert result.exit_code == 0, result.output
+    job.run()
 
+    if contract.RESULT_FILENAME not in job.endpoint.keys_in_order():
+        pytest.skip('the step wrote no result.json, which the contract permits — no document, no shape')
     raw = job.endpoint.body_of(contract.RESULT_FILENAME)
     document = contract.validate_result(json.loads(raw.decode('utf-8')), raw_bytes=raw)
     assert isinstance(document['metrics'], dict) and isinstance(document['summary'], dict)
@@ -153,7 +187,16 @@ def test_the_result_document_stays_under_its_ceiling(make_job, sample_input):
     Setup:    a job whose ``params`` are three megabytes — a large but entirely legal
               manifest, well inside the 8 MiB manifest ceiling.
     Action:   run.
-    Validate: the run succeeds and ``result.json`` is at most 1 MiB.
+    Validate: **no oversized ``result.json`` reaches the store.** That is the whole
+              assertion, and everything else about the run is deliberately left alone.
+
+    **Two conforming answers, neither of them required here.** Failing loudly rather than
+    writing the document is what the rule cited above describes wanting — *"bounding the
+    write makes a producer fail loudly at the point of the mistake"* — so the exit code is
+    not asserted. And ``result.json`` is optional: the contract describes the document, it
+    does not oblige anybody to produce one, so a run that writes none skips rather than
+    passes or fails. An earlier version of this test required exit 0 and then required the
+    document to exist, which would have turned either correct fix red.
 
     The step copies ``params`` into its summary without looking at their size, so a
     manifest the orchestrator was happy to write produces a result document the contract's
@@ -165,11 +208,19 @@ def test_the_result_document_stays_under_its_ceiling(make_job, sample_input):
     becomes an outage on the far side of all the real work.
     """
     job = make_job(inputs=[sample_input], params={'payload': 'x' * BULKY_PARAM_BYTES})
-    result = job.run()
-    assert result.exit_code == 0, result.output
+    job.run()
 
+    if contract.RESULT_FILENAME not in job.endpoint.keys_in_order():
+        pytest.skip(
+            'the step wrote no result.json for this job. Nothing requires one, and a ceiling on a '
+            'document constrains the document that gets written — there is nothing here to be over it'
+        )
     raw = job.endpoint.body_of(contract.RESULT_FILENAME)
-    contract.validate_result(json.loads(raw.decode('utf-8')), raw_bytes=raw)
+    assert len(raw) <= contract.MAX_RESULT_BYTES, (
+        f'the step wrote a {len(raw)}-byte result.json, over the {contract.MAX_RESULT_BYTES}-byte '
+        f'ceiling — the contract\'s own reader is forbidden to read it, and the producer is the side '
+        f'that was supposed to find that out'
+    )
 
 
 @expected_red_until_fixed

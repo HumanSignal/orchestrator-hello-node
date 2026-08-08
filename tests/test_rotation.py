@@ -124,7 +124,8 @@ def test_the_work_remaining_after_an_expiry_is_still_done(make_job):
     Action:   run.
     Validate: all three inputs are fetched and all three copies land — counted as
               DISTINCT objects, not as requests, so three retries of one input would not
-              satisfy it.
+              satisfy it, and compared as SETS, because nothing obliges a step to work
+              through its inputs in the order the envelope happens to list them.
 
     The single-input test above shows the step can recover; this one shows the recovery
     is not a one-off. It is also the honest measure of what the gap costs: not "a transfer
@@ -144,7 +145,7 @@ def test_the_work_remaining_after_an_expiry_is_still_done(make_job):
 
     _assert_the_step_had_its_whole_credential_lifetime(job)
     fetched = job.endpoint.names_of('input')
-    assert fetched == ['input/one.csv', 'input/two.csv', 'input/three.csv'], (
+    assert sorted(fetched) == ['input/one.csv', 'input/three.csv', 'input/two.csv'], (
         f'the step stopped after its envelope expired; it fetched {fetched}'
     )
     landed = [key for key in job.endpoint.keys_in_order() if key.startswith('outputs/')]

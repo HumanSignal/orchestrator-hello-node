@@ -70,17 +70,22 @@ def test_a_job_with_no_inputs_still_completes(make_job):
 
     Setup:    a job with an empty input list.
     Action:   run.
-    Validate: ``result.json`` and the marker are written, in that order, and the marker
-              says the run succeeded.
+    Validate: a ``result.json`` is written, the marker is written LAST, and it says the
+              run succeeded.
 
     The ORDER is contract (the marker is written last); the fact that a step with no
-    inputs writes a ``result.json`` at all is this node's own choice.
+    inputs writes a ``result.json`` at all is this node's own choice. What this
+    deliberately does NOT say is "and nothing else" — it used to compare the whole key
+    list for equality, which forbade the step from writing ``logs.ndjsonl``, a file the
+    contract names and invites.
     """
     job = make_job(inputs=[])
     result = job.run()
 
     assert result.exit_code == 0, result.output
-    assert job.endpoint.keys_in_order() == [contract.RESULT_FILENAME, contract.MARKER_FILENAME]
+    written = job.endpoint.keys_in_order()
+    assert written[-1] == contract.MARKER_FILENAME, f'the marker was not written last: {written}'
+    assert contract.RESULT_FILENAME in written, f'this node writes a result even with no inputs; it wrote {written}'
     assert job.marker()['status'] == 'succeeded'
 
 
@@ -131,14 +136,20 @@ def test_the_inventory_names_the_keys_the_objects_were_really_written_under(make
     That is a real expectation of this reference node and it is asserted immediately
     below — but the collector's rule says nothing about where a step puts its outputs or
     whether it copies anything at all, so the two claims cannot share one citation.
+
+    Nothing about the run's outcome is asserted: the rule binds a marker's contents
+    whenever one is written, and a run that writes no marker, or one that inventories
+    nothing, has nothing this rule could refuse — those skip.
     """
     job = make_job(inputs=AWKWARD_NAMES)
-    result = job.run()
-    assert result.exit_code == 0, result.output
+    job.run()
 
+    if contract.MARKER_FILENAME not in job.endpoint.keys_in_order():
+        pytest.skip('the step wrote no marker, so there is no inventory to hold against the store')
     uploaded = set(job.endpoint.keys_in_order())
     inventoried = [obj['relpath'] for obj in job.marker()['objects']]
-    assert inventoried, 'the marker inventories nothing, so this test has nothing to check'
+    if not inventoried:
+        pytest.skip('the marker inventories nothing, so no relpath in it can name an object that is missing')
     for relpath in inventoried:
         assert relpath in uploaded, (
             f'the marker inventories {relpath!r}, which the store never received; it holds {sorted(uploaded)}'
@@ -250,7 +261,13 @@ def test_the_marker_stays_parseable_when_two_ports_carry_the_same_name(make_job)
     Setup:    two input ports, each with an object called ``data.csv``, holding different
               bytes.
     Action:   run.
-    Validate: the marker the step wrote parses against the contract.
+    Validate: if the step wrote a marker, it parses against the contract.
+
+    **The outcome of the run is deliberately not asserted.** The rule cited above forbids
+    exactly one thing: publishing a document the collector cannot parse. Noticing the
+    collision and refusing the job is a perfectly conformant answer — with a valid failure
+    marker or with none at all — and an earlier version of this test required exit 0,
+    which would have turned that answer red. The fix belongs to whoever writes it.
 
     The step derives its output path from the input's ``relpath`` alone and ignores the
     ``port`` the envelope carries beside it (``runners/credentials.py`` puts one there:
@@ -266,9 +283,13 @@ def test_the_marker_stays_parseable_when_two_ports_carry_the_same_name(make_job)
             InputSpec(relpath='data.csv', data=b'from the right port\n', port='right'),
         ]
     )
-    result = job.run()
-    assert result.exit_code == 0, result.output
+    job.run()
 
+    if contract.MARKER_FILENAME not in job.endpoint.keys_in_order():
+        pytest.skip(
+            'the step wrote no marker at all, which the contract permits — a marker that does not exist '
+            'is not a marker the collector refuses'
+        )
     job.marker()  # raises ContractViolation if the collector would refuse this document
 
 
@@ -286,7 +307,11 @@ def test_neither_input_survives_at_the_others_expense(make_job):
     Setup:    two input ports, each with an object called ``data.csv``, holding different
               bytes.
     Action:   run.
-    Validate: both sets of bytes are somewhere in the store afterwards.
+    Validate: if the step did the work, both sets of bytes are in the store afterwards.
+
+    A step that notices the collision and refuses the job destroys nothing, and that is
+    one of the fixes this test promises not to pre-empt — so a failed run skips here
+    rather than counting as bytes lost.
     """
     job = make_job(
         inputs=[
@@ -295,8 +320,12 @@ def test_neither_input_survives_at_the_others_expense(make_job):
         ]
     )
     result = job.run()
-    assert result.exit_code == 0, result.output
 
+    if result.exit_code != 0:
+        pytest.skip(
+            f'the step ended the run with exit {result.exit_code} instead of producing output for two '
+            f'colliding names, so nothing was silently overwritten — which is the other legal answer'
+        )
     bodies = {job.endpoint.body_of(key) for key in set(job.endpoint.keys_in_order()) if key.startswith('outputs/')}
     assert bodies == {b'from the left port\n', b'from the right port\n'}, (
         f'one input overwrote the other; the store holds {bodies}'
