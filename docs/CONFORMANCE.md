@@ -386,19 +386,24 @@ below.
 
 **BEHAVIOUR, and it decides what this test is evidence of.** A local SIGTERM models your
 node's own behaviour on a stop, and nothing more. It is not a model of what the platform
-then does with the result, on any of the three stop paths. An **operator pressing Cancel**
-usually arrives as a SIGKILL your process never sees, and even on the narrow path where it
-arrives as a SIGTERM, nothing the node writes is collected. The **runtime deadline** does
-begin as a SIGTERM, but the grace is cut short by the platform's own next heartbeat, the
-upload credentials expired at the deadline, and the terminal report that would have made a
-marker count is refused ([PROTOCOL.md](PROTOCOL.md#7-cancellation)). So label this test for
-what it proves — that your node stops cleanly and promptly when asked — and do not let it
-stand as evidence that a stopped run delivers a partial result. Neither of those two stops
+then does with the result, on any of the three stop paths. An **operator pressing
+Cancel** usually arrives as a SIGKILL your process never sees, and even on the narrow
+path where it arrives as a SIGTERM, nothing the node writes is collected. The **runtime
+deadline** does begin as a SIGTERM, but the grace is cut short by the platform's own
+next heartbeat, the upload credentials expired at the deadline, and the terminal report
+that would have made a marker count is refused
+([PROTOCOL.md](PROTOCOL.md#7-cancellation)). So label this test for what it proves —
+that your node stops cleanly and promptly when asked — and do not let it stand as
+evidence that a stopped run delivers a partial result. Neither of those two stops
 delivers one today. The third, a **fence**, can: three of the six fences leave the agent
 able to report, and collection then reads whatever valid marker was already sitting in
-staging — which, if you write the marker last as recommended, is nothing
-([PROTOCOL.md](PROTOCOL.md#71-fencing-the-stop-with-no-grace-period-at-all)). It is a race,
-not a delivery mechanism, and nothing you can test locally exercises it.
+staging — which, if you write the marker last as recommended, is usually nothing.
+Usually and not always: writing it last says where in your program the marker is
+written, not that it appears and vanishes together with your process, and a fence
+landing in the interval between the marker's upload finishing and the agent noticing
+your container is gone reads it
+([PROTOCOL.md](PROTOCOL.md#71-fencing-the-stop-with-no-grace-period-at-all)). It is a
+race, not a delivery mechanism, and nothing you can test locally exercises it.
 
 **BEHAVIOUR to keep in mind while reading the result.** When the agent classifies at all, it
 calls the run cancelled regardless of your exit code, because it asks "was cancellation

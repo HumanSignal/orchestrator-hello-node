@@ -415,18 +415,25 @@ become a failed run either: it stays parked at "Waiting for runner" until an ope
 cancels it, and nothing your container produced is collected (section 7, which also names
 the one job that ends differently).
 
-**BEHAVIOUR, and it is why section 4.3 reads the way it does.** The credential envelope's
-own lifetime is also 900 seconds, and it is additionally clamped so that it can never
-outlive the run's deadline (`runners/credentials.py:216-219`). With both numbers at 900
-the two coincide: on a default registration the first envelope you are handed already
-expires at the moment your container is killed anyway, so a node that never re-reads its
-credentials will not visibly fail on that account — it will simply be terminated. Raise
-the budget (a `timeout_seconds` on the pipeline node, which takes effect immediately) and
-the two come apart at once: credentials still last 900 seconds, the run lasts as long as
-you asked for, and a node that read its credentials once can no longer upload anything
-after the first fifteen minutes. **That is the case worth writing your node for**, because
-it is the one an operator creates the first time a real job needs more than a quarter of
-an hour.
+**BEHAVIOUR, and it is why section 4.3 reads the way it does.** The credential
+envelope's own lifetime is also 900 seconds, and it is additionally clamped so that it
+can never outlive the run's deadline (`runners/credentials.py:216-219`). With both
+numbers at 900 the two coincide: on a default registration the first envelope you are
+handed already expires at the deadline, so a node that never re-reads its credentials
+will *usually* not fail visibly on that account — it will simply be terminated. Usually
+and not always, and the exception is worth knowing because it is the well-behaved node
+that meets it: the envelope expires at the moment your container is *asked* to stop, not
+at the moment it dies, and between those two there is a grace period (section 7). A node
+that catches the SIGTERM and does what this document recommends — re-read the
+credentials, write the marker last, exit — is making its final upload inside exactly
+that window, and that upload is refused for expired credentials. So the coincidence
+hides the problem from a node that ignores the stop and shows it to a node that handles
+one. Raise the budget (a `timeout_seconds` on the pipeline node, which takes effect
+immediately) and the two come apart at once: credentials still last 900 seconds, the run
+lasts as long as you asked for, and a node that read its credentials once can no longer
+upload anything after the first fifteen minutes. **That is the case worth writing your
+node for**, because it is the one an operator creates the first time a real job needs
+more than a quarter of an hour.
 
 **RECOMMENDATION.** Measure your own elapsed time from process start and aim to finish,
 including uploads and the marker, comfortably inside `timeout_seconds` — the value in the
@@ -571,8 +578,10 @@ against a 2 GiB limit. The kernel kills the container, and **an OOM kill gives y
 no chance to write a marker**, so unless one was already there the run dies with a bare
 exit code and no account of itself. (The container's exit code is still reported, so this
 ending arms collection like any other self-reported failure and a marker you had already
-written would be read. Under the write-the-marker-last discipline there is none.) Nothing
-in the orchestrator's limits is exceeded on the way there.
+written would be read. Under the write-the-marker-last discipline there is usually none —
+usually, because a kill can also land in the moment between the marker's upload finishing
+and the process exiting, and then it is there; see section 7.1.) Nothing in the
+orchestrator's limits is exceeded on the way there.
 
 **RECOMMENDATION.** Stream in both directions. Read inputs to a temporary file or in
 chunks, hash while you stream, and upload from a file handle rather than from a `bytes`
@@ -675,14 +684,17 @@ deadline (`runners/credentials.py:216-219`).
 
 **BEHAVIOUR, and it is the failure this whole section exists for. A node that reads its
 credentials once cannot upload its outputs, or its own completion marker, after about
-fifteen minutes.** This is the most common way a working node fails on
-its first long job — but only on a job that is *allowed* to be long. Section 2.4 has the
-arithmetic: a node registered the default way is given a 900-second runtime budget, the
-same 900 seconds the credentials last, so the two expire together and the container is
-killed at the same moment its credentials die. The failure appears the first time an
-operator raises the budget, which is exactly when the node is finally being asked to do
-something substantial. Write for that case now; it is not a hypothetical, it is the second
-week.
+fifteen minutes.** This is the most common way a working node fails on its first long
+job — but only on a job that is *allowed* to be long. Section 2.4 has the arithmetic: a
+node registered the default way is given a 900-second runtime budget, the same 900
+seconds the credentials last, so the two run out together and the container is *asked to
+stop* at the moment its credentials die. That coincidence hides the failure from most
+nodes but not from all of them: being asked to stop is not being dead, and a node that
+handles the stop and writes its marker on the way out is doing that upload inside the
+grace period, with credentials that expired a moment earlier (section 2.4, section 7).
+Otherwise the failure appears the first time an operator raises the budget, which is
+exactly when the node is finally being asked to do something substantial. Write for that
+case now; it is not a hypothetical, it is the second week.
 
 **BEHAVIOUR.** The agent asks the orchestrator for a fresh envelope when the current one
 is within 60 seconds of expiring (`LSPO_AGENT_CREDS_REFRESH_MARGIN_S`,
@@ -895,15 +907,18 @@ reason, and every object you inventoried is salvaged through the same verified p
 (`external/README.md`, "A failed or cancelled marker is read, not discarded"). It is not
 required, and a failing node that writes nothing loses all of that.
 
-**BEHAVIOUR, and it decides when the recommendation above actually pays.** That marker is
-read on the paths where your own terminal report is what ends the job, and those are
-narrower than they look: a failure of your own, and a cancellation your node declared itself
-by exiting 20 without being asked. It is **not** read when an **operator** cancels the run,
-and it is **not** read when your container is stopped by the **runtime deadline** — on both
-of those the report that would have armed collection is refused, for two different reasons
-set out in section 7. Write the marker anyway; it costs one document, it is what makes the
-two recoverable cases recoverable, and it is what those other two paths will read once they
-are fixed.
+**BEHAVIOUR, and it decides when the recommendation above actually pays.** That marker
+is read on the paths where a terminal report for the job goes out **and is accepted**,
+and those are narrower than they look. Two of them are yours: a failure of your own, and
+a cancellation your node declared itself by exiting 20 without being asked. A third is
+not yours at all — three of the six fences leave the agent able to report, and where
+such a report is accepted, collection reads whatever valid marker was already in staging
+(section 7.1). It is **not** read when an **operator** cancels a step whose container is
+still running, and it is **not** read when a running container is stopped by the
+**runtime deadline** — on both of those the report that would have armed collection is
+refused, for two different reasons set out in section 7. Write the marker anyway; it
+costs one document, it is what makes the two recoverable cases recoverable, and it is
+what those other two paths will read once they are fixed.
 
 **BEHAVIOUR, and a quiet way to lose everything.** A failed or cancelled marker is held to
 the same identity check and the same document rules. "Best effort" applies to which objects
@@ -1051,30 +1066,75 @@ terminal report tests the lease and never the deadline (`runners/reports.py:396-
 job with a budget under five minutes that spends longer than its whole budget getting ready
 — a slow image pull is the realistic way — and then fails there, before its first
 heartbeat, sends a terminal report that **is accepted**: the run finishes as failed instead
-of parking, and collection is armed (`runners/reports.py:433`). Nothing is collected even
-so, because no container ran and no marker exists. Note what that arithmetic requires: on a
-**default** registration the budget is 900 seconds, which is longer than the lease, so this
-cannot arise at all — it needs a node whose `timeout_seconds` was deliberately set low.
-This one is read from the source rather than executed, and it is not a behaviour to build
-on. It is here because "a deadline never reports and always parks" would be a false
-description of the platform, and because it is why the paragraph above says "a container
-that was running" rather than "a job that ran out of time".
+of parking, and collection is armed (`runners/reports.py:433`). Note what that arithmetic
+requires: on a **default** registration the budget is 900 seconds, which is longer than the
+lease, so this cannot arise at all — it needs a node whose `timeout_seconds` was
+deliberately set low. This one is read from the source rather than executed, and it is not a
+behaviour to build on. It is here because "a deadline never reports and always parks" would
+be a false description of the platform, and because it is why the paragraph above says "a
+container that was running" rather than "a job that ran out of time".
 
-**BEHAVIOUR, and it is worth stating plainly, because the shape of this section invites you
-to hunt for the exception.** The endings that reliably deliver something are the ones where
-your process finishes and reports on its own: success, a failure you exit with, or a
-cancellation you declare yourself by exiting 20 without being asked. Of the stops imposed
-from outside, an operator's cancellation delivers nothing and the runtime deadline delivers
-nothing; both gaps are recorded as platform defects to be fixed. A **fence** is the one
-that is not categorical: three of the six leave the agent able to report, and where that
-report is also *accepted* — the agent's heartbeat thread dying is the clearest case,
-because the job itself is still live and its lease still valid — collection is armed and
-reads whatever valid marker was already sitting in your staging area (section 7.1). That is
-a real path rather than a loophole: it delivers only what you had already written **and**
-inventoried at the instant the kill landed, and if you follow this document's strongest
-recommendation and write the marker last there is nothing there to read. So design as
-though no externally imposed stop delivers anything; just do not write down that it is
-impossible for one to.
+**BEHAVIOUR, and it is wider than the exception above — it holds for every job that
+fails in preparation, whatever the budget.** What an armed collection then finds is not
+"nothing" by default; it depends on where in preparation the job died, and "it failed
+while getting ready" does not settle whether a container of yours was running, because
+preparation spans both sides of the container's existence. (The budget arithmetic above
+decides only whether the *deadline* can be involved. A preparation failure needs no
+deadline to be reported and accepted — it is the ordinary way a job that cannot run is
+written down.) The order is: check the contract version, write your credentials file,
+read the job description, **start the container**, then start the agent's log thread,
+then start its heartbeat thread (`agent/runner.py:2144-2174`, with the container start
+itself at `:2235`). Fail in the first three — an unsupported contract version, a
+credentials refusal, an unreadable job description, a failed image pull or a container
+that would not be created — and there genuinely is nothing to read: no container of
+yours ever ran, and no marker exists. Fail in the last two and the container is
+**already running**. Starting a thread is an ordinary operation that fails on a busy
+host, and the agent treats that as a real state rather than a theoretical one, in its
+own words "a state a busy agent host genuinely reaches" (`agent/runner.py:1084`,
+`:1825`). Such a failure lands before the first heartbeat, so the claim's own
+five-minute lease has not been shortened and the report is accepted; the agent stops the
+container first and reports afterwards (`agent/runner.py:2741-2746`), and the collection
+that report arms reads any valid marker for this attempt that is already in your staging
+area. A container the agent started itself a fraction of a second earlier will not have
+written one. A container the agent **picked back up** rather than started will: a forced
+agent shutdown deliberately leaves your container running for the next agent to adopt
+(section 7.1), and that container may be minutes into its work and may already have
+written its marker.
+
+**BEHAVIOUR, and it is the sharpest edge of the previous paragraph.** On a job the agent
+picked back up, the container is running for the *whole* of preparation, including the
+first three steps. A credentials or job-description failure there is reported as a job
+that could not run — and because the agent stops a container only when it recorded an
+attempt to get hold of one, and that record is written inside the very step this failure
+happened before (`agent/runner.py:2216`, `:2778-2779`), yours is not stopped. The run is
+declared over, collection is armed, and your process is still running and still writing
+into the same staging area. Nothing in your node can detect this or defend against it;
+it is here so that "the job failed before anything started" is not read as a guarantee
+that nothing of yours was running. Read from the source, not executed.
+
+**BEHAVIOUR, and it is worth stating plainly, because the shape of this section invites
+you to hunt for the exception.** The endings that reliably deliver something are the
+ones where your process finishes and reports on its own: success, a failure you exit
+with, or a cancellation you declare yourself by exiting 20 without being asked. Of the
+stops imposed from outside, an operator's cancellation and the runtime deadline each
+deliver nothing when they land on a container that was still running — which is the
+ordinary case for both, and both gaps are recorded as platform defects to be fixed.
+(Both have one narrow branch that behaves otherwise: a deadline reached while the job
+was still being prepared, set out immediately above, and a cancellation arriving after
+your container had already exited and reported, set out further down this section.) A
+**fence** is the one that is not categorical: three of the six leave the agent able to
+report, and where that report is also *accepted* — the agent's heartbeat thread dying is
+the clearest case, because the job itself is still live and its lease still valid —
+collection is armed and reads whatever valid marker was already sitting in your staging
+area (section 7.1). That is a real path rather than a loophole: it delivers only what
+you had already written **and** inventoried at the instant the kill landed, and if you
+follow this document's strongest recommendation and write the marker last there is
+*usually* nothing there to read. Usually and not always — writing the marker last
+decides where in your program it happens, not that it vanishes at the same instant your
+process does, and a fence landing in the second or so between the marker's upload and
+the agent seeing your container go finds it there. That interval is derived at the end
+of section 7.1. So design as though no externally imposed stop delivers anything; just
+do not write down that it is impossible for one to.
 
 **BEHAVIOUR, and this one is measured rather than assumed.** Your program almost certainly
 runs as **PID 1** inside its container: the agent overrides neither the entrypoint nor the
@@ -1277,12 +1337,34 @@ staging area that expires.
 
 **BEHAVIOUR, so the summary is narrower than "everything is lost", and for a well-behaved
 node it usually amounts to the same thing.** If you follow the strongest recommendation in
-this document and write your marker last, then when a fence lands mid-run there is no
-marker, and nothing you produced is collected. The salvage path is not dead code — it is
-what recovers the work of a node that failed on its own, or stopped itself by exiting 20,
-and wrote a marker on the way out (section 5) — it simply has nothing to read after a
-SIGKILL that arrived first. What is never true is that a fence gives your process a chance
-to react.
+this document and write your marker last, then a fence landing while there is still work to
+do finds no marker, and nothing you produced is collected. The salvage path is not dead code
+— it is what recovers the work of a node that failed on its own, or stopped itself by
+exiting 20, and wrote a marker on the way out (section 5) — it usually has nothing to read
+after a SIGKILL that arrived first. What is never true is that a fence gives your process a
+chance to react.
+
+**BEHAVIOUR, and it is why the paragraph above says "usually" rather than "always". This
+is the one paragraph the rest of the set points at for this point.** Writing the marker
+last makes "there is nothing to collect" the ordinary outcome; it does not make it
+certain. Writing it last says *when in your program* it is written. It does not say that
+it appears and disappears together with your process, and the two are separated by a
+real interval: after the marker's upload has finished, your process still has to return
+from whatever it was doing and exit, and the agent then learns of that exit only on its
+next poll of the docker daemon — a quarter of the heartbeat interval, capped at one
+second, so about a second with the shipped settings (`agent/runner.py:2304-2308`).
+Through the whole of that interval a valid marker for this attempt is sitting in your
+staging area — written last, and still there. A fence landing inside it kills a
+container that has already done its writing, and where that fence is one whose terminal
+report is not merely permitted but **accepted** — the agent's own heartbeat thread
+failing is the clear case, because the job itself is untouched and its lease still valid
+— collection runs and reads that marker. Nothing about this is a mechanism to use: the
+interval is short, you cannot choose when a fence arrives, and the recommendation is
+unchanged. It is stated because "write the marker last, therefore nothing can be
+collected" is a claim about *timing* wearing the clothes of a claim about *design*, and
+the difference matters to anyone looking at a cancelled-looking run that delivered
+output nobody expected. Read from the source; none of the runs behind these documents
+exercised a fence.
 
 **RECOMMENDATION.** Do not design a node whose entire output appears in its last minute. A
 SIGKILL ends your writing where it stands — what you had already finished and inventoried

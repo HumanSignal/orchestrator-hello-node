@@ -75,17 +75,19 @@ See [OPERATIONS.md](OPERATIONS.md#registering-a-node).
 
 ### 5. Handle the hard parts
 
-**RECOMMENDATION.** Credential expiry, stopping cleanly, and inventory-on-failure. They are
-the three things a first version always omits and the three things that decide whether a
-real run survives. Not one of them is checked by anything. The skeleton below has all three.
-Be clear-eyed about what the second one buys today: **nothing your node writes on the way
-out of an externally imposed stop is reliably preserved.** An operator's Cancel delivers
-nothing and the runtime deadline delivers nothing; a **fence** delivers only what you had
-already written *and* inventoried at the instant of the kill, which under the
-write-the-marker-last discipline is nothing
-([PROTOCOL.md](PROTOCOL.md#7-cancellation)). Handle the stop for a clean exit and for the
-day those gaps are fixed, and put your recovery hopes on the third item, the inventory you
-write when your own code decides the run is over.
+**RECOMMENDATION.** Credential expiry, stopping cleanly, and inventory-on-failure. They
+are the three things a first version always omits and the three things that decide
+whether a real run survives. Not one of them is checked by anything. The skeleton below
+has all three. Be clear-eyed about what the second one buys today: **nothing your node
+writes on the way out of an externally imposed stop is reliably preserved.** An
+operator's Cancel delivers nothing and the runtime deadline delivers nothing; a
+**fence** delivers only what you had already written *and* inventoried at the instant of
+the kill, which under the write-the-marker-last discipline is almost always nothing —
+almost always rather than always, because writing the marker last fixes where in your
+program it happens and not that it disappears at the same instant your process does
+([PROTOCOL.md](PROTOCOL.md#71-fencing-the-stop-with-no-grace-period-at-all)). Handle the
+stop for a clean exit and for the day those gaps are fixed, and put your recovery hopes
+on the third item, the inventory you write when your own code decides the run is over.
 
 ---
 
@@ -475,7 +477,9 @@ apart either treats advice as law or treats law as advice. Both are expensive.
       unreachable orchestrator, a refused agent identity, and three more —
       [PROTOCOL.md](PROTOCOL.md#71-fencing-the-stop-with-no-grace-period-at-all)) kills the
       container outright with a SIGKILL, so nothing further is written and, under the
-      write-the-marker-last discipline, nothing is collected. An ordinary agent shutdown is
+      write-the-marker-last discipline, almost always nothing is collected — the exception
+      is a fence that lands after your marker was already uploaded and before your container
+      was seen to go, which collects what that marker names. An ordinary agent shutdown is
       **not** a fence: it waits for your job, or leaves your container running for the next
       agent. Design so that a run losing its last minute of work is survivable.
 

@@ -131,14 +131,15 @@ Everything in this section is **background**: it is about these documents — wh
 values came from and what was checked — and imposes nothing on your node.
 
 Every value in these documents was read from the orchestrator's source at commit
-**`6b2ff82c70f26d0ceaa1a841137f1b3cfb08186b`** (2026-08-08) and checked by hand. The files
-read were `external/contract.py`, `external/io.py`, `external/versioning.py`,
+**`6b2ff82c70f26d0ceaa1a841137f1b3cfb08186b`** (2026-08-08) and checked by hand. The
+files read were `external/contract.py`, `external/io.py`, `external/versioning.py`,
 `external/text.py`, `external/README.md`, `runners/credentials.py`,
-`runners/serializers.py`, `runners/reports.py`, `runners/auth.py`, `runners/enrollment.py`,
-`runners/jobs.py`, `runners/views.py`, `agent/creds.py`, `agent/runner.py`,
-`agent/config.py`, `agent/logbuf.py`, `agent/redact.py`, `agent/client.py`,
-`agent/executors/docker_exec.py`, `agent/identity.py`, `handlers/steps/external.py`,
-`pipelines/external_finalize.py`, `pipelines/external_state.py`, `pipelines/log_stream.py`,
+`runners/serializers.py`, `runners/reports.py`, `runners/auth.py`,
+`runners/enrollment.py`, `runners/jobs.py`, `runners/claim.py`, `runners/views.py`,
+`agent/creds.py`, `agent/runner.py`, `agent/config.py`, `agent/logbuf.py`,
+`agent/redact.py`, `agent/client.py`, `agent/executors/docker_exec.py`,
+`agent/identity.py`, `handlers/steps/external.py`, `pipelines/external_finalize.py`,
+`pipelines/cancellation.py`, `pipelines/external_state.py`, `pipelines/log_stream.py`,
 `pipelines/config_schemas.py`, `noderegistry/models.py`, `noderegistry/services.py`,
 `noderegistry/serializers.py`, `noderegistry/views.py`,
 `noderegistry/management/commands/external_demo_setup.py`,
@@ -192,6 +193,17 @@ not cover, it says so in the sentence itself and cites the source it was read fr
 That distinction is the correction this round exists for: an execution proves the path it
 took, and writing its result up as a universal is the same class of mistake as writing up a
 guess.
+
+**Two later corrections rest on reading alone, and both are named where they are made.**
+Neither was executed, and both are consequences of *timing* rather than of the platform's
+design, which is exactly the shape a single run cannot settle. The first is the interval
+between a completion marker's upload finishing and the agent seeing the container gone,
+during which a marker written last is nonetheless sitting in the staging area
+([PROTOCOL.md](PROTOCOL.md#71-fencing-the-stop-with-no-grace-period-at-all)). The second is
+the boundary inside preparation: the container is created and started before the agent's own
+log and heartbeat threads are, so a failure "during preparation" may or may not have left a
+container of yours running ([PROTOCOL.md](PROTOCOL.md#7-cancellation)). Both were derived
+from `agent/runner.py` at the commit above.
 
 That is all. **No real container, no deployed orchestrator, no object storage and no
 collection run were exercised** — the runs in item 5 used stand-ins for the docker daemon
