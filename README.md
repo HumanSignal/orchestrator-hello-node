@@ -18,6 +18,16 @@ list of what is wrong with this file, line by line, is in
 [docs/AUTHORING.md](docs/AUTHORING.md#known-gaps-in-nodepy). Where these documents and
 `node.py` disagree, the documents are right. `node.py` is being repaired separately.
 
+None of that is an opinion about the file. The harness in `conformance/` builds this
+repository's image, runs it as a container and judges it from the outside only, and
+**twenty of its tests are red against `node.py` today**;
+[CONFORMANCE-BASELINE.md](CONFORMANCE-BASELINE.md) is the measured record of what each one
+found. Read the label on a red test before treating it as a rule, because they do not all
+carry the same weight: **six are contract violations**, with the platform's own rule
+quoted; **three are a compatibility policy this repository chose for itself**; and
+**eleven are things a *reference* implementation ought to demonstrate that the contract
+happily permits a real node to skip**.
+
 So: **start with [docs/](docs/), build from the skeleton, and use `node.py` only to see a
 complete program end to end.**
 
@@ -28,6 +38,9 @@ complete program end to end.**
 | `node.py` | A working example step, with known defects. See the warning above |
 | `Dockerfile` | The smallest image that is a real external step |
 | `docs/` | **The documentation. Start here** |
+| `conformance/` | A black-box harness: it builds this image, runs it, and judges it only from the outside |
+| `tests/` | The tests that harness runs, and `pytest.ini` names the label on each one |
+| `CONFORMANCE-BASELINE.md` | What the harness measured against `node.py` — the evidence behind the warning above |
 | `CONTRIBUTING.md` | Notes on making this repository your own |
 
 ## Build and run
@@ -49,6 +62,20 @@ and pointing a pipeline at it are all in
 
 To run the program with no orchestrator at all, against a hand-written credentials file,
 see [docs/CONFORMANCE.md](docs/CONFORMANCE.md#level-1-run-it-with-a-hand-written-envelope).
+
+To put the built image in front of the harness — this repository's node, or your own once
+you have edited it:
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest                                    # known gaps as expected failures; this is CI
+python -m pytest --red-for-real                     # the true result
+python -m pytest --collect-only -q --print-labels   # what every test claims, and on whose authority
+```
+
+It needs a Docker daemon, and it refuses to run rather than simulate a container. What a
+suite like this can and cannot prove is in
+[docs/CONFORMANCE.md](docs/CONFORMANCE.md#if-a-conformance-directory-exists-in-this-repository).
 
 ## Documentation
 

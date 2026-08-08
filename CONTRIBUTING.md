@@ -28,9 +28,16 @@ and a checklist. This page is the two-minute version.
    job description that goes with this file, is in
    [docs/CONFORMANCE.md](docs/CONFORMANCE.md#level-1-run-it-with-a-hand-written-envelope).
 
-   Note the variable name: the platform sets `LSPO_CREDENTIALS_FILE`. The `node.py` in this
-   repository still reads `LSPO_CREDENTIALS`, which is a defect it survives only because
-   the `Dockerfile` hardcodes that name.
+   Note the variable name, because the two are not the same one. The platform sets
+   `LSPO_CREDENTIALS_FILE` and that is what your node should read; the `node.py` in this
+   repository still reads `LSPO_CREDENTIALS`, and survives only because the `Dockerfile`
+   hardcodes that name. Outside the image it dies on a traceback, so to run *this* file
+   locally set both names, as
+   [docs/CONFORMANCE.md](docs/CONFORMANCE.md#level-1-run-it-with-a-hand-written-envelope)
+   does — and set only the correct one in your own. Why it matters is the first row of
+   [docs/AUTHORING.md](docs/AUTHORING.md#known-gaps-in-nodepy); the run that measured it is
+   the first contract defect in
+   [CONFORMANCE-BASELINE.md](CONFORMANCE-BASELINE.md#1-it-reads-a-credentials-variable-that-nothing-sets).
 
 5. **Rebuild, push, take the new digest, register a new revision.** A node's identity is
    its digest; changing the code means registering the new one, which is also what makes
