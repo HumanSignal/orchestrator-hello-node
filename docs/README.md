@@ -1,10 +1,11 @@
 # Writing an external node
 
 An **external node** is a pipeline step that runs as **your container, on your machine**.
-The orchestrator never sees your code. It sees an image digest, writes a job description
-and short-lived credentials where your container can read them, starts the container
-through an agent process you run, and then collects whatever the container says it
-produced.
+
+**BEHAVIOUR, and it is the whole shape of the thing.** The orchestrator never sees your
+code. It sees an image digest, writes a job description and short-lived credentials where
+your container can read them, starts the container through an agent process you run, and
+then collects whatever the container says it produced.
 
 These four documents are everything you need to write one correctly. They are written for
 someone (or something) that has only this repository and cannot read the orchestrator's
@@ -25,9 +26,20 @@ which is exactly as expensive as breaking a rule.
 | **BEHAVIOUR** | What the platform does. Not a duty on you, but your code has to survive it. |
 | **RECOMMENDATION** | What a well-written node does, and why. The platform permits the alternative. |
 
-If a statement carries no label, it is background, not a requirement.
+**How far a label reaches.** A label opens a **statement**, and it governs everything that
+belongs to that statement — its own paragraph, and any list or table that continues it —
+until the next label or the next heading. So a table introduced by "**RULE.** …" is a table
+of rules, and its rows do not each repeat the word. This is what makes the next sentence
+checkable rather than aspirational.
 
-Two of these needed a phrase of their own. A few statements are marked
+**If a statement carries no label, it is background, not a requirement.** In this set that
+is only ever true of two things: prose about *these documents* (what was verified, how to
+read them, where to go next), and prose about *this repository's example files*. Every
+statement about the **platform** — what it does, what it refuses, what a good node does
+about it — carries a label. That claim was checked mechanically over all five documents
+rather than by eye; see [Provenance](#provenance).
+
+One kind of statement needed a phrase of its own. A few are marked
 "**RECOMMENDATION**, with no working alternative": no check refuses you, and the
 alternative still cannot work, most often because you would be holding no credentials for
 what you were trying to reach. They are kept out of the RULE column deliberately, because a
@@ -57,6 +69,9 @@ contradict itself. When you are deciding what your node must do, "the code says 
 ---
 
 ## Routing table
+
+Pointers only — this table is **background**, and every statement it points at carries its
+own label.
 
 | I want to know | Go to |
 |---|---|
@@ -89,9 +104,10 @@ contradict itself. When you are deciding what your node must do, "the code says 
 
 ## Shipped-capability matrix
 
-The contract models more than the orchestrator currently uses. Writing against a modelled
-but unshipped capability produces a node that is correct and never exercised, which is a
-worse failure than an obvious one because nothing reports it.
+**BEHAVIOUR, for the whole table below.** The contract models more than the orchestrator
+currently uses. Writing against a modelled but unshipped capability produces a node that is
+correct and never exercised, which is a worse failure than an obvious one because nothing
+reports it.
 
 | Capability | In the contract | Sent by the orchestrator today | Collected today |
 |---|---|---|---|
@@ -110,6 +126,9 @@ worse failure than an obvious one because nothing reports it.
 
 ## Provenance
 
+Everything in this section is **background**: it is about these documents — where their
+values came from and what was checked — and imposes nothing on your node.
+
 Every value in these documents was read from the orchestrator's source at commit
 **`6b2ff82c70f26d0ceaa1a841137f1b3cfb08186b`** (2026-08-08) and checked by hand. The files
 read were `external/contract.py`, `external/io.py`, `external/versioning.py`,
@@ -125,15 +144,38 @@ read were `external/contract.py`, `external/io.py`, `external/versioning.py`,
 `frontend/src/pages/ExternalNodesPage.tsx`, `lspo/settings/base.py`, and the two
 Dockerfiles that fix the container user.
 
-**What was executed rather than read.** The two documents shown in
-[CONFORMANCE.md](CONFORMANCE.md#level-1-run-it-with-a-hand-written-envelope) were parsed
-with the orchestrator's own `InvocationManifest` and `CompletionMarker` at this commit, and
-every refusal claimed in [PROTOCOL.md](PROTOCOL.md#5-the-completion-marker) was exercised
-against them individually; the input file's size and hash were computed from the file. That
-is all. **No container, agent, orchestrator, run or upload was executed while writing
+**What was executed rather than read.** Four things, all at the commit above:
+
+1. **The offline example was run.** The fixture in
+   [CONFORMANCE.md](CONFORMANCE.md#level-1-run-it-with-a-hand-written-envelope) was built,
+   the command was run against this repository's `node.py`, and the output and the three
+   files shown there are what it produced. It was also run *without* the compatibility
+   variable, to confirm the failure that made the second one necessary.
+2. **Every marker refusal was enumerated by exercising the parser**, not written from
+   memory. A harness read the parser's own model definition, listed every field it declares
+   and every cross-field check it runs, then fed it about ninety mutated markers one at a
+   time and recorded each verdict. Every field and every check came back with at least one
+   refusal. That is what "exercised" means wherever these documents use the word, and it is
+   what the completeness claim in
+   [CONFORMANCE.md](CONFORMANCE.md#validating-your-own-marker) rests on.
+3. **The manifest, the envelope and the markers shown here were parsed** with the
+   orchestrator's own `InvocationManifest` and `CompletionMarker`. The input file's size and
+   hash were computed from the file.
+4. **The input-count ceiling was measured**, by building manifests of increasing width with
+   the real models until the writer's 8 MiB limit refused one
+   ([PROTOCOL.md](PROTOCOL.md#23-reading-the-input-objects)).
+
+That is all. **No container, agent, orchestrator run or upload was executed while writing
 this**, so everything about the agent's behaviour, the storage service and collection is
 read from source and reasoned about, not measured. Where a statement rests on a
 measurement somebody made earlier, it says so at the point it is made.
+
+**The labelling was checked mechanically, not by eye.** A script walked all five documents
+and, applying the scoping rule above, reported every paragraph and every table that carries
+no label and sits under none. Each one was then judged individually: label it, or confirm it
+is genuinely background and say so in the text. The finished set reports **zero** unlabelled
+normative statements and **zero** unlabelled tables, and every table is governed by a label
+in its own introducing sentence rather than by a distant one.
 
 There is no generated reference bundle yet, so there is no `REFERENCE.md`. The tables in
 [PROTOCOL.md](PROTOCOL.md) are hand-verified against the commit above and nothing checks

@@ -23,7 +23,8 @@ position is that this is the customer's trusted code rather than hostile code.
 
 ## Registering a node
 
-Two equivalent paths; both go through the same service layer, so they cannot drift.
+**BEHAVIOUR.** Two equivalent paths; both go through the same service layer, so they cannot
+drift.
 
 **From the web interface.** Settings, then the **External Nodes** tab, then **Connect
 node**. It creates the same three database rows the command below does — a **pool**, a
@@ -58,16 +59,29 @@ the pipeline node, which takes effect immediately and wins.
 **BEHAVIOUR.** The command is idempotent, and it deliberately does **not** re-mint the
 pool token on a second run. Pass `--rotate-token` when you actually mean it.
 
-**BEHAVIOUR, and two places in the platform say this wrongly.** Rotating the pool's
+**BEHAVIOUR, and three places in the platform say this wrongly.** Rotating the pool's
 registration token does **not** lock out the agents already enrolled. That token buys
 exactly one thing — permission to create a new agent identity in that pool — and each
 agent, once enrolled, authenticates with its own bearer token minted at enrolment
 (`runners/auth.py:21-33`, `noderegistry/views.py:262-270`). Rotating stops the old secret
 enrolling anything further and nothing else: every running agent keeps claiming,
-heartbeating and completing exactly as before. To actually stop an enrolled agent, retire
-that runner or switch the pool's `registration_enabled` off. (The setup command's own
-module docstring and `noderegistry/services.py:12-15` both still say rotation "would lock
-all of them out". They are wrong; the Settings screen, which says the opposite, is right.)
+heartbeating and completing exactly as before. (The setup command's own module docstring
+and `noderegistry/services.py:12-15` both still say rotation "would lock all of them out".
+They are wrong; the Settings screen, which says the opposite, is right.)
+
+**BEHAVIOUR, and this is the third wrong sentence, so read it carefully.** Switching the
+pool's `registration_enabled` off does **not** stop an enrolled agent either. That flag is
+consulted in exactly one place — the enrolment endpoint, where it decides whether a *new*
+agent may join (`runners/enrollment.py:138`). Nothing on a live request looks at it. What a
+live request checks, on every claim, heartbeat, credential re-issue and completion, is
+three other things: that the runner is still active, that its **pool** is still active, and
+that the organization owning that pool is still active (`runners/auth.py:487-500`,
+`:353-360`). So the ways to actually stop an enrolled agent are: **retire the runner**,
+**deactivate the pool**, or deactivate the owning organization — and of those, retiring the
+runner is the one that stops a single machine rather than everything on the pool.
+(`noderegistry/views.py:262-270`, the rotate-token endpoint, tells the operator to "switch
+the pool's `registration_enabled` off" to stop an enrolled agent. That sentence is wrong in
+the same way the two above are.)
 
 **BEHAVIOUR.** The command's own printed instructions still say there is no user interface
 for external nodes. That sentence is out of date; the Settings tab exists.
@@ -117,7 +131,10 @@ docker run -d --name lspo-agent \
   lspo-agent:dev
 ```
 
-Four parts of that are load-bearing (`agent/README.md`, "Run it"):
+**BEHAVIOUR, for all four bullets below.** Four parts of that command are load-bearing, and
+each one fails in its own way when it is wrong (`agent/README.md`, "Run it"). None of them
+is a duty on your node — they are the operator's, and they are here because your node is
+what visibly breaks:
 
 * **`--group-add`** with the host's docker group id. The agent image runs as a non-root
   user and has no access to the docker socket without it. The agent refuses to start
@@ -145,7 +162,9 @@ the ability to enrol more agents lying around on that machine
 
 ### Agent settings that change what your node sees
 
-All are `LSPO_AGENT_*` (`agent/config.py:113-137`, `:333-346`).
+**BEHAVIOUR, for the table below.** All are `LSPO_AGENT_*` and all are the agent operator's
+to set, not yours (`agent/config.py:113-137`, `:333-346`). The defaults are what your node
+gets unless somebody changed them.
 
 | Setting | Default | Why a node author cares |
 |---|---|---|
@@ -202,7 +221,10 @@ Add a script node whose configuration is:
 {"step_kind": "external", "external_deployment_id": 12, "params": {}}
 ```
 
-Full configuration surface (`pipelines/config_schemas.py:475-513`):
+**RULE for the "Required" column, BEHAVIOUR for the rest of the table below.** The
+configuration validator refuses a node whose `external_deployment_id` is missing or is not
+a positive integer; everything else in the table is what the platform does with a key you
+did set (`pipelines/config_schemas.py:475-513`).
 
 | Key | Type | Required | Meaning | Reaches your container |
 |---|---|---|---|---|
@@ -229,7 +251,9 @@ permanently, with a message naming the artifact. It is not retried.
 
 ## Revisions: what is immutable and what is actually read
 
-A deployment points at a revision, and the revision is what pins the code.
+**BEHAVIOUR, for the table below.** A deployment points at a revision, and the revision is
+what pins the code. The table says which of the revision's fields are actually read when a
+job runs — the others are stored and ignored.
 
 | Field | Read at run time |
 |---|---|
@@ -284,9 +308,15 @@ you cannot change from a node.
   regardless of your exit code, and nothing re-attempts. An operator retries by hand.
 * **No aggregate upload quota.** One object is bounded at 1 GiB. Nothing caps the number of
   objects or the total bytes a container may upload before its credentials expire.
-* **No limit of any kind on inputs.** Not per object, not in total, not in number. A step
-  wired downstream of something that produced ten thousand files is handed ten thousand
-  pinned objects, and nothing refuses that before your container starts.
+* **No limit on the SIZE of inputs, and an indirect one on their number.** Nothing caps one
+  input object or their total bytes. The count, however, is capped after all: every input
+  and its metadata are written into the job description, and the writer refuses to publish
+  one over 8 MiB (`external/io.py:148-157`). Measured against the real models, that is
+  roughly **25,000 inputs** with 95-character URIs, at about 330 bytes each. A step wired
+  downstream of something that produced ten thousand files runs fine; one wired downstream
+  of something that produced fifty thousand fails **before any container starts**, while
+  the orchestrator is still writing the job description. See
+  [PROTOCOL.md](PROTOCOL.md#23-reading-the-input-objects).
 * **No disk ceiling on the container.** The agent sets a CPU limit, a memory limit and a
   process limit, and no storage limit (`agent/executors/docker_exec.py:248-274`). A node
   that downloads its inputs to `/tmp` and never deletes them can fill the disk of the
@@ -298,11 +328,16 @@ you cannot change from a node.
 * **Logs are tail-only, and so is the durable copy.** The last 1000 entries, live and in
   the file written when the execution reaches a terminal state — the file is built from
   the same buffer. There is no complete record of a chatty container's output anywhere.
-* **A fenced container is killed outright.** Cancellation gives your process SIGTERM and
-  30 seconds; the fencing path (a revoked job, an unreachable orchestrator for about six
-  minutes) gives it a SIGKILL and nothing else, so it writes no marker and nothing it
-  produced is collected. See
-  [PROTOCOL.md](PROTOCOL.md#71-fencing-the-stop-with-no-grace-period-at-all).
+* **A fenced container is killed outright.** Cancellation gives your process SIGTERM and 30
+  seconds, and so does the runtime deadline; the fencing path gives it a SIGKILL and nothing
+  else. It therefore writes no further marker, and what is collected afterwards is only what
+  a valid marker for that attempt had already recorded — under the recommended
+  write-the-marker-last discipline, nothing. There are six fencing triggers and they differ
+  in whether the outcome is even reported; the table in
+  [PROTOCOL.md](PROTOCOL.md#71-fencing-the-stop-with-no-grace-period-at-all) gives each one
+  with its own consequence. Note that an ordinary agent shutdown is **not** one of them: it
+  waits for your job, and a forced shutdown leaves your container running for the next agent
+  to adopt.
 * **One input port, single files only.** The contract models multiple ports and folder
   inputs; the orchestrator emits neither.
 * **`result.json` is never read.** Metrics come from what was published.
@@ -319,6 +354,12 @@ it. **Unchecked** means nothing in the platform looks at this at all — it is a
 a convention that fails as some unrelated-looking symptom, and no amount of correct
 behaviour elsewhere will produce a warning about it.
 
+**The Kind column labels the CAUSE, not the cure**, and the two are not always the same
+kind of thing. Where the Kind is RULE, the first clause of "What to do" is what that check
+demands. Everything else in that column — including advice attached to a RULE row — is a
+**RECOMMENDATION**: it is what a well-built node does, nothing verifies it, and the platform
+permits the alternative. The two rows where that distinction bites are marked inline.
+
 | Symptom | Likely cause | Kind | What to do |
 |---|---|---|---|
 | Execution sits at **Waiting for runner** | no agent is enrolled in that pool, the pool's concurrency ceiling is reached, or the agent cannot reach the orchestrator | BEHAVIOUR — a saturated quota is never an error, the job simply waits | `docker logs lspo-agent`; check the pool's `max_concurrent`; confirm the deployment id on the node |
@@ -327,12 +368,12 @@ behaviour elsewhere will produce a warning about it.
 | Container dies at once with a missing credentials file | the agent's state is in a docker volume rather than a host path, so the credentials directory the daemon mounted was an empty one it created | Unchecked — the docker daemon creates an empty directory rather than failing | mount a real host directory at the same path inside and outside, with the workdir a child of it |
 | Container dies with permission denied on its credentials | uid mismatch between your image and the agent process | Unchecked — nothing compares the two uids or warns | rebuild with the agent's uid, usually 10001 |
 | Node fails with "`LSPO_CREDENTIALS` is not set" | your code reads the wrong variable name | Unchecked — the platform sets `LSPO_CREDENTIALS_FILE` and cannot police how you read it | read `LSPO_CREDENTIALS_FILE` |
-| Run fails with "no completion marker" | your container exited 0 without writing `__lspo_complete.json` | RULE — a marker is required on a successful run | write the marker on every path, including failure |
-| Run fails naming a hash or size mismatch | the object changed after you hashed it, or the marker was written before the upload finished | RULE — every published object is re-read and held to the marker | hash the bytes you actually wrote, and write the marker last |
+| Run fails with "no completion marker" | your container exited 0 without writing `__lspo_complete.json` | RULE — a marker is required on a successful run | write one before exiting 0. (*RECOMMENDATION, not part of the rule*: write one on the failure and cancellation paths too, so your `error` and your part-finished inventory survive) |
+| Run fails naming a hash or size mismatch | the object changed after you hashed it, or the marker was written before the upload finished | RULE — every published object is re-read and held to the marker | hash the bytes you actually wrote. (*RECOMMENDATION, not part of the rule*: write the marker last — nothing observes write order, so this failure is the only symptom you will ever see of getting it wrong) |
 | Uploads start failing partway through a long run | the credentials envelope expired, roughly fifteen minutes in | BEHAVIOUR — only visible once somebody raises the node's `timeout_seconds` past 900 | re-read the credentials file at or near `expires_at` |
 | Upload refused with a policy error | the object key does not start with `staging.post.key_prefix`, or the object is over 1 GiB | RULE — enforced by the storage service, so the refusal is an HTTP error | prefix the key explicitly; split the object |
-| The run is stopped at almost exactly fifteen minutes, reported as failed | the runtime budget the revision declared (900 seconds by default) ran out | BEHAVIOUR | set `timeout_seconds` on the pipeline node, or publish a revision declaring more |
-| The container is killed with no warning and nothing is collected | the job was fenced — revoked, or the agent could not reach the orchestrator for about six minutes | BEHAVIOUR — a SIGKILL with no grace period; no marker can be written | check the agent's connectivity; nothing in the node can prevent this |
+| The run is stopped at almost exactly fifteen minutes, reported as failed | the runtime budget the revision declared (900 seconds by default) ran out | BEHAVIOUR — SIGTERM then SIGKILL 30 seconds later, the same stop cancellation uses, but classified `failed` | set `timeout_seconds` on the pipeline node, or publish a revision declaring more. A SIGTERM handler also gets you a marker and a real failure reason out of this case |
+| The container is killed with no warning and nothing is collected | the job was fenced. Six triggers, listed in [PROTOCOL.md](PROTOCOL.md#71-fencing-the-stop-with-no-grace-period-at-all); the common two are an orchestrator unreachable for about six minutes, and a job revoked while it ran | BEHAVIOUR — a SIGKILL with no grace period, so no further marker can be written. Three of the six still report the outcome; three are silent and leave the execution parked until an operator cancels it | check the agent's connectivity and the agent's own log for the fence reason; nothing in the node can prevent this |
 | A cancelled run keeps going, then dies | no SIGTERM handler, so PID 1 discarded the signal and the 30 second grace ran out | BEHAVIOUR (a property of Linux, not of the platform) | install a handler that sets a flag |
 | Logs stop partway through | you exceeded the shipping rate, or a single line exceeded 64 KiB and its tail was discarded | BEHAVIOUR — the excess is dropped silently | fewer, shorter lines |
 | Logs never appear at all | a logging library that defaults to WARNING and to stderr only, or a buffered stdout | Unchecked | configure the logger explicitly and set `PYTHONUNBUFFERED=1` |

@@ -40,9 +40,13 @@ published area, re-reads each one and holds it to the
 hash and size the marker promised
 ```
 
-Four documents live in the staging prefix. Their names are fixed and are part of the
-contract; you locate them by name, never by configuration
-(`external/contract.py:56-59`).
+**RULE for the names in the table below; BEHAVIOUR for the "Required" column.** Four
+documents live in the staging prefix and their names are fixed
+(`external/contract.py:56-59`). You locate them by name, never by configuration, and so
+does the platform: collection joins your staging prefix to the literal string
+`__lspo_complete.json` and reads whatever is there (`external/io.py:221-229`). A receipt
+written under any other name therefore does not exist as far as the platform is concerned,
+and a run that exited 0 fails for having no marker.
 
 | Filename | Written by | Required |
 |---|---|---|
@@ -158,8 +162,10 @@ And local paths, which exist only for a single-host demo:
 }
 ```
 
-Field by field (`runners/credentials.py:386-397` for the first,
-`runners/credentials.py:507-525` for the second, constants at `:63-71`):
+**BEHAVIOUR, for the table below.** This is what the agent writes, field by field
+(`runners/credentials.py:386-397` for the first, `runners/credentials.py:507-525` for the
+second, constants at `:63-71`). Nothing here is a duty on you; it is what you will find in
+the file.
 
 | Field | Meaning |
 |---|---|
@@ -268,8 +274,11 @@ document under version 1 rules and produce plausible nonsense.
 
 ### 2.2 `invocation.json`, field by field
 
-Source: `external/contract.py:407-492`. "Required" means the document is invalid without
-it, by the same parser the orchestrator uses.
+**RULE, and it governs all three tables in this section.** Every "Type" and "Required" cell
+below is a check in the parser the orchestrator itself uses
+(`external/contract.py:407-492`): a document that breaks one is invalid, and the job does
+not run. "Required" means the document is invalid without that field. These are not
+descriptions of the usual shape — they are the refusals.
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
@@ -358,14 +367,26 @@ end of the run, after all the work.
 **RECOMMENDATION.** Stream inputs to disk or process them incrementally. See section 3.5
 for why holding one in memory is a real risk rather than a style preference.
 
-**BEHAVIOUR, and nothing bounds it.** There is no ceiling of any kind on your **inputs**:
-not on one object, not on their total, not on how many there are. The 1 GiB ceiling in
-section 3.5 applies to what you **upload**, and the container is given no disk quota at
-all — the agent sets a memory limit, a CPU limit and a process limit when it starts your
-container, and no storage limit (`agent/executors/docker_exec.py:248-274`). A node that
-downloads every input to `/tmp` and keeps it there can therefore fill the disk of the
-machine the agent runs on, which is somebody else's laptop or server. Delete each input
-when you are done with it, or stream it and never land it at all.
+**BEHAVIOUR.** There is no ceiling on the **size** of your inputs: not on one object, not
+on their total. The 1 GiB ceiling in section 3.5 applies to what you **upload**, and the
+container is given no disk quota at all — the agent sets a memory limit, a CPU limit and a
+process limit when it starts your container, and no storage limit
+(`agent/executors/docker_exec.py:248-274`). A node that downloads every input to `/tmp` and
+keeps it there can therefore fill the disk of the machine the agent runs on, which is
+somebody else's laptop or server. Delete each input when you are done with it, or stream it
+and never land it at all.
+
+**BEHAVIOUR, and there IS a ceiling on the NUMBER of them, indirectly.** Every input, with
+its URI, its hash, its size and its relpath, is written into the job description, and the
+writer refuses to publish one larger than **8 MiB** (section 2.1,
+`external/io.py:148-157`). So the input count is bounded after all, by a limit that depends
+on how long your URIs are. Measured against the real models at the commit these documents
+were verified at: about **330 bytes per pinned input object** with 95-character URIs, which
+puts the ceiling at roughly **25,000 inputs** — 25,445 fitted, 25,446 did not. Past it the
+step fails **before the job is created**, at the moment the orchestrator tries to write the
+job description, so no container ever starts and there is nothing for your node to handle.
+It is not a limit you can design around; it is one to know about before wiring a node
+downstream of something that produces tens of thousands of files.
 
 ### 2.4 How long you actually get
 
@@ -580,6 +601,11 @@ once trimmed, and free of control characters, by the same definition as above
 step selects its input by matching that string, and the delivered artifact is stored under
 it — so it is held to the same standard as a path.
 
+**BEHAVIOUR, and it catches people.** The name is checked for emptiness *after* trimming
+but is **not** trimmed: `" output "` passes, and then travels onward with its spaces intact,
+as the artifact kind a downstream step has to match exactly. This was exercised against the
+parser. Trim your own port names.
+
 **RULE.** Relpaths listed under `produced_ports` are held to the full canonical-relpath
 rule as well, not merely to "is it in the inventory" (`external/contract.py:567`). There
 is no spelling that is legal in one place and not the other.
@@ -739,7 +765,10 @@ terminal receipt for the attempt.
 }
 ```
 
-Field by field (`external/contract.py:519-568`):
+**RULE, for the table below.** Every "Type" and "Required" cell is a refusal the marker
+parser makes (`external/contract.py:519-568`); a marker that breaks one is not read at all.
+[CONFORMANCE.md](CONFORMANCE.md#validating-your-own-marker) lists every one of those
+refusals individually, enumerated by exercising the parser.
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
@@ -916,14 +945,28 @@ image, after which it exited at once.
 **BEHAVIOUR.** The platform's classification is authoritative and it asks "was
 cancellation requested?" **before** it looks at your exit code
 (`agent/runner.py:2326-2340`). So a cancelled run stays cancelled whatever you exit with,
-and exit code 20 is **not required** for that. The order of questions is: was this agent
-fenced, is the agent shutting down, did the runtime deadline pass, was cancellation
-requested or was the exit code 20, was the exit code 0, did the container vanish, and only
-then the exit code's own class.
+and exit code 20 is **not required** for that. The order of questions is: was this job
+fenced, was the agent forced to exit without waiting, did the runtime deadline pass, was
+cancellation requested or was the exit code 20, was the exit code 0, did the container
+vanish, and only then the exit code's own class. (The second of those is a special case: on
+a forced agent exit nothing is reported at all, because the agent leaves your container
+running for its successor to adopt rather than ending the job — see section 7.1.)
 
-**BEHAVIOUR.** A container stopped because its **runtime deadline** passed is classified
-`failed`, not `cancelled`, and that check comes first (`agent/runner.py:2332-2333`). On a
-default registration that is the fifteen-minute mark; see section 2.4.
+**BEHAVIOUR, and it is why your SIGTERM handler earns its keep twice.** The runtime
+deadline is **not** an immediate kill either. When the deadline passes the agent asks
+docker for exactly the same polite stop cancellation uses — SIGTERM, then SIGKILL after the
+same **30 seconds** (`agent/runner.py:2317-2324` calls the same
+`agent/executors/docker_exec.py:405-415`). At the signal level the two are
+**indistinguishable**: your process cannot tell "a human pressed stop" from "your fifteen
+minutes are up", and it does not need to — the right response to both is to stop, write a
+marker, and exit.
+
+**BEHAVIOUR.** What differs is the label the platform puts on it. A container stopped
+because its runtime deadline passed is classified `failed`, not `cancelled`, and that check
+comes first (`agent/runner.py:2332-2333`), so nothing your process exits with can turn it
+into a cancellation. On a default registration that is the fifteen-minute mark; see section
+2.4. The marker you manage to write on the way out is still read: its `error` becomes the
+execution's failure reason and its inventoried objects are salvaged (section 8).
 
 **RECOMMENDATION.** Handle cancellation, in this shape:
 
@@ -948,33 +991,58 @@ them.
 
 ### 7.1 Fencing: the stop with no grace period at all
 
-Cancellation is the polite path, and it is not the only one.
+Cancellation and the runtime deadline are the polite paths — SIGTERM, then thirty seconds.
+There is a third, and it is not polite.
 
 **BEHAVIOUR.** On the second path your container is **killed outright** — one SIGKILL, no
 SIGTERM first, no thirty seconds, no opportunity to write anything
 (`agent/executors/docker_exec.py:417-440`, called from `agent/runner.py:2553-2589`). The
-agent calls this **fencing**. It happens whenever the agent concludes that it no longer
-speaks for your job, because the one thing the design will not tolerate is two processes
-writing into one output area:
+agent calls this **fencing**, and it does it whenever it concludes that it no longer speaks
+for your job, because the one thing the design will not tolerate is two processes writing
+into one output area.
 
-* **the orchestrator became unreachable and the job's lease ran out.** A claimed job
-  carries a lease, renewed on every heartbeat, valid for **300 seconds**
-  (`LSPO_RUNNER_LEASE_TTL_S`, `lspo/settings/base.py:545`). While it cannot reach the
-  orchestrator the agent keeps your container running until that lease has been expired
-  for a further **60 seconds** (`LSPO_AGENT_LEASE_EXPIRY_GRACE_S`, `agent/config.py:128`
-  and `:338`), then assumes the work has been reassigned and kills it
-  (`agent/runner.py:2538-2551`). So roughly six minutes of network trouble ends the run;
-* **the job was taken away.** The agent re-reads the orchestrator's list of jobs it holds
-  on a timer; a job that stops being listed has been revoked, and its container is killed
-  (`agent/runner.py:11-24`);
-* **the agent's identity was rejected**, or the tenant owning the job was switched off
-  (`agent/runner.py:34-61`);
-* **the agent is shutting down** and has stopped waiting for you.
+**BEHAVIOUR.** There are six triggers, and they do **not** all have the same consequence.
+What separates them is whether the agent still has the standing to say how the job ended:
+some fences take the *work* away while leaving the agent's own credential valid, and on
+those the terminal report still goes out, which is what lets collection run at all.
 
-**BEHAVIOUR, and this is the part to plan around.** A fenced container writes no marker,
-so **nothing it produced is collected** — salvage publishes only what a marker inventories,
-and there is none. Everything the run had done is lost, whatever is sitting in the staging
-area.
+| What happened | Container | Is the outcome reported? |
+|---|---|---|
+| The orchestrator became unreachable and the job's lease ran out (`agent/runner.py:2538-2551`) | SIGKILL | **No.** There is nobody reachable to tell |
+| The job stopped being listed as assigned to this agent — revoked, or its launch already went terminal elsewhere (`agent/runner.py:1112-1163`) | SIGKILL, delivered a moment later by the sweep that matches containers by name, or by the start path if no container exists yet | **Yes**, deliberately: the report is what frees the job's capacity slot |
+| The organization that owns the job was switched off, arriving as a 403 (`agent/runner.py:2661-2677`) | SIGKILL | **Yes**, for the same reason. Other jobs on the same agent are untouched |
+| The agent's own identity was refused — a rotated or retired runner, a drained pool (`agent/runner.py:1690-1767`) | SIGKILL, for **every** job it holds, then the agent exits | **No.** The credential it would report with is exactly what stopped being recognised |
+| The agent's heartbeat thread failed — the measured case was its disk filling up while writing your refreshed credentials (`agent/runner.py:2376-2393`) | SIGKILL | **Yes**, carrying the real reason: "the disk was full", not a blank failure |
+| A lease-lost or job-not-found answer to one of the agent's own calls — starting the job, a heartbeat, a credential re-issue, the final report (`agent/runner.py:2116`, `:2466`, `:2687`, `:2824`) | SIGKILL | **No** |
+
+**BEHAVIOUR, and it is worth stating because the opposite is the natural guess.** An
+ordinary agent shutdown is **not** a fence. The first signal to the agent means "finish
+what you are doing": it stops claiming new work and then waits for the jobs it holds, with
+no deadline at all, because a step may legitimately run for hours
+(`agent/runner.py:776-814`, `:847-880`). A forced second signal makes the agent exit at
+once and **deliberately leaves your container running**, addressed by a name the next agent
+will recognise, so that agent adopts it and the work is not thrown away. Your container is
+neither killed nor signalled on either path.
+
+**BEHAVIOUR, and this is the part to plan around.** A SIGKILL cannot be caught, handled or
+delayed, so a fenced container writes nothing further — no marker, no last object, not a
+line of log. What is collected afterwards is therefore exactly what a **valid marker for
+this attempt had already recorded**, if one was in the staging area when the kill landed,
+and nothing else: collection reads that marker, checks that its `execution_id`, `attempt` and
+`generation` name this attempt and not a superseded one, and then copies and verifies every
+object it inventories, keeping what verifies (`pipelines/external_finalize.py:1459-1482`,
+`:1523-1581`). On the three fences that still report, that collection happens immediately.
+On the three that do not, nothing happens at all until an operator cancels the execution —
+there is no watchdog today ([OPERATIONS.md](OPERATIONS.md#residual-limits-stated-plainly))
+— and then the same collection runs.
+
+**So the summary is narrower than "everything is lost", and for a well-behaved node it
+usually amounts to the same thing.** If you follow the strongest recommendation in this
+document and write your marker last, then when a fence lands mid-run there is no marker,
+and nothing you produced is collected. The salvage path is not dead code — it is what
+recovers the work of a node that failed or was cancelled and wrote a marker on its way out
+(section 5) — it simply has nothing to read after a SIGKILL that arrived first. What is
+never true is that a fence gives your process a chance to react.
 
 **RECOMMENDATION.** Do not design a node whose entire output appears in its last minute.
 Nothing you can write survives a SIGKILL, so the only defence is to have less at risk when
@@ -986,7 +1054,8 @@ rather than cancelling it on suspicion.
 
 ## 8. What happens after you exit
 
-You do not need to implement any of this, but knowing it explains most failure messages.
+This section is **background**: nothing in it is yours to implement, and knowing it explains
+most of the failure messages you will see.
 
 **BEHAVIOUR.** The agent reports your exit code and its own classification. On a success
 the orchestrator reads your marker, checks its identity, and then for every object in

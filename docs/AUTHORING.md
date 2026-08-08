@@ -68,17 +68,18 @@ See [OPERATIONS.md](OPERATIONS.md#registering-a-node).
 
 ### 5. Handle the hard parts
 
-Credential expiry, cancellation, and inventory-on-failure. They are the three things a
-first version always omits and the three things that decide whether a real run survives.
-The skeleton below has all three.
+**RECOMMENDATION.** Credential expiry, cancellation, and inventory-on-failure. They are the
+three things a first version always omits and the three things that decide whether a real
+run survives. Not one of them is checked by anything. The skeleton below has all three.
 
 ---
 
 ## The skeleton
 
 This is the **correct shape**, in Python for concreteness. It is not the file in this
-repository: see [Known gaps in `node.py`](#known-gaps-in-nodepy) below. Nothing here is
-required to be Python, and nothing here imports anything from the orchestrator.
+repository: see [Known gaps in `node.py`](#known-gaps-in-nodepy) below. None of it is
+Python-specific, and none of it imports anything from the orchestrator. The labels inside
+the code comments carry their usual meaning.
 
 ```python
 #!/usr/bin/env python3
@@ -292,7 +293,9 @@ if __name__ == '__main__':
     sys.exit(main())
 ```
 
-What each awkward-looking decision is buying:
+**RECOMMENDATION, for every row of the table below.** What each awkward-looking decision in
+that skeleton is buying. Nothing in the platform checks any of it; each row is there because
+the obvious alternative fails on a real run, later, saying something unrelated:
 
 | Shape | Why it is like that |
 |---|---|
@@ -310,14 +313,16 @@ What each awkward-looking decision is buying:
 
 ## Known gaps in `node.py`
 
-The `node.py` in this repository is a demonstration of the happy path. It is being repaired
-separately. Until then, do not copy these parts of it. Line numbers are for this
-repository's copy.
+This whole section is **background**, in the sense
+[README.md](README.md#how-to-read-this-three-kinds-of-statement) gives that word: it
+describes one file that happens to sit in this repository, and imposes nothing on your node.
+The `node.py` here is a demonstration of the happy path. It is being repaired separately.
+Until then, do not copy these parts of it. Line numbers are for this repository's copy.
 
 | Where | What it does | Why it is wrong |
 |---|---|---|
-| `node.py:174` | reads `LSPO_CREDENTIALS` | The agent sets `LSPO_CREDENTIALS_FILE`. This works only because `Dockerfile:18` hardcodes the other name. Copy the file without that line and the node dies immediately with a message that names a variable the platform has never heard of. |
-| `node.py:260-261` | reads the envelope once, at the start | After roughly fifteen minutes its upload policy is expired, so it can upload neither its outputs nor its marker. Invisible on a default registration, where the run is killed at that same fifteen-minute mark; fatal the first time an operator raises the node's `timeout_seconds` ([PROTOCOL.md](PROTOCOL.md#24-how-long-you-actually-get)). |
+| `node.py:174` | reads `LSPO_CREDENTIALS` | The agent sets `LSPO_CREDENTIALS_FILE`. This works only because `Dockerfile:18` hardcodes the other name. Copy the file without that line and the node dies immediately with a message that names a variable the platform has never heard of. This was run: with only the correct variable set, it exits 1 with `StepError: LSPO_CREDENTIALS is not set`. It is also why the offline example in [CONFORMANCE.md](CONFORMANCE.md#level-1-run-it-with-a-hand-written-envelope) has to set both names. |
+| `node.py:260-261` | reads the envelope once, at the start | After roughly fifteen minutes its upload policy is expired, so it can upload neither its outputs nor its marker. Invisible on a default registration, where the run is stopped at that same fifteen-minute mark anyway; fatal the first time an operator raises the node's `timeout_seconds` ([PROTOCOL.md](PROTOCOL.md#24-how-long-you-actually-get)). |
 | `node.py:260-261` | bootstrap runs outside the `try` | A failure there escapes `main`, prints a traceback and reports nothing. |
 | `node.py:99`, `:142`, `:156` | holds whole objects in memory, twice | Collides with the 1 GiB per-object allowance against a 2 GiB memory limit. |
 | `node.py:192`, `:271` | the inventory is local to `process()`; the failure path writes `objects: []` | Everything already uploaded is unrecoverable, because salvage publishes only what the marker inventories. |
@@ -431,14 +436,20 @@ treats law as advice. Both are expensive.
 
 * [ ] **RECOMMENDATION.** A SIGTERM handler sets a flag; the work loop checks it; the
       cancelled path writes a marker and exits 20. Without a handler your process, as
-      PID 1, discards the signal entirely.
-* [ ] **RECOMMENDATION.** Every network timeout is comfortably under the 30 second
-      cancellation grace.
+      PID 1, discards the signal entirely. The same handler is what gets you a marker when
+      the **runtime deadline** passes, because that stop is delivered identically — the two
+      are indistinguishable at the signal level.
+* [ ] **RECOMMENDATION.** Every network timeout is comfortably under the 30 second grace
+      that follows that SIGTERM, on either path.
 * [ ] **RECOMMENDATION.** Exit 1 for conditions a retry might survive, exit 10 for
       conditions no retry can fix. Nothing acts on the distinction today.
-* [ ] **BEHAVIOUR to accept rather than to satisfy.** Nothing survives a fence (a revoked
-      job, an unreachable orchestrator): the container is killed outright and no marker is
-      written. Design so that a run losing its last minute of work is survivable.
+* [ ] **BEHAVIOUR to accept rather than to satisfy.** A fence (a revoked job, an
+      unreachable orchestrator, a refused agent identity, and three more —
+      [PROTOCOL.md](PROTOCOL.md#71-fencing-the-stop-with-no-grace-period-at-all)) kills the
+      container outright with a SIGKILL, so nothing further is written and, under the
+      write-the-marker-last discipline, nothing is collected. An ordinary agent shutdown is
+      **not** a fence: it waits for your job, or leaves your container running for the next
+      agent. Design so that a run losing its last minute of work is survivable.
 
 **Image**
 
