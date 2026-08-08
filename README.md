@@ -186,6 +186,35 @@ Three rules, and why each exists:
 Exit codes: `0` succeeded · `1` transient, retry me · `10` permanent, do not retry ·
 `20` cancelled.
 
+## Where your logs go
+
+Everything your container writes to stdout or stderr is captured by the runner, sent to the
+orchestrator, and shown in the run's log — the same pane an operator watches while the step
+runs. It is also kept in a log file stored with the execution, so it survives after the run.
+
+**`logging` needs one line before it prints anything.** A bare `log.info(...)` in a fresh
+Python program writes nothing at all: the default emits WARNING and above, and only to
+stderr. This is the most common reason a node author says their logs disappeared. `node.py`
+shows the working shape:
+
+```python
+logging.basicConfig(level=logging.INFO, stream=sys.stdout, format='%(levelname)s %(message)s')
+log = logging.getLogger('hello-node')
+```
+
+`print()` works without any of that — just pass `flush=True` if you want a line to appear
+while the step is still running rather than when it ends.
+
+**Do not print secrets.** What your container writes is stored with the execution, shown to
+everyone who can see that run, and searchable. No tokens, no credentials, no customer data
+you would not put in a ticket. The credentials this step is handed are short-lived, but a
+leaked one is still a leak — and note that an exception message can carry a presigned URL
+into the log without you meaning it to.
+
+**Only the tail survives.** The run keeps roughly the last thousand lines. A step that
+prints a line per record will lose its beginning; if something matters, say it once, at the
+end.
+
 Your credentials expire (about 15 minutes) and are refreshed by the runner while your
 container runs, so a long job never has to hold a long-lived secret. Uploads are bounded
 to your own job's prefix by the storage service itself, not by our politeness.

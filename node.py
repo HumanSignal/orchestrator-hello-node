@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import sys
 from urllib.parse import urlparse
@@ -240,11 +241,25 @@ def write_marker(envelope: dict, manifest: dict, objects: list[dict], *, status:
     write_output(envelope['staging'], MARKER_FILENAME, _dump(marker))
 
 
+# Everything this program writes to stdout or stderr is captured by the runner, sent to
+# the orchestrator and shown in the run's log — so `print()` works, and so does `logging`
+# ONCE IT IS CONFIGURED. Without this line a bare `log.info(...)` prints NOTHING: Python's
+# default emits WARNING and above, and only to stderr. That is the single most common
+# reason a node author says "my logs disappeared".
+#
+# One thing NOT to write here: secrets. Whatever this program prints is stored with the
+# execution, shown to anyone who can see the run, and searchable — so no tokens, no
+# credentials, no customer data you would not put in a ticket. The credentials this step
+# is handed are short-lived, but a leaked one is still a leak.
+logging.basicConfig(level=logging.INFO, stream=sys.stdout, format='%(levelname)s %(message)s')
+log = logging.getLogger('hello-node')
+
+
 def main() -> int:
     """Run the step. Never raises: every failure becomes a marker plus an exit code."""
     envelope = load_envelope()
     manifest = read_manifest(envelope)
-    print(f'hello-node: execution {manifest.get("execution_id")} attempt {manifest.get("attempt")}', flush=True)
+    log.info('execution %s attempt %s', manifest.get('execution_id'), manifest.get('attempt'))
     try:
         objects, metrics = process(envelope, manifest)
     except Exception as failure:
@@ -259,7 +274,7 @@ def main() -> int:
         return EXIT_PERMANENT if isinstance(failure, StepError) else EXIT_TRANSIENT
 
     write_marker(envelope, manifest, objects, status='succeeded', error=None)
-    print(f'hello-node: done — {metrics["files"]} file(s), {metrics["total_bytes"]} bytes', flush=True)
+    log.info('done — %s file(s), %s bytes', metrics['files'], metrics['total_bytes'])
     return EXIT_OK
 
 
