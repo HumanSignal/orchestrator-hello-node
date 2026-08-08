@@ -433,8 +433,10 @@ does not, and nothing shorter will reveal the difference.
 documented way is given a runtime budget of **900 seconds**, and at that moment the agent
 begins stopping your container — a SIGTERM, then a SIGKILL that in practice arrives well
 inside the thirty seconds it advertises ([PROTOCOL.md](PROTOCOL.md#7-cancellation)). So a
-job "longer than fifteen minutes" is simply stopped, the run is ordinarily left parked
-rather than reported, and it proves nothing about credentials.
+job "longer than fifteen minutes" is simply stopped, the run is ordinarily left parked at
+"Waiting for runner" rather than reported — until you cancel it yourself, which is also how
+you clear the quota slot the experiment is holding — and it proves nothing about
+credentials.
 
 **RECOMMENDATION, and nothing in the platform requires it — it is a precondition of the
 test, not a rule about your node.** Set `timeout_seconds` on the pipeline node (for example

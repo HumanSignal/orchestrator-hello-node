@@ -579,7 +579,7 @@ no chance to write a marker**, so unless one was already there the run dies with
 exit code and no account of itself. (The container's exit code is still reported, so this
 ending arms collection like any other self-reported failure and a marker you had already
 written would be read. Under the write-the-marker-last discipline there is usually none —
-usually, because a kill can also land in the moment between the marker's upload finishing
+usually, because a kill can also land in the interval between the marker's upload finishing
 and the process exiting, and then it is there; see section 7.1.) Nothing in the
 orchestrator's limits is exceeded on the way there.
 
@@ -1103,14 +1103,38 @@ written its marker.
 
 **BEHAVIOUR, and it is the sharpest edge of the previous paragraph.** On a job the agent
 picked back up, the container is running for the *whole* of preparation, including the
-first three steps. A credentials or job-description failure there is reported as a job
-that could not run — and because the agent stops a container only when it recorded an
-attempt to get hold of one, and that record is written inside the very step this failure
-happened before (`agent/runner.py:2216`, `:2778-2779`), yours is not stopped. The run is
-declared over, collection is armed, and your process is still running and still writing
-into the same staging area. Nothing in your node can detect this or defend against it;
-it is here so that "the job failed before anything started" is not read as a guarantee
-that nothing of yours was running. Read from the source, not executed.
+first three steps. A failure there that the agent can still report from where it stands —
+an unsupported contract version, an unreadable job description, or the one credentials
+refusal that names the **tenant** rather than the agent — is written down as a job that
+could not run, and because the agent stops a container only when it recorded an attempt to
+get hold of one, and that record is written inside the very step this failure happened
+before (`agent/runner.py:2216`, `:2778-2779`), yours is not stopped. The run is declared
+over, collection is armed, and your process is still running and still writing into the
+same staging area. It is here so that "the job failed before anything started" is not read
+as a guarantee that nothing of yours was running. Read from the source, not executed.
+
+**BEHAVIOUR, and it is what ends that overlap, which is bounded rather than open.** Two
+things narrow it, one makes it visible, and one closes it. It needs an adopted container
+that is still **running**: adoption picks up the container of that name whatever state it
+is in (`agent/executors/docker_exec.py:276-300`), and one that had already exited collides
+with nothing. It needs a failure of the reportable kind above: a lost lease, or a refusal
+aimed at the **agent's own identity**, fences instead — and a fence addresses the container
+**by name** rather than by the handle this job happens to hold, so it stops yours even
+though nothing had been recorded about it (`agent/runner.py:2113-2116` and `:2553-2589`;
+`:1690-1767` for the identity case, which does the same for every container on the
+machine). Your node is also not blind to it: finishing a job is followed by the agent
+deleting that job's credentials directory (`agent/runner.py:2749`,
+`agent/creds.py:117-130`), so the file at `LSPO_CREDENTIALS_FILE` disappears underneath a
+container that is still running. A refresh replaces that file by renaming a new one over it
+and never leaves it missing (section 4.3), so "it is not there" is not a refresh caught
+half-way — it is this. Whether you watch for it or not, the next reconciliation ends it:
+every **120 seconds** by default the agent re-reads the orchestrator's list of the jobs it
+holds, the finished job is no longer on that list, and a container this agent owns that the
+list does not name is killed (`agent/config.py:124`, `agent/runner.py:1019-1035`,
+`:1285-1295`). So the two writers overlap for about two minutes at the outside, not
+indefinitely — with the one caveat that a list the agent cannot read sweeps nothing and is
+tried again on the next pass. Read from the source, like the paragraph before it: none of
+this was executed either.
 
 **BEHAVIOUR, and it is worth stating plainly, because the shape of this section invites
 you to hunt for the exception.** The endings that reliably deliver something are the
@@ -1131,10 +1155,11 @@ you had already written **and** inventoried at the instant the kill landed, and 
 follow this document's strongest recommendation and write the marker last there is
 *usually* nothing there to read. Usually and not always — writing the marker last
 decides where in your program it happens, not that it vanishes at the same instant your
-process does, and a fence landing in the second or so between the marker's upload and
-the agent seeing your container go finds it there. That interval is derived at the end
-of section 7.1. So design as though no externally imposed stop delivers anything; just
-do not write down that it is impossible for one to.
+process does, and a fence landing in the interval between the marker's upload and the
+agent seeing your container go finds it there. How long that interval is is mostly your
+own program's business, and the end of section 7.1 says why no figure for it is given.
+So design as though no externally imposed stop delivers anything; just do not write down
+that it is impossible for one to.
 
 **BEHAVIOUR, and this one is measured rather than assumed.** Your program almost certainly
 runs as **PID 1** inside its container: the agent overrides neither the entrypoint nor the
@@ -1350,18 +1375,22 @@ last makes "there is nothing to collect" the ordinary outcome; it does not make 
 certain. Writing it last says *when in your program* it is written. It does not say that
 it appears and disappears together with your process, and the two are separated by a
 real interval: after the marker's upload has finished, your process still has to return
-from whatever it was doing and exit, and the agent then learns of that exit only on its
-next poll of the docker daemon — a quarter of the heartbeat interval, capped at one
-second, so about a second with the shipped settings (`agent/runner.py:2304-2308`).
-Through the whole of that interval a valid marker for this attempt is sitting in your
-staging area — written last, and still there. A fence landing inside it kills a
-container that has already done its writing, and where that fence is one whose terminal
-report is not merely permitted but **accepted** — the agent's own heartbeat thread
-failing is the clear case, because the job itself is untouched and its lease still valid
-— collection runs and reads that marker. Nothing about this is a mechanism to use: the
-interval is short, you cannot choose when a fence arrives, and the recommendation is
-unchanged. It is stated because "write the marker last, therefore nothing can be
-collected" is a claim about *timing* wearing the clothes of a claim about *design*, and
+from whatever it was doing and exit, and only then can the agent's poll of the docker
+daemon see it go (`agent/runner.py:2304-2308`, `agent/executors/docker_exec.py:377-386`).
+**No length is quoted for that interval, and none should be assumed.** The platform's
+share of it is one poll of the daemon. The rest is your own program between the upload
+returning and the process exiting — unwinding, flushing, whatever your runtime does on
+the way out — which is bounded by nothing the platform controls and is known only to
+whoever wrote it. Through the whole of it a valid marker for
+this attempt is sitting in your staging area — written last, and still there. A fence
+landing inside it kills a container that has already done its writing, and where that
+fence is one whose terminal report is not merely permitted but **accepted** — the agent's
+own heartbeat thread failing is the clear case, because the job itself is untouched and
+its lease still valid — collection runs and reads that marker. Nothing about this is a
+mechanism to use: you cannot choose when a fence arrives, you cannot arrange to be inside
+that interval when one does, and the recommendation is unchanged. It is stated because
+"write the marker last, therefore nothing can be collected" is a claim about *timing*
+wearing the clothes of a claim about *design*, and
 the difference matters to anyone looking at a cancelled-looking run that delivered
 output nobody expected. Read from the source; none of the runs behind these documents
 exercised a fence.

@@ -463,7 +463,8 @@ apart either treats advice as law or treats law as advice. Both are expensive.
       second grace is cut short by the platform's own next heartbeat (zero to 20 seconds,
       ten on average), your upload credentials expired at the deadline, and the terminal
       report that would have made a marker count is refused — so nothing is collected there
-      either, and a container stopped that way leaves its run parked rather than failed
+      either, and a container stopped that way leaves its run parked at "Waiting for
+      runner" rather than failed, holding a quota slot until an operator cancels it
       ([PROTOCOL.md](PROTOCOL.md#7-cancellation)). The third externally imposed stop, a
       fence, is the last item in this section; it is the only one that can deliver
       anything, and only a marker you had already finished writing. Write the handler for a clean exit
@@ -481,7 +482,8 @@ apart either treats advice as law or treats law as advice. Both are expensive.
       is a fence that lands after your marker was already uploaded and before your container
       was seen to go, which collects what that marker names. An ordinary agent shutdown is
       **not** a fence: it waits for your job, or leaves your container running for the next
-      agent. Design so that a run losing its last minute of work is survivable.
+      agent. Design so that a run losing everything it has not already had collected is
+      survivable — which, until your marker lands, is all of it.
 
 #### Image
 
