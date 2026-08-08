@@ -25,9 +25,15 @@ position is that this is the customer's trusted code rather than hostile code.
 
 Two equivalent paths; both go through the same service layer, so they cannot drift.
 
-**From the web interface.** Settings, then the **External Nodes** tab. It registers a
-pool, a deployment and a runner agent, and shows the pool's registration token exactly
-once.
+**From the web interface.** Settings, then the **External Nodes** tab, then **Connect
+node**. It creates the same three database rows the command below does — a **pool**, a
+**deployment** and a **revision** — and shows the pool's registration token exactly once,
+together with the `docker run` line for an agent.
+
+It does **not** create the agent. Nothing does: an agent comes into existence when
+somebody runs that `docker run` line on a machine, and it enrols itself using the
+registration token. Until then the deployment is registered and has nowhere to run, which
+the screen shows as "no agent yet".
 
 **From a shell on the orchestrator.**
 
@@ -35,14 +41,33 @@ once.
 python manage.py external_demo_setup --image '<registry>/my-node@sha256:...'
 ```
 
-It creates the three rows a node needs (pool, deployment, revision) and prints three
-things: the pool's **registration token**, shown once because only its hash is stored; the
-exact `docker run` line for the agent, filled in with your orchestrator URL; and the
+It creates the same three rows (pool, deployment, revision) and prints three things: the
+pool's **registration token**, shown once because only its hash is stored; the exact
+`docker run` line for the agent, filled in with your orchestrator URL; and the
 **deployment id**, which is what a pipeline node points at.
 
+**BEHAVIOUR.** Both paths give the new revision a runtime budget of **900 seconds** when
+you do not name one (`--timeout-seconds` on the command,
+`noderegistry/management/commands/external_demo_setup.py:38`; the `timeout_seconds` field
+on the registration API, `noderegistry/serializers.py:26`). That number, not the
+platform's 3600-second fallback, is what your container actually gets — see
+[PROTOCOL.md](PROTOCOL.md#24-how-long-you-actually-get). A revision is immutable, so
+changing it later means either publishing a new revision or setting `timeout_seconds` on
+the pipeline node, which takes effect immediately and wins.
+
 **BEHAVIOUR.** The command is idempotent, and it deliberately does **not** re-mint the
-pool token on a second run: that token is shared by every agent already enrolled, so
-rotating it would lock all of them out. Pass `--rotate-token` when you actually mean it.
+pool token on a second run. Pass `--rotate-token` when you actually mean it.
+
+**BEHAVIOUR, and two places in the platform say this wrongly.** Rotating the pool's
+registration token does **not** lock out the agents already enrolled. That token buys
+exactly one thing — permission to create a new agent identity in that pool — and each
+agent, once enrolled, authenticates with its own bearer token minted at enrolment
+(`runners/auth.py:21-33`, `noderegistry/views.py:262-270`). Rotating stops the old secret
+enrolling anything further and nothing else: every running agent keeps claiming,
+heartbeating and completing exactly as before. To actually stop an enrolled agent, retire
+that runner or switch the pool's `registration_enabled` off. (The setup command's own
+module docstring and `noderegistry/services.py:12-15` both still say rotation "would lock
+all of them out". They are wrong; the Settings screen, which says the opposite, is right.)
 
 **BEHAVIOUR.** The command's own printed instructions still say there is no user interface
 for external nodes. That sentence is out of date; the Settings tab exists.
@@ -114,7 +139,9 @@ Four parts of that are load-bearing (`agent/README.md`, "Run it"):
 
 **RECOMMENDATION.** Delete `LSPO_AGENT_REGISTRATION_TOKEN` from the environment after the
 first successful start. The agent boots from the identity saved in its state directory,
-and the pool token is shared by every agent in the pool.
+and the pool token is shared by every agent in the pool — leaving it on a machine leaves
+the ability to enrol more agents lying around on that machine
+(`agent/identity.py:14-27`).
 
 ### Agent settings that change what your node sees
 
@@ -132,7 +159,12 @@ All are `LSPO_AGENT_*` (`agent/config.py:113-137`, `:333-346`).
 | `LOG_LINES_PER_HEARTBEAT` | `100` | Five lines per second, sustained, is the ceiling |
 | `LOG_BUFFER_LINES` | `2000` | How much backlog survives a burst |
 | `CREDS_REFRESH_MARGIN_S` | `60` | How early your credentials file is replaced |
+| `LEASE_EXPIRY_GRACE_S` | `60` | How long past its expired lease a job keeps running while the orchestrator is unreachable. Past it the container is **killed outright**, with no grace period — see [PROTOCOL.md](PROTOCOL.md#71-fencing-the-stop-with-no-grace-period-at-all) |
 | `KEEP_CONTAINERS` | false | Keeps exited containers for inspection; it never keeps a workload running |
+
+There is **no** disk or storage setting here, and that is not an omission in the table: the
+agent applies a CPU, a memory and a process ceiling to your container and no storage
+ceiling at all (`agent/executors/docker_exec.py:248-274`).
 
 ---
 
@@ -177,7 +209,7 @@ Full configuration surface (`pipelines/config_schemas.py:475-513`):
 | `step_kind` | `"external"` | yes | discriminator | no |
 | `external_deployment_id` | integer > 0 | **yes** | which registered deployment runs. Booleans are rejected explicitly | only through its effects |
 | `params` | object | no, default `{}` | **the only node configuration your code ever sees**, copied verbatim | **yes** |
-| `timeout_seconds` | integer > 0 or null | no | requested runtime budget | **yes** |
+| `timeout_seconds` | integer > 0 or null | no | requested runtime budget. **Set this to give a node more than the 900 seconds its revision declares** — it wins over the revision and takes effect at once | **yes** |
 | `queue_timeout_seconds` | integer > 0 or null | no | how long the job stays claimable, default 3600 | no |
 | `input_payload_kind` | string or null | no | require an upstream artifact of this kind; absent means every upstream artifact, including none | indirectly |
 
@@ -202,7 +234,7 @@ A deployment points at a revision, and the revision is what pins the code.
 | Field | Read at run time |
 |---|---|
 | `image_digest` | **Yes.** This is what executes |
-| `declared_io` | **Partly.** Exactly two keys are read: `timeout_seconds` (a fallback budget) and `env_names` (variable **names**, never values) |
+| `declared_io` | **Partly.** Exactly two keys are read: `timeout_seconds` (the budget, unless the pipeline node overrides it — **900** on a default registration) and `env_names` (variable **names**, never values) |
 | `param_schema` | **No.** Nothing validates `params` against it anywhere |
 | `contract_version` | **No.** The manifest is always stamped with the orchestrator's current contract version, which is `1` |
 | `resource_class` | **No.** It does not size the container; the agent's own ceilings do |
@@ -240,7 +272,8 @@ nothing and the job stays queued for someone else.
 ## Residual limits, stated plainly
 
 Each of these is a real gap at the commit these documents were verified against. None is a
-rumour.
+rumour. All of them are **BEHAVIOUR** — things the platform does, or does not do, which
+you cannot change from a node.
 
 * **No watchdog.** Nothing reclaims a job that nobody ever claims, or one whose agent
   disappears after claiming it. The queue deadline only makes the claim scan skip the row.
@@ -251,11 +284,25 @@ rumour.
   regardless of your exit code, and nothing re-attempts. An operator retries by hand.
 * **No aggregate upload quota.** One object is bounded at 1 GiB. Nothing caps the number of
   objects or the total bytes a container may upload before its credentials expire.
+* **No limit of any kind on inputs.** Not per object, not in total, not in number. A step
+  wired downstream of something that produced ten thousand files is handed ten thousand
+  pinned objects, and nothing refuses that before your container starts.
+* **No disk ceiling on the container.** The agent sets a CPU limit, a memory limit and a
+  process limit, and no storage limit (`agent/executors/docker_exec.py:248-274`). A node
+  that downloads its inputs to `/tmp` and never deletes them can fill the disk of the
+  machine hosting the agent — which is a customer's machine, running their other work.
+  Nothing warns, and the first symptom is unrelated things failing on that host.
 * **Presigned reads can outlive their stated expiry.** A presigned GET can remain valid
   past the envelope's `expires_at` by up to the budget left when it was signed. The upload
   policy cannot. Treat `expires_at` as exact for writes, and as a lower bound for reads.
-* **Logs are tail-only while the run is live.** The last 1000 entries. The durable copy is
-  written when the execution reaches a terminal state.
+* **Logs are tail-only, and so is the durable copy.** The last 1000 entries, live and in
+  the file written when the execution reaches a terminal state — the file is built from
+  the same buffer. There is no complete record of a chatty container's output anywhere.
+* **A fenced container is killed outright.** Cancellation gives your process SIGTERM and
+  30 seconds; the fencing path (a revoked job, an unreachable orchestrator for about six
+  minutes) gives it a SIGKILL and nothing else, so it writes no marker and nothing it
+  produced is collected. See
+  [PROTOCOL.md](PROTOCOL.md#71-fencing-the-stop-with-no-grace-period-at-all).
 * **One input port, single files only.** The contract models multiple ports and folder
   inputs; the orchestrator emits neither.
 * **`result.json` is never read.** Metrics come from what was published.
@@ -265,20 +312,31 @@ rumour.
 
 ## Troubleshooting
 
-| Symptom | Likely cause | What to do |
-|---|---|---|
-| Execution sits at **Waiting for runner** | no agent is enrolled in that pool, the pool's concurrency ceiling is reached, or the agent cannot reach the orchestrator | `docker logs lspo-agent`; check the pool's `max_concurrent`; confirm the deployment id on the node |
-| Agent logs 401 at startup | wrong pool token, or a stale `LSPO_AGENT_TOKEN` still in the environment, which wins over the saved identity | remove the stale variable; the saved identity is enough after the first start |
-| Job fails immediately naming an environment variable | the deployment declares a variable the agent's `ALLOWED_ENV` does not permit | add the name or a pattern to the agent's allowlist, or stop declaring it |
-| Container dies at once with a missing credentials file | the agent's state is in a docker volume rather than a host path, so the credentials directory the daemon mounted was an empty one it created | mount a real host directory at the same path inside and outside, with the workdir a child of it |
-| Container dies with permission denied on its credentials | uid mismatch between your image and the agent process | rebuild with the agent's uid, usually 10001 |
-| Node fails with "`LSPO_CREDENTIALS` is not set" | your code reads the wrong variable name | read `LSPO_CREDENTIALS_FILE` |
-| Run fails with "no completion marker" | your container exited 0 without writing `__lspo_complete.json` | write the marker on every path, including failure |
-| Run fails naming a hash or size mismatch | the object changed after you hashed it, or the marker was written before the upload finished | hash the bytes you actually wrote, and write the marker last |
-| Uploads start failing partway through a long run | the credentials envelope expired, roughly fifteen minutes in | re-read the credentials file at or near `expires_at` |
-| Upload refused with a policy error | the object key does not start with `staging.post.key_prefix`, or the object is over 1 GiB | prefix the key explicitly; split the object |
-| A cancelled run keeps going, then dies | no SIGTERM handler, so PID 1 discarded the signal and the 30 second grace ran out | install a handler that sets a flag |
-| Logs stop partway through | you exceeded the shipping rate, or a single line exceeded 64 KiB and its tail was discarded | fewer, shorter lines |
-| Logs never appear at all | a logging library that defaults to WARNING and to stderr only, or a buffered stdout | configure the logger explicitly and set `PYTHONUNBUFFERED=1` |
-| The node runs but downstream steps see nothing | the objects were inventoried but claimed under no output port | claim them under a port; `produced_ports` is what becomes downstream artifacts |
-| A configuration key on the node seems to do nothing | unknown keys are accepted and ignored | check the spelling against the configuration table above |
+The **Kind** column says what sort of thing went wrong, because the answer changes what
+you do about it. **RULE** means a specific check refused you and the fix is not optional.
+**BEHAVIOUR** means the platform did something by design and your node has to accommodate
+it. **Unchecked** means nothing in the platform looks at this at all — it is a coupling or
+a convention that fails as some unrelated-looking symptom, and no amount of correct
+behaviour elsewhere will produce a warning about it.
+
+| Symptom | Likely cause | Kind | What to do |
+|---|---|---|---|
+| Execution sits at **Waiting for runner** | no agent is enrolled in that pool, the pool's concurrency ceiling is reached, or the agent cannot reach the orchestrator | BEHAVIOUR — a saturated quota is never an error, the job simply waits | `docker logs lspo-agent`; check the pool's `max_concurrent`; confirm the deployment id on the node |
+| Agent logs 401 at startup | wrong pool token, or a stale `LSPO_AGENT_TOKEN` still in the environment, which wins over the saved identity | RULE — the token is authenticated on every request | remove the stale variable; the saved identity is enough after the first start |
+| Job fails immediately naming an environment variable | the deployment declares a variable the agent's `ALLOWED_ENV` does not permit | RULE — checked before your container starts | add the name or a pattern to the agent's allowlist, or stop declaring it |
+| Container dies at once with a missing credentials file | the agent's state is in a docker volume rather than a host path, so the credentials directory the daemon mounted was an empty one it created | Unchecked — the docker daemon creates an empty directory rather than failing | mount a real host directory at the same path inside and outside, with the workdir a child of it |
+| Container dies with permission denied on its credentials | uid mismatch between your image and the agent process | Unchecked — nothing compares the two uids or warns | rebuild with the agent's uid, usually 10001 |
+| Node fails with "`LSPO_CREDENTIALS` is not set" | your code reads the wrong variable name | Unchecked — the platform sets `LSPO_CREDENTIALS_FILE` and cannot police how you read it | read `LSPO_CREDENTIALS_FILE` |
+| Run fails with "no completion marker" | your container exited 0 without writing `__lspo_complete.json` | RULE — a marker is required on a successful run | write the marker on every path, including failure |
+| Run fails naming a hash or size mismatch | the object changed after you hashed it, or the marker was written before the upload finished | RULE — every published object is re-read and held to the marker | hash the bytes you actually wrote, and write the marker last |
+| Uploads start failing partway through a long run | the credentials envelope expired, roughly fifteen minutes in | BEHAVIOUR — only visible once somebody raises the node's `timeout_seconds` past 900 | re-read the credentials file at or near `expires_at` |
+| Upload refused with a policy error | the object key does not start with `staging.post.key_prefix`, or the object is over 1 GiB | RULE — enforced by the storage service, so the refusal is an HTTP error | prefix the key explicitly; split the object |
+| The run is stopped at almost exactly fifteen minutes, reported as failed | the runtime budget the revision declared (900 seconds by default) ran out | BEHAVIOUR | set `timeout_seconds` on the pipeline node, or publish a revision declaring more |
+| The container is killed with no warning and nothing is collected | the job was fenced — revoked, or the agent could not reach the orchestrator for about six minutes | BEHAVIOUR — a SIGKILL with no grace period; no marker can be written | check the agent's connectivity; nothing in the node can prevent this |
+| A cancelled run keeps going, then dies | no SIGTERM handler, so PID 1 discarded the signal and the 30 second grace ran out | BEHAVIOUR (a property of Linux, not of the platform) | install a handler that sets a flag |
+| Logs stop partway through | you exceeded the shipping rate, or a single line exceeded 64 KiB and its tail was discarded | BEHAVIOUR — the excess is dropped silently | fewer, shorter lines |
+| Logs never appear at all | a logging library that defaults to WARNING and to stderr only, or a buffered stdout | Unchecked | configure the logger explicitly and set `PYTHONUNBUFFERED=1` |
+| Log lines arrive mangled, with stray `[31m` in them | you printed ANSI colour; the escape byte is stripped as a control character and the rest survives | BEHAVIOUR | print plain text |
+| The node runs but downstream steps see nothing | the objects were inventoried but claimed under no output port | BEHAVIOUR — an unclaimed object is verified and kept, but not offered downstream | claim them under a port; `produced_ports` is what becomes downstream artifacts |
+| A configuration key on the node seems to do nothing | unknown keys are accepted and ignored | BEHAVIOUR — validation ignores what it does not recognise | check the spelling against the configuration table above |
+| The disk on the agent's machine fills up | inputs downloaded and never deleted; no storage limit exists | Unchecked | delete each input when done; see the residual limits above |

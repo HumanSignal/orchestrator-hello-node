@@ -34,6 +34,26 @@ what you were trying to reach. They are kept out of the RULE column deliberately
 check you can name and a consequence you can reason about are different things and mixing
 them is how a preference gets enforced as a rule.
 
+### A recommendation is not a lesser thing
+
+The single most important instruction in this document set — **write the completion marker
+last** — is a RECOMMENDATION. So is verifying your inputs against their hashes, and so is
+re-reading your credentials on a long run. Each of them decides whether a real production
+run works, and not one of them is checked anywhere.
+
+That is the whole reason for labelling. The label does not rank importance; it answers
+"what will tell me I got this wrong, and when?" A broken RULE produces a refusal that
+names itself. A broken RECOMMENDATION produces a run that fails somewhere else, later,
+saying something unrelated — or, worse, a run that quietly succeeds with the wrong data.
+
+**A related trap, since it cost this document set a correction.** A normative-sounding
+instruction in a source file is not an enforced rule. The orchestrator's own contract
+module states, in bold, that the marker is written "strictly last" — and there is no check
+behind that sentence, because no component ever observes the order in which a container
+wrote things. Reading it as a rule and writing it down as one made this document set
+contradict itself. When you are deciding what your node must do, "the code says to" and
+"the platform will stop me" are two different facts.
+
 ---
 
 ## Routing table
@@ -45,11 +65,13 @@ them is how a preference gets enforced as a rule.
 | How to read the job description (`invocation.json`) | [PROTOCOL.md](PROTOCOL.md#2-inputs) |
 | Every field of the job description, with its type | [PROTOCOL.md](PROTOCOL.md#22-invocationjson-field-by-field) |
 | How to read my input files, and what I must check | [PROTOCOL.md](PROTOCOL.md#23-reading-the-input-objects) |
+| How long my container is actually allowed to run | [PROTOCOL.md](PROTOCOL.md#24-how-long-you-actually-get) |
 | Where to write my output files | [PROTOCOL.md](PROTOCOL.md#4-outputs) |
 | Every field of the completion marker | [PROTOCOL.md](PROTOCOL.md#5-the-completion-marker) |
 | What happens if my credentials expire mid-run | [PROTOCOL.md](PROTOCOL.md#43-credentials-expire-during-your-run) |
 | Which exit code to return | [PROTOCOL.md](PROTOCOL.md#6-exit-codes) |
 | What happens when someone presses Cancel | [PROTOCOL.md](PROTOCOL.md#7-cancellation) |
+| Why my container was killed with no warning at all | [PROTOCOL.md](PROTOCOL.md#71-fencing-the-stop-with-no-grace-period-at-all) |
 | How my logs reach the run view, and what is lost | [PROTOCOL.md](PROTOCOL.md#33-logging) |
 | How to report progress | [PROTOCOL.md](PROTOCOL.md#34-progress) |
 | What the platform does after my container exits | [PROTOCOL.md](PROTOCOL.md#8-what-happens-after-you-exit) |
@@ -89,19 +111,36 @@ worse failure than an obvious one because nothing reports it.
 ## Provenance
 
 Every value in these documents was read from the orchestrator's source at commit
-**`d8a78355ae7d78096f050b3268260f65f4b29692`** (2026-08-08) and checked by hand. The files
+**`6b2ff82c70f26d0ceaa1a841137f1b3cfb08186b`** (2026-08-08) and checked by hand. The files
 read were `external/contract.py`, `external/io.py`, `external/versioning.py`,
-`external/README.md`, `runners/credentials.py`, `runners/serializers.py`, `agent/creds.py`,
-`agent/runner.py`, `agent/config.py`, `agent/logbuf.py`, `agent/redact.py`,
+`external/text.py`, `external/README.md`, `runners/credentials.py`,
+`runners/serializers.py`, `runners/reports.py`, `runners/auth.py`, `runners/enrollment.py`,
+`runners/jobs.py`, `runners/views.py`, `agent/creds.py`, `agent/runner.py`,
+`agent/config.py`, `agent/logbuf.py`, `agent/redact.py`, `agent/client.py`,
 `agent/executors/docker_exec.py`, `agent/identity.py`, `handlers/steps/external.py`,
-`pipelines/external_finalize.py`, `pipelines/external_state.py`,
-`pipelines/config_schemas.py`, `lspo/settings/base.py`, and the two Dockerfiles that fix
-the container user.
+`pipelines/external_finalize.py`, `pipelines/external_state.py`, `pipelines/log_stream.py`,
+`pipelines/config_schemas.py`, `noderegistry/models.py`, `noderegistry/services.py`,
+`noderegistry/serializers.py`, `noderegistry/views.py`,
+`noderegistry/management/commands/external_demo_setup.py`,
+`frontend/src/pages/ExternalNodesPage.tsx`, `lspo/settings/base.py`, and the two
+Dockerfiles that fix the container user.
+
+**What was executed rather than read.** The two documents shown in
+[CONFORMANCE.md](CONFORMANCE.md#level-1-run-it-with-a-hand-written-envelope) were parsed
+with the orchestrator's own `InvocationManifest` and `CompletionMarker` at this commit, and
+every refusal claimed in [PROTOCOL.md](PROTOCOL.md#5-the-completion-marker) was exercised
+against them individually; the input file's size and hash were computed from the file. That
+is all. **No container, agent, orchestrator, run or upload was executed while writing
+this**, so everything about the agent's behaviour, the storage service and collection is
+read from source and reasoned about, not measured. Where a statement rests on a
+measurement somebody made earlier, it says so at the point it is made.
 
 There is no generated reference bundle yet, so there is no `REFERENCE.md`. The tables in
 [PROTOCOL.md](PROTOCOL.md) are hand-verified against the commit above and nothing checks
-them automatically. When they and the orchestrator disagree, the orchestrator is right.
-If you find a disagreement, that is a bug in this document set, and it is worth reporting.
+them automatically. Line numbers in particular go stale on any edit to the file they point
+into; the surrounding sentence is the claim, and the line number is only where to look.
+When these documents and the orchestrator disagree, the orchestrator is right. If you find
+a disagreement, that is a bug in this document set, and it is worth reporting.
 
 ## A warning about the code in this repository
 

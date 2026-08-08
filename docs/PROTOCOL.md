@@ -8,7 +8,7 @@ Every statement is labelled **RULE** (the platform refuses or fails the run),
 (what a good node does; the platform permits otherwise). Unlabelled text is background.
 
 Values are literal and were verified against the orchestrator at commit
-`d8a78355ae7d78096f050b3268260f65f4b29692`. Source paths appear after a value as
+`6b2ff82c70f26d0ceaa1a841137f1b3cfb08186b`. Source paths appear after a value as
 provenance.
 
 ---
@@ -42,7 +42,7 @@ hash and size the marker promised
 
 Four documents live in the staging prefix. Their names are fixed and are part of the
 contract; you locate them by name, never by configuration
-(`external/contract.py:55-58`).
+(`external/contract.py:56-59`).
 
 | Filename | Written by | Required |
 |---|---|---|
@@ -186,7 +186,7 @@ the port's `layout`, its `cardinality` and, for a folder port, its whole-tree di
 all absent. A node that reads only its credentials therefore cannot verify a tree digest
 and cannot tell a folder port from a file port. Fetch the job description if you need any
 of that. (Compare `runners/credentials.py:378-383` with
-`external/contract.py:302-327`.)
+`external/contract.py:337-362`.)
 
 **RECOMMENDATION.** Validate the envelope before trusting it: the `schema_version` you
 implement, a `scheme` you support, a `staging.mode` you support, and the presence of the
@@ -196,7 +196,7 @@ frames deep.
 **RECOMMENDATION.** Ignore fields you do not recognise rather than rejecting the
 document. The orchestrator's own parsers are configured to ignore unknown fields
 precisely so that adding a field is not a breaking change
-(`external/contract.py:271-274`). Strict about the fields you know, tolerant about the
+(`external/contract.py:306-309`). Strict about the fields you know, tolerant about the
 ones you do not: both, at the same time.
 
 ### 1.3 Where the credentials live, and who may read them
@@ -247,7 +247,7 @@ your image user's home directory. `/tmp` is writable by any uid; a home director
 
 **BEHAVIOUR.** `invocation.json` is written by the orchestrator before the job is
 queued, and the writer refuses to publish one larger than 8 MiB
-(`external/contract.py:75`, `external/io.py:148-159`). So it is bounded, and you may rely
+(`external/contract.py:76`, `external/io.py:148-159`). So it is bounded, and you may rely
 on that.
 
 **RECOMMENDATION.** Bound your read anyway: read at most 8 MiB and refuse a longer
@@ -268,7 +268,7 @@ document under version 1 rules and produce plausible nonsense.
 
 ### 2.2 `invocation.json`, field by field
 
-Source: `external/contract.py:372-457`. "Required" means the document is invalid without
+Source: `external/contract.py:407-492`. "Required" means the document is invalid without
 it, by the same parser the orchestrator uses.
 
 | Field | Type | Required | Notes |
@@ -285,12 +285,12 @@ it, by the same parser the orchestrator uses.
 | `inputs` | array of ports | no, defaults to `[]` | port names are unique |
 | `staging_prefix` | string | **yes** | URI of your staging area |
 | `credentials_file` | string | no, defaults to `/lspo/creds/creds.json` | an echo; see below |
-| `timeout_seconds` | integer >= 1 | **yes** | a **requested budget**, not a deadline |
+| `timeout_seconds` | integer >= 1 | **yes** | a **requested budget**, not a deadline. **900 in practice**, see 2.4 |
 | `idempotency_key` | non-blank string | **yes** | same value as `LSPO_IDEMPOTENCY_KEY` |
 | `attempt` | integer >= 1 | **yes** | |
 | `generation` | integer >= 1 | **yes** | fencing token |
 
-An input port (`external/contract.py:302-366`):
+An input port (`external/contract.py:337-401`):
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
@@ -301,7 +301,7 @@ An input port (`external/contract.py:302-366`):
 | `objects` | array | no, defaults to `[]` | |
 | `prefix_digest` | 64 hex chars, or `null` | required when `layout` is `"prefix"` | |
 
-An input object (`external/contract.py:280-299`):
+An input object (`external/contract.py:315-334`):
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
@@ -326,15 +326,6 @@ the job description's `credentials_file` do not all agree, say so loudly in your
 carry on using `LSPO_CREDENTIALS_FILE`. Nothing checks this today, and a disagreement
 means somebody's assumption is wrong.
 
-**BEHAVIOUR.** `timeout_seconds` is what the node's configuration requested. The absolute
-deadline is stamped when a runner **claims** the job, not when the job description was
-written, because the wait for capacity is unbounded and is not the step's to spend. Your
-container cannot observe that deadline. Note also that pulling your image happens after
-the claim, so a slow pull is spent out of your budget.
-
-**RECOMMENDATION.** Measure your own elapsed time from process start and aim to finish,
-including uploads and the marker, comfortably inside `timeout_seconds`.
-
 ### 2.3 Reading the input objects
 
 **BEHAVIOUR.** The orchestrator hashed every input when it built the job and pinned the
@@ -353,11 +344,11 @@ what you wrote.
 **BEHAVIOUR.** Two inputs can arrive with the **same** `relpath` and the same `name`. The
 orchestrator sets an input's relpath to the last segment of its URI
 (`handlers/steps/external.py:381`), and nothing de-duplicates within a file-layout port;
-the uniqueness check exists only for folder ports (`external/contract.py:343-348`). Two
+the uniqueness check exists only for folder ports (`external/contract.py:378-383`). Two
 upstream steps that both produce `rows.csv` therefore collide.
 
 **RULE.** Your output relpaths must be unique within one marker
-(`external/contract.py:535-544`).
+(`external/contract.py:571-579`).
 
 **RECOMMENDATION.** Derive your output names rather than echoing input names: an index, a
 hash prefix, the port name, anything that cannot collide. A node that writes
@@ -366,6 +357,52 @@ end of the run, after all the work.
 
 **RECOMMENDATION.** Stream inputs to disk or process them incrementally. See section 3.5
 for why holding one in memory is a real risk rather than a style preference.
+
+**BEHAVIOUR, and nothing bounds it.** There is no ceiling of any kind on your **inputs**:
+not on one object, not on their total, not on how many there are. The 1 GiB ceiling in
+section 3.5 applies to what you **upload**, and the container is given no disk quota at
+all — the agent sets a memory limit, a CPU limit and a process limit when it starts your
+container, and no storage limit (`agent/executors/docker_exec.py:248-274`). A node that
+downloads every input to `/tmp` and keeps it there can therefore fill the disk of the
+machine the agent runs on, which is somebody else's laptop or server. Delete each input
+when you are done with it, or stream it and never land it at all.
+
+### 2.4 How long you actually get
+
+**BEHAVIOUR.** `timeout_seconds` is what the node's configuration requested. The absolute
+deadline is stamped when a runner **claims** the job, not when the job description was
+written, because the wait for capacity is unbounded and is not the step's to spend. Your
+container cannot observe that deadline. Note also that pulling your image happens after
+the claim, so a slow pull is spent out of your budget.
+
+**BEHAVIOUR, and the number that matters is 900, not 3600.** The budget is resolved in
+three steps: the pipeline node's own `timeout_seconds` if it sets one, otherwise the
+budget the registered revision declares, otherwise a platform fallback of 3600 seconds
+(`handlers/steps/external.py:221-239`, `runners/jobs.py:67-81`,
+`LSPO_EXTERNAL_DEFAULT_TIMEOUT_S` at `lspo/settings/base.py:562`). **The fallback is
+almost never reached**, because both ways of registering a node write a budget into the
+revision, and both write the same one: **900 seconds** (the setup command,
+`noderegistry/management/commands/external_demo_setup.py:38`, and the Settings screen's
+registration API, `noderegistry/serializers.py:26`). So unless somebody deliberately
+raised it, **your container is stopped fifteen minutes after the job was claimed**, and
+that is reported as a failure rather than as a cancellation (section 7).
+
+**BEHAVIOUR, and it is why section 4.3 reads the way it does.** The credential envelope's
+own lifetime is also 900 seconds, and it is additionally clamped so that it can never
+outlive the run's deadline (`runners/credentials.py:216-219`). With both numbers at 900
+the two coincide: on a default registration the first envelope you are handed already
+expires at the moment your container is killed anyway, so a node that never re-reads its
+credentials will not visibly fail on that account — it will simply be terminated. Raise
+the budget (a `timeout_seconds` on the pipeline node, which takes effect immediately) and
+the two come apart at once: credentials still last 900 seconds, the run lasts as long as
+you asked for, and a node that read its credentials once can no longer upload anything
+after the first fifteen minutes. **That is the case worth writing your node for**, because
+it is the one an operator creates the first time a real job needs more than a quarter of
+an hour.
+
+**RECOMMENDATION.** Measure your own elapsed time from process start and aim to finish,
+including uploads and the marker, comfortably inside `timeout_seconds` — the value in the
+job description is the real answer for this run, whatever the defaults are.
 
 ---
 
@@ -376,7 +413,7 @@ for why holding one in memory is a real risk rather than a style preference.
 **BEHAVIOUR.** `params` in the job description is the only part of the node's
 configuration that ever reaches your code. It is copied verbatim from what the pipeline
 author typed, with no filtering and no redaction
-(`external/contract.py:390-392`, `pipelines/config_schemas.py`). Everything else about the
+(`external/contract.py:425-426` and `:457`, `pipelines/config_schemas.py`). Everything else about the
 node, including which deployment it points at, stays on the orchestrator's side.
 
 **RECOMMENDATION.** Validate `params` yourself and fail with a readable message. Nothing
@@ -402,7 +439,8 @@ configurable by its operator (`agent/config.py:123-136`,
 **BEHAVIOUR.** Your stdout and stderr are merged into one stream, split on newlines, and
 shipped to the orchestrator by the agent (`agent/executors/docker_exec.py:321-363`). They
 appear live in the run view and are written into a durable log file stored with the
-execution when the run ends.
+execution when the run ends (`orchestrator.ndjsonl`, attached to the execution as an
+artifact — `pipelines/external_finalize.py:2203-2212`).
 
 **BEHAVIOUR, and each of these loses data:**
 
@@ -411,18 +449,39 @@ execution when the run ends.
   giant JSON blob on a single line loses its tail.
 * The agent holds at most **2000 lines** per job between heartbeats; when it overflows the
   **oldest** are dropped and a warning line records how many
-  (`agent/logbuf.py:36-110`, capacity from `LSPO_AGENT_LOG_BUFFER_LINES`).
+  (`agent/logbuf.py:38-119`, capacity from `LSPO_AGENT_LOG_BUFFER_LINES`).
 * Heartbeats are every **20 seconds** and carry at most **100 lines** each. If you produce
   more than five lines per second on average, you are losing the excess.
 * Each line is cut to **4096 characters** on the way through the agent, and the server
   **refuses** rather than trims a batch that breaches its own ceilings: at most 100 lines,
   4096 bytes per line, 128 KiB per batch, 256 KiB per request body
-  (`runners/serializers.py:32-43`, `runners/auth.py:71`). A refused heartbeat costs the
+  (`runners/serializers.py:38-53`, `runners/auth.py:71`). A refused heartbeat costs the
   lease renewal it was carrying, not just the log lines.
-* The live view keeps only the last **1000** entries.
+* The live view keeps only the last **1000** entries — and **so does the durable file**.
+  The lines are held in a buffer that is trimmed to its most recent 1000 entries every
+  time one arrives (`pipelines/log_stream.py:38`, `:329-355`), and the file written at the
+  end of the run is built from that same buffer
+  (`pipelines/external_finalize.py:2173-2200`). A container that prints a hundred thousand
+  lines has lost ninety-nine thousand of them before anything durable is written. **There
+  is no complete copy of your output anywhere.**
+* The copy kept on the execution row itself is smaller again, bounded by both a line count
+  and a byte count, and it keeps the **first** few lines plus the newest that fit, with a
+  marker at the cut saying how many went (`pipelines/external_finalize.py:2215-2300`).
 
 **RECOMMENDATION.** Say the important things once, at the end, in few lines. A step that
 prints one line per record will lose its beginning and will not notice.
+
+**BEHAVIOUR.** Your lines are stored as **text**, and control characters are removed from
+them on arrival — every C0 character except tab and newline
+(`runners/reports.py:575-599`, `external/text.py:44` and `:67-81`). The removal is silent and
+nothing is replaced in their place. The practical consequence is colour: an ANSI escape
+sequence loses its leading escape byte and keeps the rest, so a line you meant to print in
+red is stored as `[31mfailed[0m`.
+
+**RECOMMENDATION.** Print plain text with no terminal control of any kind — no colour, no
+progress bar that redraws itself with carriage returns, no spinner. None of it survives,
+and what is left of it is noise in a log somebody is reading to find out what your step
+did.
 
 **BEHAVIOUR, and it surprises everyone.** Your container's log lines are shipped
 **unredacted**. The agent redacts URLs in messages it composes itself and in the
@@ -443,7 +502,7 @@ path.
 ### 3.4 Progress
 
 **BEHAVIOUR, opt-in.** A single stdout line of exactly this shape is consumed by the agent
-and reported as progress on the next heartbeat (`agent/logbuf.py:32`, `:63-81`):
+and reported as progress on the next heartbeat (`agent/logbuf.py:34`, `:65-92`):
 
 ```
 @lspo:progress {"fraction": 0.4, "phase": "encoding"}
@@ -452,7 +511,8 @@ and reported as progress on the next heartbeat (`agent/logbuf.py:32`, `:63-81`):
 * The prefix is `@lspo:progress ` **including the trailing space**.
 * The rest of the line must be a JSON object with a `fraction` that converts to a float
   between `0.0` and `1.0` inclusive.
-* `phase` is optional, coerced to a string and cut to 64 characters.
+* `phase` is optional, coerced to a string, stripped of control characters and cut to 64
+  characters (`agent/logbuf.py:81-91`, `runners/serializers.py:56-73`).
 * A malformed progress line is **not** consumed: it appears in your log as an ordinary
   line. That is deliberate, so a typo is visible rather than silent.
 * Only the most recent sample is reported per heartbeat.
@@ -491,26 +551,46 @@ by whoever wires the pipeline, not by you.
 staging prefix. The staging prefix is scoped to this execution, this attempt and this
 generation, and ends in `attempts/<attempt>/gen-<generation>` for exactly that reason: a
 superseded runner physically cannot write into the live attempt's area
-(`external/contract.py:440-457`).
+(`external/contract.py:476-492`).
 
-**RULE.** A relpath must be canonical (`external/contract.py:217-250`):
+**RULE.** A relpath must be canonical (`external/contract.py:236-283`):
 
 * non-empty, and never starting with `/`;
 * no backslashes;
-* no carriage return or line feed;
+* **no control character at all** — the whole of U+0000 to U+001F, which includes the tab
+  and the newline. This is wider than it used to be: the rule was once "no line break",
+  and it was widened because a NUL in a relpath is a name no filesystem can hold, so the
+  reader that tried to open it crashed several layers below the parser instead of
+  refusing the document with a sentence;
 * no `.` or `..` path components;
 * **no empty components**, so `a//b` and a trailing `/` are both refused.
 
 The last one surprises people. Two spellings of one path would be two inventory entries
 for one file, or an alias that dodges the "is this relpath known?" check.
 
+**BEHAVIOUR, and it is the reason a bad name is refused rather than cleaned.** A relpath
+is an **identifier**: the platform resolves a real object by it. A cleaned name would
+quietly ask for a different file — possibly one that exists and belongs to another port —
+and delivering the wrong bytes is worse than delivering none. Free-form prose in the same
+document is treated the opposite way; see the note on `error` in section 5.
+
+**RULE.** An **output port name** must be a real name: not empty and not only whitespace
+once trimmed, and free of control characters, by the same definition as above
+(`external/contract.py:218-233`). A port name is an identifier twice over — a downstream
+step selects its input by matching that string, and the delivered artifact is stored under
+it — so it is held to the same standard as a path.
+
+**RULE.** Relpaths listed under `produced_ports` are held to the full canonical-relpath
+rule as well, not merely to "is it in the inventory" (`external/contract.py:567`). There
+is no spelling that is legal in one place and not the other.
+
 **RULE.** A relpath is checked twice: once when your marker is parsed, and again when
 collection resolves it against the staging prefix
-(`pipelines/external_finalize.py:1247-1279`). Both refuse traversal.
+(`pipelines/external_finalize.py:1384-1416`). Both refuse traversal.
 
 **BEHAVIOUR.** A relpath containing a `%` or a space behaves differently on the two
 storage backends. Object-store keys are joined raw; local file URIs are percent-quoted per
-segment (`pipelines/external_finalize.py:1226-1244`). This was a real bug: a file named
+segment (`pipelines/external_finalize.py:1363-1381`). This was a real bug: a file named
 `rate%20.csv` was looked for at `rate .csv`.
 
 **RECOMMENDATION.** Keep relpaths to unaccented letters, digits, `-`, `_`, `.` and `/`.
@@ -548,12 +628,17 @@ the local mode genuinely testable.
 
 **BEHAVIOUR.** An envelope is valid for `LSPO_RUNNER_CREDS_TTL_S`, **default 900 seconds**
 (`lspo/settings/base.py:575`), clamped so that it never outlives the job's own runtime
-deadline (`runners/credentials.py:216-219`). The default runtime budget for an external
-step is **3600 seconds** (`LSPO_EXTERNAL_DEFAULT_TIMEOUT_S`, `lspo/settings/base.py:562`).
+deadline (`runners/credentials.py:216-219`).
 
-Read those two numbers together: **a node that reads its credentials once cannot upload
-its outputs, or its own completion marker, after about fifteen minutes.** This is the most
-common way a working node fails on its first long job.
+**A node that reads its credentials once cannot upload its outputs, or its own completion
+marker, after about fifteen minutes.** This is the most common way a working node fails on
+its first long job — but only on a job that is *allowed* to be long. Section 2.4 has the
+arithmetic: a node registered the default way is given a 900-second runtime budget, the
+same 900 seconds the credentials last, so the two expire together and the container is
+killed at the same moment its credentials die. The failure appears the first time an
+operator raises the budget, which is exactly when the node is finally being asked to do
+something substantial. Write for that case now; it is not a hypothetical, it is the second
+week.
 
 **BEHAVIOUR.** The agent asks the orchestrator for a fresh envelope when the current one
 is within 60 seconds of expiring (`LSPO_AGENT_CREDS_REFRESH_MARGIN_S`,
@@ -576,6 +661,17 @@ rejection, re-read the credentials file and retry **once, only if the envelope a
 changed**. If it did not change, fail transiently rather than looping. Never blindly
 retry an ambiguous POST transport failure: the upload may already have been accepted.
 
+**RECOMMENDATION, and it is where the obvious implementation goes wrong.** "Did the
+envelope change?" is a question about the document's **contents**, not about the object
+your program is holding. Re-reading the file parses fresh objects every time, so a
+comparison by object identity — Python's `is`, JavaScript's `===` on the parsed result —
+is always "different", and the guard you thought you wrote never fires: it retries on
+every refusal, including the ones where nothing changed. Compare the documents themselves,
+or the part of them that actually grants access (`staging.post.fields`, which carries the
+signature). `expires_at` alone is the weakest of the three, because it is clamped to the
+run's deadline (section 2.4) and two envelopes issued near the end of a run can state
+almost the same moment.
+
 **BEHAVIOUR, worth knowing when you debug a clock problem.** A presigned **GET** can
 outlive the `expires_at` the envelope states, by up to the budget that was left when it
 was signed, because credentials resolve inside the signer before the expiry date is
@@ -589,7 +685,7 @@ lower bound for reads.
 the contract's own `read_result` anywhere outside the contract package. The run's metrics
 come from the completion marker and the objects that were actually published: the
 execution records `objects_published`, `bytes_published` and `exit_code`
-(`pipelines/external_finalize.py:1910-1916`).
+(`pipelines/external_finalize.py:2112-2118`).
 
 **BEHAVIOUR.** Because nothing reads it, the contract's 1 MiB ceiling for this document is
 not enforced against you. It becomes an ordinary object of yours, subject to the 1 GiB
@@ -610,9 +706,14 @@ downstream step receives it as if it were a delivery.
 **BEHAVIOUR.** The contract invites you to write a structured log file called
 `logs.ndjsonl`. It is treated as an ordinary object: it is published only if you list it in
 the marker's `objects`, and it is published under the name you chose. The orchestrator
-writes its own record of the run to a **sibling** prefix under a different filename, so it
-cannot collide with yours (`pipelines/external_finalize.py:2093-2104`). Nothing requires
-you to write one.
+writes its own record of the run to a **sibling** prefix under a different filename
+(`orchestrator.ndjsonl`), so it cannot collide with yours
+(`pipelines/external_finalize.py:2678-2699`). Nothing requires you to write one.
+
+**RECOMMENDATION.** If your step's own output matters, write it as a file and inventory
+it. The platform's record of your stdout is a tail of the last 1000 lines and nothing more
+(section 3.3); a file you upload and claim under a port is kept whole, verified, and
+delivered.
 
 ---
 
@@ -638,7 +739,7 @@ terminal receipt for the attempt.
 }
 ```
 
-Field by field (`external/contract.py:484-533`):
+Field by field (`external/contract.py:519-568`):
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
@@ -650,55 +751,87 @@ Field by field (`external/contract.py:484-533`):
 | `idempotency_key` | non-blank string, or `null` | **no** | echoed if you set it; **not** cross-checked |
 | `exit_code` | integer, may be negative | **no** | a diagnostic echo |
 | `objects` | array of `{relpath, sha256, size}` | no, defaults to `[]` | relpaths unique |
-| `produced_ports` | object mapping port name to array of relpaths | no, defaults to `{}` | |
-| `error` | string or `null` | **no** | quoted into the failure reason, cut at 500 characters |
+| `produced_ports` | object mapping port name to array of relpaths | no, defaults to `{}` | names and relpaths are both validated; see 4.1 |
+| `error` | string or `null` | **no** | quoted into the failure reason, cut at 500 characters (`pipelines/external_finalize.py:181`, `:1618-1629`). Control characters are removed from it |
 
 **RULE.** On a run the platform classifies as **succeeded**, which normally means your
 process exited 0 and nothing cancelled or timed it out, a marker is **required**. A missing
 marker after a reported success fails the execution: there is no inventory, so there is
-nothing to publish and nothing to verify (`pipelines/external_finalize.py:946-950`).
+nothing to publish and nothing to verify (`pipelines/external_finalize.py:1083-1087`).
 
 **RULE.** On such a run the marker's own `status` must be `"succeeded"`. A process that
 exits 0 while its marker says `failed` fails the execution
-(`pipelines/external_finalize.py:951-955`).
+(`pipelines/external_finalize.py:1088-1092`).
 
 **RULE.** `execution_id`, `attempt` and `generation` must equal the launch the platform
-believes it is collecting (`pipelines/external_finalize.py:956-962`). Copy them from the
+believes it is collecting (`pipelines/external_finalize.py:1093-1099`). Copy them from the
 job description, not from memory of an earlier attempt. A mismatch is refused with "a
 receipt from a superseded or unrelated run must never be collected as this one".
 
 **RULE.** Every relpath in `produced_ports` must appear in `objects`
-(`external/contract.py:546-571`). The inventory is what carries the hash and the size.
+(`external/contract.py:582-606`). The inventory is what carries the hash and the size.
 
 **RULE.** Within one port a relpath may appear only once. The **same relpath in two
 different ports is legal** and is sometimes what you want.
 
 **RULE.** Relpaths in `objects` are globally unique across the whole inventory
-(`external/contract.py:535-544`). One file, one entry.
+(`external/contract.py:571-579`). One file, one entry.
+
+**RULE.** Every port name is non-empty after trimming and carries no control characters,
+and every relpath under a port is canonical — the same rules as section 4.1
+(`external/contract.py:218-233`, `:567`).
 
 **RULE.** The marker document must be at most **8 MiB**; the reader refuses a larger one
-(`external/contract.py:76`, `external/io.py:162-172`). For a very wide batch, that bounds
+(`external/contract.py:77`, `external/io.py:162-172`). For a very wide batch, that bounds
 how many objects one attempt can inventory.
 
 **RULE.** Every `sha256` is exactly 64 lowercase hexadecimal characters, with no `sha256:`
-prefix, no uppercase and no trailing newline (`external/contract.py:128`, matched with
+prefix, no uppercase and no trailing newline (`external/contract.py:129`, matched with
 `fullmatch` because in Python a `$` anchor also matches before a trailing newline).
 
 **RULE.** Every integer is a real JSON integer. `"1"`, `true` and `1.0` are all rejected,
-and every id and counter must be at least 1 (`external/contract.py:262-268`).
+and every id and counter must be at least 1 (`external/contract.py:297-303`).
 
-**RULE, enforced by its consequences.** Write the marker **last**, after every object it
-names is durably readable. No component can prove after the fact in what order you wrote
-things; what collection can do, and does, is copy every object the marker names and then
-re-read it and hold it to the hash and size you promised
-(`pipelines/external_finalize.py:1160-1186`). A marker written before its objects finishes
-fails there, reported as a size or hash mismatch. Write it last and that class of failure
-cannot happen.
+**BEHAVIOUR.** `error` is **cleaned, not refused**: control characters other than tab and
+newline are removed from it as the document is parsed
+(`external/contract.py:608-636`). The asymmetry with names (section 4.1) is deliberate.
+Nothing resolves anything by your error message, so cleaning it keeps your account of the
+failure, which is the most useful thing anybody reads; cleaning a *name* would point at a
+different file. Note the practical reason it is cleaned at all: the text is written into a
+database column that cannot hold a NUL byte, and the write in question is the one that
+records the run as finished.
+
+**RECOMMENDATION, and the strongest one in this document.** Write the marker **last**,
+after every object it names is durably readable.
+
+Nothing checks this, and nothing can. Collection begins only after your process has
+already exited, so the platform never observes the order in which you wrote anything: a
+node that writes the marker first, then finishes every object it named before exiting,
+succeeds exactly like a well-behaved one. What collection does instead is check the
+**consequences** — it copies every object the marker names and re-reads it, holding it to
+the hash and size you promised (`pipelines/external_finalize.py:1103-1152`, `:1297-1323`).
+A marker written before its objects were finished fails there, as a size or hash mismatch.
+
+The reason to do it anyway is what the invariant buys: **the marker's existence is the
+only thing that distinguishes a half-finished run from a complete one.** Write it last and
+that whole class of failure is impossible rather than merely detected. The contract module
+itself states it as an instruction to you — "the step writes it **strictly last**"
+(`external/contract.py:519-526`) — and the orchestrator's test suite even asserts the
+order for the one node it ships (`tests/test_hello_node_example.py:107-115`). Neither of
+those is a check on *your* node.
+
+**A general lesson, worth more than this one rule.** An instruction written in a source
+file, however emphatic, is not an enforced rule. It is a statement of intent by whoever
+wrote that file. The only things that can refuse you are the checks named in this document
+under **RULE**, and when you are deciding what your node must do, "the code says to" and
+"the platform will stop me" are different facts with different consequences. This
+particular sentence sits in the contract module in bold, and there is no check anywhere
+behind it.
 
 **BEHAVIOUR.** An object you inventory but claim under no port is copied and verified, and
 then **not offered downstream** on a successful run. It is not lost, but the execution's
 artifact list is built from `produced_ports` alone
-(`pipelines/external_finalize.py:1863-1885`), so an unclaimed object does not appear
+(`pipelines/external_finalize.py:2043-2065`), so an unclaimed object does not appear
 there. If you want it retrievable through the normal path, claim it under a port.
 
 **RECOMMENDATION.** Set `exit_code` in the marker to the code your process is actually
@@ -716,7 +849,7 @@ required, and a failing node that writes nothing loses all of that.
 the same identity check and the same document rules. "Best effort" applies to which objects
 survive, not to whether the document is valid. But on this path an unreadable, invalid or
 mismatched marker is **ignored silently** rather than reported
-(`pipelines/external_finalize.py:1352-1385`): the run fails with a generic reason, your
+(`pipelines/external_finalize.py:1487-1520`): the run fails with a generic reason, your
 `error` text never appears, and nothing you produced is salvaged. So a malformed failure
 marker costs you exactly the information it existed to carry, and says nothing about
 itself.
@@ -725,7 +858,7 @@ itself.
 
 ## 6. Exit codes
 
-**BEHAVIOUR.** The classes (`external/contract.py:85-119`):
+**BEHAVIOUR.** The classes (`external/contract.py:86-120`):
 
 | Code | Class | Meaning |
 |---|---|---|
@@ -742,9 +875,9 @@ crash is far more often an accident than a decision.
 **BEHAVIOUR, and you must hear both halves of this.** Exit code 10 declares permanent,
 do-not-retry intent, and **nothing acts on it today**. There is no automatic retry engine
 for external jobs; every failed attempt is recorded as transient regardless of the code
-your process returned (`pipelines/external_finalize.py:1503-1522`), and an operator
-retries by hand from the run view. A future automatic retry path may honour exit 10
-without any change to your node.
+your process returned (`pipelines/external_finalize.py:1645-1649`, `:1675`), and an
+operator retries by hand from the run view. A future automatic retry path may honour exit
+10 without any change to your node.
 
 **RECOMMENDATION.** Use the codes as they are defined anyway. Exit 1 for a condition a
 second run might survive, such as a storage timeout or a rate limit. Exit 10 for a
@@ -789,7 +922,8 @@ requested or was the exit code 20, was the exit code 0, did the container vanish
 then the exit code's own class.
 
 **BEHAVIOUR.** A container stopped because its **runtime deadline** passed is classified
-`failed`, not `cancelled`, and that check comes first (`agent/runner.py:2332-2333`).
+`failed`, not `cancelled`, and that check comes first (`agent/runner.py:2332-2333`). On a
+default registration that is the fifteen-minute mark; see section 2.4.
 
 **RECOMMENDATION.** Handle cancellation, in this shape:
 
@@ -807,10 +941,46 @@ chunk sizes well under the grace period.
 **RECOMMENDATION, and this one decides whether partial work survives at all.** Accumulate
 your object inventory somewhere the failure and cancellation paths can still see it, not
 in a local variable of the function that does the work. Salvage publishes **only what the
-marker inventories** (`pipelines/external_finalize.py:1417-1437`). A node that uploads
+marker inventories** (`pipelines/external_finalize.py:1523-1581`). A node that uploads
 three objects, fails on the fourth, and then writes a marker with an empty inventory has
 left those three objects in a staging area that expires, and nothing will ever collect
 them.
+
+### 7.1 Fencing: the stop with no grace period at all
+
+Cancellation is the polite path, and it is not the only one.
+
+**BEHAVIOUR.** On the second path your container is **killed outright** — one SIGKILL, no
+SIGTERM first, no thirty seconds, no opportunity to write anything
+(`agent/executors/docker_exec.py:417-440`, called from `agent/runner.py:2553-2589`). The
+agent calls this **fencing**. It happens whenever the agent concludes that it no longer
+speaks for your job, because the one thing the design will not tolerate is two processes
+writing into one output area:
+
+* **the orchestrator became unreachable and the job's lease ran out.** A claimed job
+  carries a lease, renewed on every heartbeat, valid for **300 seconds**
+  (`LSPO_RUNNER_LEASE_TTL_S`, `lspo/settings/base.py:545`). While it cannot reach the
+  orchestrator the agent keeps your container running until that lease has been expired
+  for a further **60 seconds** (`LSPO_AGENT_LEASE_EXPIRY_GRACE_S`, `agent/config.py:128`
+  and `:338`), then assumes the work has been reassigned and kills it
+  (`agent/runner.py:2538-2551`). So roughly six minutes of network trouble ends the run;
+* **the job was taken away.** The agent re-reads the orchestrator's list of jobs it holds
+  on a timer; a job that stops being listed has been revoked, and its container is killed
+  (`agent/runner.py:11-24`);
+* **the agent's identity was rejected**, or the tenant owning the job was switched off
+  (`agent/runner.py:34-61`);
+* **the agent is shutting down** and has stopped waiting for you.
+
+**BEHAVIOUR, and this is the part to plan around.** A fenced container writes no marker,
+so **nothing it produced is collected** — salvage publishes only what a marker inventories,
+and there is none. Everything the run had done is lost, whatever is sitting in the staging
+area.
+
+**RECOMMENDATION.** Do not design a node whose entire output appears in its last minute.
+Nothing you can write survives a SIGKILL, so the only defence is to have less at risk when
+it lands: finish and upload work in units, keep runs comfortably inside their budget, and
+emit progress (section 3.4) so that an operator watching a long step can see it is alive
+rather than cancelling it on suspicion.
 
 ---
 
@@ -824,30 +994,30 @@ the orchestrator reads your marker, checks its identity, and then for every obje
 
 1. copies it from staging into a **published** area your credentials cannot reach;
 2. re-reads it **there** and holds it to the size and hash your marker promised
-   (`pipelines/external_finalize.py:966-1015`, `:1160-1186`).
+   (`pipelines/external_finalize.py:1103-1152`, `:1297-1323`).
 
 Copy first, verify second, because your upload policy is still live and a hash taken in
 staging is a statement about the past.
 
 **BEHAVIOUR, on a successful run.** Any single object that fails verification causes
 **everything this collection published to be deleted** and the execution to fail
-(`pipelines/external_finalize.py:1189-1211`). A partial delivery is worse than a failed
-one, because nothing downstream can tell which it got.
+(`pipelines/external_finalize.py:1002-1007`, `:1326-1348`). A partial delivery is worse
+than a failed one, because nothing downstream can tell which it got.
 
 **BEHAVIOUR, on a failed or cancelled run.** The same copy and verify runs per object, and
 whatever verifies is kept while the rest is dropped with a log line
-(`pipelines/external_finalize.py:1388-1446`). Salvaged objects are attached to the
+(`pipelines/external_finalize.py:1523-1581`). Salvaged objects are attached to the
 execution as diagnostics: they carry no output port and are not offered to any downstream
 step.
 
 **BEHAVIOUR.** Each delivered object becomes one downstream artifact whose kind is the
-**output port name** you delivered it through (`pipelines/external_finalize.py:1877`). A
+**output port name** you delivered it through (`pipelines/external_finalize.py:2057`). A
 downstream step configured to read `output` finds exactly what you published under
 `output`.
 
 **BEHAVIOUR.** The published location contains an identifier of the collection that won,
 which you cannot predict. Never construct a published URI by hand; follow the URIs in the
-execution's result (`pipelines/external_finalize.py:2055-2090`).
+execution's result (`pipelines/external_finalize.py:2640-2675`).
 
 **BEHAVIOUR.** The run's metrics are `objects_published`, `bytes_published` and
 `exit_code`, taken from what was actually published and from your marker's echo of the

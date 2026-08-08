@@ -32,7 +32,7 @@ anything else exists.
 ### 3. Build the image
 
 **RULE.** The orchestrator only accepts an image pinned by digest, in one of two spellings
-(`external/contract.py:130-136`):
+(`external/contract.py:131-137`):
 
 * `registry/name@sha256:<64 lowercase hex>`, a repo digest, which any machine can pull;
 * `sha256:<64 lowercase hex>`, a bare image id, which only resolves on a machine that
@@ -84,6 +84,7 @@ required to be Python, and nothing here imports anything from the orchestrator.
 #!/usr/bin/env python3
 """The shape of a correct external node."""
 
+import contextlib
 import hashlib
 import json
 import os
@@ -129,7 +130,11 @@ class Credentials:
     MARGIN_S = 60
 
     def __init__(self):
-        self.path = os.environ.get('LSPO_CREDENTIALS_FILE')  # RULE: this name
+        # RECOMMENDATION, with no working alternative. Nothing in the platform
+        # checks how a node finds its credentials — it cannot; it only sets the
+        # variable. But this is the only name the agent sets, so any other one
+        # leaves you with nothing to read.
+        self.path = os.environ.get('LSPO_CREDENTIALS_FILE')
         if not self.path:
             raise SystemExit('LSPO_CREDENTIALS_FILE is not set')
         self._envelope = None
@@ -175,39 +180,65 @@ def upload(creds, relpath, source_path, size, digest):
                 raise
             # RECOMMENDATION. Retry once, and only if the envelope really
             # changed. If it did not, fail transiently rather than looping.
+            #
+            # Compare CONTENTS, never object identity. Re-reading the file
+            # parses a brand-new dict every time, so `is` (or JavaScript's
+            # `===`) is always False and this guard would never fire: it would
+            # retry on every refusal, including the ones where nothing changed.
+            # `==` on the parsed document answers the question actually being
+            # asked. Comparing `expires_at` alone is weaker, because the
+            # platform clamps that value to the run's deadline.
             before = envelope
-            if creds.get(force=True) is before:
+            if creds.get(force=True) == before:
                 raise
     INVENTORY.append({'relpath': relpath, 'sha256': digest, 'size': size})
 
 
-def fetch_and_verify(entry):
-    """Stream one input to disk, hashing as we go, and hold it to its pin.
+@contextlib.contextmanager
+def fetched_and_verified(entry):
+    """Stream one input to disk, hold it to its pin, and DELETE it afterwards.
 
     RECOMMENDATION, the most valuable one there is: the platform verifies what
     you WROTE, never what you READ. This check is yours to make.
+
+    RECOMMENDATION, and the reason this is a context manager rather than a
+    function returning a path. Inputs have NO size ceiling — not per object, not
+    in total, not in number — and the container is given no disk quota, so a node
+    that downloads its inputs and leaves them in /tmp fills up somebody else's
+    machine. One input at a time, deleted when its work is done.
     """
     if not entry.get('sha256'):
         raise Permanent(f'input {entry.get("name")!r} arrived with no sha256 pin')
     digest = hashlib.sha256()
     size = 0
     handle = tempfile.NamedTemporaryFile(delete=False, dir='/tmp')  # never $HOME
-    with handle:
-        for chunk in _stream(entry):          # local_path or get_url
-            digest.update(chunk)
-            size += len(chunk)
-            handle.write(chunk)
-    if digest.hexdigest() != entry['sha256'] or size != entry.get('size', size):
-        raise Permanent(f'input {entry.get("name")!r} is not the object this run was built from')
-    return handle.name
+    try:
+        with handle:
+            for chunk in _stream(entry):      # local_path or get_url
+                digest.update(chunk)
+                size += len(chunk)
+                handle.write(chunk)
+        if digest.hexdigest() != entry['sha256'] or size != entry.get('size', size):
+            raise Permanent(f'input {entry.get("name")!r} is not the object this run was built from')
+        yield handle.name
+    finally:
+        # In a `finally`, so the cancellation and failure paths clean up too.
+        with contextlib.suppress(OSError):
+            os.unlink(handle.name)
 
 
 def write_marker(creds, manifest, status, exit_code, error=None, ports=None):
     """The terminal receipt. ALWAYS the last thing this program writes.
 
+    RECOMMENDATION, and the strongest one there is: write this LAST. Nothing
+    observes write order — collection starts after the process has exited — so
+    no check will ever catch you writing it early. What it buys is that the
+    marker's existence means everything it names is really there.
+
     RULE. Every relpath in produced_ports must appear in objects. Relpaths in
-    objects are unique. Identity must match the manifest. On a successful run a
-    marker is required and its status must be "succeeded".
+    objects are unique. Port names are non-blank and free of control characters.
+    Identity must match the manifest. On a successful run a marker is required
+    and its status must be "succeeded".
     """
     marker = {
         'schema_version': 1,
@@ -271,6 +302,8 @@ What each awkward-looking decision is buying:
 | Bootstrap in its own `try` | Before credentials exist there is nowhere to write a marker. That failure has to be reported on stderr and by exit code alone. |
 | Signal handler sets a flag only | Doing work, and especially network work, inside a signal handler is how the cancellation path itself crashes. |
 | Streaming everywhere | 1 GiB permitted per object against 2 GiB of container memory. An OOM kill writes no marker. |
+| Inputs fetched one at a time, and deleted | Nothing bounds the size, the total or the count of your inputs, and the container has no disk quota. Keeping them all is how a node fills the customer's disk. |
+| Comparing envelopes with `==`, not `is` | Each read parses a new object, so an identity test is always "changed" and the retry guard never fires. |
 | Exit code passed into the marker | So the marker and the process cannot tell two different stories about one run. |
 
 ---
@@ -284,7 +317,7 @@ repository's copy.
 | Where | What it does | Why it is wrong |
 |---|---|---|
 | `node.py:174` | reads `LSPO_CREDENTIALS` | The agent sets `LSPO_CREDENTIALS_FILE`. This works only because `Dockerfile:18` hardcodes the other name. Copy the file without that line and the node dies immediately with a message that names a variable the platform has never heard of. |
-| `node.py:260-261` | reads the envelope once, at the start | After roughly fifteen minutes its upload policy is expired, so it can upload neither its outputs nor its marker. |
+| `node.py:260-261` | reads the envelope once, at the start | After roughly fifteen minutes its upload policy is expired, so it can upload neither its outputs nor its marker. Invisible on a default registration, where the run is killed at that same fifteen-minute mark; fatal the first time an operator raises the node's `timeout_seconds` ([PROTOCOL.md](PROTOCOL.md#24-how-long-you-actually-get)). |
 | `node.py:260-261` | bootstrap runs outside the `try` | A failure there escapes `main`, prints a traceback and reports nothing. |
 | `node.py:99`, `:142`, `:156` | holds whole objects in memory, twice | Collides with the 1 GiB per-object allowance against a 2 GiB memory limit. |
 | `node.py:192`, `:271` | the inventory is local to `process()`; the failure path writes `objects: []` | Everything already uploaded is unrecoverable, because salvage publishes only what the marker inventories. |
@@ -308,63 +341,109 @@ is a poor idea, so use a separate port, but it is a **RECOMMENDATION** and never
 
 Run through this before you register a revision.
 
+**Every item is labelled, and the labels are the point of the list.** A **RULE** is a
+specific check in the platform: fail it and your job is refused or your run fails, every
+time. A **RECOMMENDATION** is something no check will ever catch — which does not make it
+optional in practice, only invisible until a real run goes wrong. An unlabelled checklist
+mixes the two, and a reader who cannot tell them apart either treats advice as law or
+treats law as advice. Both are expensive.
+
 **Bootstrap**
 
-* [ ] Reads the credentials path from `LSPO_CREDENTIALS_FILE`, with no fallback that hides
-      a missing variable.
-* [ ] Refuses an envelope whose `schema_version` it does not implement, and a `scheme` or
-      `staging.mode` it does not support.
-* [ ] Ignores envelope and manifest fields it does not recognise, rather than rejecting
-      the document.
-* [ ] Reports a bootstrap failure as one short redacted line on stderr plus a transient
-      exit code, with no traceback and no attempt to write a marker.
+* [ ] **RECOMMENDATION.** Reads the credentials path from `LSPO_CREDENTIALS_FILE`, with no
+      fallback that hides a missing variable. Nothing checks how you find the path; there
+      is simply nothing else to read.
+* [ ] **RECOMMENDATION.** Refuses an envelope whose `schema_version` it does not
+      implement, and a `scheme` or `staging.mode` it does not support.
+* [ ] **RECOMMENDATION.** Ignores envelope and manifest fields it does not recognise,
+      rather than rejecting the document.
+* [ ] **RECOMMENDATION.** Reports a bootstrap failure as one short redacted line on stderr
+      plus a transient exit code, with no traceback and no attempt to write a marker.
 
 **Inputs**
 
-* [ ] Verifies every input against its pinned `sha256` and `size`, and refuses an input
-      with no pin.
-* [ ] Handles a job with **no** input port at all.
-* [ ] Handles two inputs that share a basename.
-* [ ] Bounds its read of the job description, and refuses a `schema_version` it does not
-      implement.
+* [ ] **RECOMMENDATION**, and the most valuable one in this document. Verifies every input
+      against its pinned `sha256` and `size`, and refuses an input with no pin. The
+      platform checks what you wrote and never what you read, so nothing but your own code
+      can catch a changed input.
+* [ ] **RECOMMENDATION.** Handles a job with **no** input port at all — an empty `inputs`
+      list is legitimate, not an error.
+* [ ] **RECOMMENDATION.** Handles two inputs that share a basename.
+* [ ] **RECOMMENDATION.** Bounds its read of the job description, and refuses a
+      `schema_version` it does not implement.
+* [ ] **RECOMMENDATION.** Deletes each input when it is done with it. Nothing bounds input
+      size or count and the container has no disk quota.
 
 **Work**
 
-* [ ] Streams rather than buffering whole objects, in both directions.
-* [ ] Writes scratch files to `/tmp` or to staging, never under the image user's home
-      directory.
-* [ ] Prints no presigned URL, no token, no credential, on any path, including the text of
-      HTTP errors.
-* [ ] Says the important things in few lines, knowing the tail is what survives.
+* [ ] **RECOMMENDATION.** Streams rather than buffering whole objects, in both directions.
+* [ ] **RECOMMENDATION.** Writes scratch files to `/tmp` or to staging, never under the
+      image user's home directory. (In local demo mode the platform overrides your
+      container's user, so its home directory may not be writable.)
+* [ ] **RECOMMENDATION**, and treat it as non-negotiable. Prints no presigned URL, no
+      token, no credential, on any path, including the text of HTTP errors. Container logs
+      are shipped unredacted; nothing will warn you.
+* [ ] **RECOMMENDATION.** Says the important things in few lines, knowing that only a tail
+      of 1000 entries survives anywhere.
 
 **Outputs**
 
-* [ ] Output relpaths are canonical, unique, and derived rather than echoed from input
-      names.
-* [ ] Every upload key starts with `staging.post.key_prefix`.
-* [ ] Re-reads the credentials file at or near `expires_at`, and again before the marker.
-* [ ] Retries once on an expiry refusal, only when the envelope actually changed, and
-      never blindly on an ambiguous POST failure.
+* [ ] **RULE.** Output relpaths are canonical — non-empty, relative, no backslash, no
+      control character, no `.` or `..` component, no empty component. The marker parser
+      refuses anything else.
+* [ ] **RULE.** Relpaths in the inventory are unique, and no relpath repeats within one
+      output port.
+* [ ] **RULE.** Every output port name is non-empty after trimming and free of control
+      characters.
+* [ ] **RULE.** Every upload key starts with `staging.post.key_prefix`. This one is
+      enforced by the storage service itself, so the refusal is an HTTP error rather than
+      a message from us.
+* [ ] **RULE.** No single object exceeds 1 GiB. Enforced by the upload policy and checked
+      again on the published copy.
+* [ ] **RECOMMENDATION.** Output names are derived rather than echoed from input names, so
+      two inputs sharing a basename cannot collide.
+* [ ] **RECOMMENDATION.** Re-reads the credentials file at or near `expires_at`, and again
+      before the marker.
+* [ ] **RECOMMENDATION.** Retries once on an expiry refusal, only when the envelope
+      actually changed (compared by contents, not by object identity), and never blindly
+      on an ambiguous POST failure.
 
 **Marker**
 
-* [ ] Written strictly last, after every object it names.
-* [ ] Identity copied from this job's description, never from a previous attempt.
-* [ ] Every relpath in `produced_ports` appears in `objects`; no relpath repeats within a
-      port; relpaths in `objects` are unique.
-* [ ] Hashes are 64 lowercase hex characters, computed over the bytes actually written.
-* [ ] Written on the failure and cancellation paths too, with the inventory of whatever
-      was already uploaded.
-* [ ] `exit_code` in the marker equals the code the process returns.
+* [ ] **RULE.** On a run that exits 0, a marker exists and its `status` is `"succeeded"`.
+* [ ] **RULE.** `execution_id`, `attempt` and `generation` are copied from this job's
+      description, never from a previous attempt. Collection refuses a mismatch.
+* [ ] **RULE.** Every relpath in `produced_ports` appears in `objects`.
+* [ ] **RULE.** Hashes are exactly 64 lowercase hex characters, with no `sha256:` prefix,
+      no uppercase and no trailing newline.
+* [ ] **RULE.** Every integer is a real JSON integer, at least 1 for ids and counters.
+* [ ] **RULE.** The document is at most 8 MiB.
+* [ ] **RECOMMENDATION**, and the strongest in this set. Written strictly last, after
+      every object it names. Nothing observes write order; what a marker written too early
+      produces is a hash or size mismatch at collection, and the whole delivery is
+      discarded.
+* [ ] **RECOMMENDATION.** Written on the failure and cancellation paths too, with the
+      inventory of whatever was already uploaded. Not required — and a failing node that
+      writes nothing loses every object it had produced.
+* [ ] **RECOMMENDATION.** `exit_code` in the marker equals the code the process returns.
 
 **Ending**
 
-* [ ] A SIGTERM handler sets a flag; the work loop checks it; the cancelled path writes a
-      marker and exits 20.
-* [ ] Every network timeout is comfortably under the 30 second cancellation grace.
-* [ ] Exit 1 for conditions a retry might survive, exit 10 for conditions no retry can
-      fix.
+* [ ] **RECOMMENDATION.** A SIGTERM handler sets a flag; the work loop checks it; the
+      cancelled path writes a marker and exits 20. Without a handler your process, as
+      PID 1, discards the signal entirely.
+* [ ] **RECOMMENDATION.** Every network timeout is comfortably under the 30 second
+      cancellation grace.
+* [ ] **RECOMMENDATION.** Exit 1 for conditions a retry might survive, exit 10 for
+      conditions no retry can fix. Nothing acts on the distinction today.
+* [ ] **BEHAVIOUR to accept rather than to satisfy.** Nothing survives a fence (a revoked
+      job, an unreachable orchestrator): the container is killed outright and no marker is
+      written. Design so that a run losing its last minute of work is survivable.
 
 **Image**
 
-* [ ] Pinned by digest, exec-form entrypoint, unbuffered output, uid matching the agent's.
+* [ ] **RULE.** Pinned by digest — `registry/name@sha256:<64 hex>` or a bare
+      `sha256:<64 hex>`. A tag is refused at registration.
+* [ ] **RECOMMENDATION.** Exec-form entrypoint, unbuffered output, and a uid matching the
+      agent's (10001 for the shipped agent image). The uid is checked by nothing and
+      fails as a permission error on your own credentials file.
