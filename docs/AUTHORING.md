@@ -89,6 +89,16 @@ program it happens and not that it disappears at the same instant your process d
 stop for a clean exit and for the day those gaps are fixed, and put your recovery hopes
 on the third item, the inventory you write when your own code decides the run is over.
 
+**BEHAVIOUR, and read it once before you write any of the three.** **No interval on any
+stop path is guaranteed** — not the time before your process is signalled, not the time
+between that signal and the kill behind it, not how long anything you start afterwards has
+to finish in. Every figure in these documents is a typical value or a setting, never a
+limit, and the reasoning is set out in full at the top of section 7 of
+[PROTOCOL.md](PROTOCOL.md#7-cancellation). The consequence for the code below is concrete:
+nothing important is scheduled for after the SIGTERM, every network call is given a timeout
+short enough that a stop lands between calls rather than inside one, and the design never
+assumes there is time to do one more thing.
+
 ---
 
 ## The skeleton
@@ -350,7 +360,7 @@ Until then, do not copy these parts of it. Line numbers are for this repository'
 | `node.py:161-169` | reads the job description with no size bound and no version check | Proceeds on a malformed or future-version document. |
 | `node.py:172-178` | never validates the envelope | Same class of problem, different document. |
 | `node.py:198-201` | derives output names from input names | Two inputs sharing a basename produce one relpath twice, which the marker parser refuses. |
-| `node.py:140`, `:156` | 120 second and 300 second timeouts | Both are longer than the grace that follows a SIGTERM — at most 30 seconds, and usually much less ([PROTOCOL.md](PROTOCOL.md#7-cancellation)) — so a stop landing during a transfer never reaches the handler at all and the process is killed mid-write. |
+| `node.py:140`, `:156` | 120 second and 300 second timeouts | Both are far longer than any grace a stop can be relied on to give — no interval on a stop path is bounded ([PROTOCOL.md](PROTOCOL.md#7-cancellation)) — so a stop landing during a transfer never reaches the handler at all and the process is killed mid-write. |
 
 One thing on that list which is **not** a defect: `node.py:219` and `:238` claim
 `result.json` under the `output` port. That is legal, and the orchestrator's own test of
@@ -459,9 +469,9 @@ apart either treats advice as law or treats law as advice. Both are expensive.
       worth.** **Neither of the two stops named here preserves what you write.** An
       **operator pressing Cancel** usually does not reach your process at all — it normally
       arrives as a SIGKILL — and on the rare occasion it arrives as a SIGTERM, nothing you
-      write is collected. The **runtime deadline** does begin as a SIGTERM, but its 30
-      second grace is cut short by the platform's own next heartbeat (zero to 20 seconds,
-      ten on average), your upload credentials expired at the deadline, and the terminal
+      write is collected. The **runtime deadline** does begin as a SIGTERM, but the grace
+      behind it is cut short by the platform's own next heartbeat, your upload credentials
+      expired at the deadline, and the terminal
       report that would have made a marker count is refused — so nothing is collected there
       either, and a container stopped that way leaves its run parked at "Waiting for
       runner" rather than failed, holding a quota slot until an operator cancels it
@@ -470,8 +480,10 @@ apart either treats advice as law or treats law as advice. Both are expensive.
       anything, and only a marker you had already finished writing. Write the handler for a clean exit
       and for the day these gaps are fixed. Do not build a partial-output recovery story on
       top of any of them.
-* [ ] **RECOMMENDATION.** Every network timeout is comfortably inside a handful of seconds,
-      not merely inside the 30 seconds the grace advertises.
+* [ ] **RECOMMENDATION.** Every network timeout is comfortably inside a handful of seconds.
+      There is no grace period to size them against: no interval on any stop path is
+      guaranteed, so the target is a stop landing *between* your calls rather than inside
+      one ([PROTOCOL.md](PROTOCOL.md#7-cancellation)).
 * [ ] **RECOMMENDATION.** Exit 1 for conditions a retry might survive, exit 10 for
       conditions no retry can fix. Nothing acts on the distinction today.
 * [ ] **BEHAVIOUR to accept rather than to satisfy.** A fence (a revoked job, an

@@ -66,6 +66,25 @@ wrote things. Reading it as a rule and writing it down as one made this document
 contradict itself. When you are deciding what your node must do, "the code says to" and
 "the platform will stop me" are two different facts.
 
+### Nothing bounds how long a stop takes
+
+**BEHAVIOUR, and it is the other thing to internalise before reading further.** **No
+interval on any stop path is guaranteed.** How long after a deadline your container is
+signalled, how long it then has before it is killed, how soon a fence arrives, how long a
+container that should be gone can go on writing — none of those is bounded by anything.
+Each is a timer of ours plus a docker daemon that takes as long as it takes, an HTTP
+request that may sit inside its own timeout and be retried, a periodic pass that may fail
+and simply be tried again, and a kill that may fail outright.
+
+The rest of this subsection is **background**, about these documents. Earlier drafts quoted
+a figure for several of those intervals; every review round found another one that a
+counterexample falsified, so the figures are gone rather than hedged. The full statement,
+and what it means for how you write a node, is at the top of
+[section 7 of PROTOCOL.md](PROTOCOL.md#7-cancellation), and the passages elsewhere inherit
+it instead of repeating it. Where a duration does appear in these documents it is either a
+setting of ours or a ceiling fixed by our own configuration — never a promise about how
+long something takes.
+
 ---
 
 ## Routing table
@@ -85,6 +104,7 @@ own label.
 | Every field of the completion marker | [PROTOCOL.md](PROTOCOL.md#5-the-completion-marker) |
 | What happens if my credentials expire mid-run | [PROTOCOL.md](PROTOCOL.md#43-credentials-expire-during-your-run) |
 | Which exit code to return | [PROTOCOL.md](PROTOCOL.md#6-exit-codes) |
+| **How long I have once something asks my container to stop** (short answer: nothing guarantees you any interval at all) | [PROTOCOL.md](PROTOCOL.md#7-cancellation) |
 | What happens when someone presses Cancel, and why it is usually not a polite stop | [PROTOCOL.md](PROTOCOL.md#7-cancellation) |
 | What happens when my step runs out of time, and why nothing it wrote is collected | [PROTOCOL.md](PROTOCOL.md#7-cancellation) |
 | Why my container was killed with no warning at all | [PROTOCOL.md](PROTOCOL.md#71-fencing-the-stop-with-no-grace-period-at-all) |
@@ -174,7 +194,7 @@ Dockerfiles that fix the container user.
    loop was driven against a stand-in docker daemon and a stand-in orchestrator, and the
    orchestrator's runner API was driven through its own test client. Four things were
    observed rather than argued: the deadline reaches the container as a **polite** docker
-   stop with a 30 second timeout, after which the agent classifies the run `failed`; a
+   stop rather than a kill, after which the agent classifies the run `failed`; a
    heartbeat refused with the orchestrator's own "past your deadline" code arrives inside
    the agent as its ordinary **lost-lease** error, indistinguishable from having lost the
    job to somebody else; on that answer the agent **kills the container outright and sends
@@ -207,10 +227,11 @@ from `agent/runner.py` at the commit above.
 
 That is all. **No real container, no deployed orchestrator, no object storage and no
 collection run were exercised** — the runs in item 5 used stand-ins for the docker daemon
-and, on the agent's side, for the orchestrator. So the arithmetic in section 7 about *how
-much* of the thirty second grace survives is read from the shipped intervals and reasoned
-about, not timed; what was observed is which of the two stops happens and whether a report
-is sent. Everything about the storage service and about collection remains read from source.
+and, on the agent's side, for the orchestrator. So section 7's account of *how much* of a
+grace period survives is read from the shipped intervals and reasoned about, not timed —
+which is one of the reasons it now states plainly that no such interval is guaranteed at
+all. What was observed is which of the two stops happens and whether a report is sent.
+Everything about the storage service and about collection remains read from source.
 Where a statement rests on a measurement somebody made earlier, it says so at the point it
 is made.
 

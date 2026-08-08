@@ -408,7 +408,9 @@ almost never reached**, because both ways of registering a node write a budget i
 revision, and both write the same one: **900 seconds** (the setup command,
 `noderegistry/management/commands/external_demo_setup.py:38`, and the Settings screen's
 registration API, `noderegistry/serializers.py:26`). So unless somebody deliberately
-raised it, **your container is stopped fifteen minutes after the job was claimed**. The
+raised it, **the platform starts stopping your container fifteen minutes after the job was
+claimed** — that budget is a real ceiling on how long you may run, even though how long the
+stopping itself then takes is not bounded at all (section 7). The
 agent classifies that stop as a failure rather than a cancellation — but for a container
 that was running when the deadline passed, its report is refused, so the run does not
 become a failed run either: it stays parked at "Waiting for runner" until an operator
@@ -492,8 +494,10 @@ artifact — `pipelines/external_finalize.py:2203-2212`).
 * The agent holds at most **2000 lines** per job between heartbeats; when it overflows the
   **oldest** are dropped and a warning line records how many
   (`agent/logbuf.py:38-119`, capacity from `LSPO_AGENT_LOG_BUFFER_LINES`).
-* Heartbeats are every **20 seconds** and carry at most **100 lines** each. If you produce
-  more than five lines per second on average, you are losing the excess.
+* Heartbeats are sent no more often than every **20 seconds** and carry at most **100
+  lines** each. That is a ceiling of five lines a second sustained — a ceiling, not an
+  allowance: a slow beat lowers it, and nothing raises it for longer than a single
+  catch-up beat. Produce more than that on average and you are losing the excess.
 * Each line is cut to **4096 characters** on the way through the agent, and the server
   **refuses** rather than trims a batch that breaches its own ceilings: at most 100 lines,
   4096 bytes per line, 128 KiB per batch, 256 KiB per request body
@@ -970,7 +974,38 @@ have worked.
 
 ## 7. Cancellation
 
-**BEHAVIOUR, and it is the first thing to know here, because the natural guess is wrong.**
+**BEHAVIOUR, and it governs the whole of this section, section 7.1, and every statement
+about stop timing anywhere in these documents. No interval on any stop path is
+guaranteed.** Not the gap between your deadline passing and your container being signalled.
+Not the time between a SIGTERM and the SIGKILL behind it. Not how much of a grace period is
+left by the time you can use it. Not how soon a fence arrives. Not how long two writers can
+overlap on one staging area. Each of those is a timer of ours plus an unknown quantity of
+everything we do not control: an inner poll that has to come round again before anything is
+noticed; a call into the docker daemon that takes as long as the daemon takes; an HTTP
+request that can sit inside its own timeout and then be retried; a periodic pass that can
+fail and simply be tried again next time, with nothing capping how often that repeats; and
+a kill that can fail outright and leave your container running. The timers are real, and
+each is written down below where it is a setting of ours. **What none of them is, is a
+bound.**
+
+**RECOMMENDATION, and it is what that statement is for.** Design for a stop whose warning
+may be **arbitrarily short — no usable warning at all — or arbitrarily long**. In practice:
+schedule nothing important for after the SIGTERM; give every network call a timeout short
+enough that a stop lands *between* calls rather than inside one; and never assume that a
+container which has been asked to stop has stopped.
+
+This paragraph is **background**, about these documents rather than about the platform.
+Read every duration in them as typical rather than bounded. Where a figure is quoted it is
+one of two things: a **setting** of ours, given so you can find it and an operator can
+change it, or a genuine **ceiling** fixed by our own configuration and worth knowing for
+capacity and cost — the runtime budget (section 2.4), the credential lifetime (section
+4.3), the ceiling on how many inputs fit in one job description (section 2.3). Those are
+bounds. Nothing about the timing of a stop is one. Earlier drafts quoted figures for
+several of these intervals; each review round falsified another one, so they have been
+removed rather than hedged, and the passages below inherit this statement instead of
+repeating it.
+
+**BEHAVIOUR, and it is the next thing to know, because the natural guess is wrong.**
 Two different events stop a container that has not finished, and **neither of them reliably
 preserves anything your node writes on the way out**. An **operator pressing Cancel**
 usually does not reach your process at all: in the ordinary case your container is killed
@@ -979,15 +1014,18 @@ polite stop — but the grace it advertises is cut short by the platform's own n
 heartbeat, and the terminal report that would have made your marker count is refused. Both
 are set out below; a third way to be stopped, fencing, is section 7.1.
 
-**BEHAVIOUR, the local half of the deadline, which behaves as you would expect.** The agent
-watches the clock itself, in the same loop that waits for your container, and within about
-a second of the deadline passing it asks docker to stop the container: SIGTERM, then
-SIGKILL **30 seconds** later (`agent/runner.py:2302-2324` calling
-`agent/executors/docker_exec.py:405-415`, the default stop timeout, which the caller does
-not override). Nothing has to arrive from anywhere for that to happen, so it fires even
-when the orchestrator is unreachable. This was **verified by running the agent** against a
-fake daemon: the container was politely stopped rather than killed, with a 30 second
-timeout, and the run was then classified `failed`.
+**BEHAVIOUR, the local half of the deadline.** The agent watches the clock itself, in the
+same loop that waits for your container, and when it notices the deadline has passed it
+asks docker to stop the container: SIGTERM, then a SIGKILL from docker when the stop
+timeout the agent asked for runs out (`agent/runner.py:2302-2324` calling
+`agent/executors/docker_exec.py:405-415`, the SDK default, which the caller does not
+override). Nothing has to arrive from anywhere for that to happen, so it fires even when the
+orchestrator is unreachable. *When* it notices is a different question, and the answer is
+the one at the top of this section: the check happens between slices of a poll, and each
+slice asks the docker daemon about your container and waits for the daemon's answer
+(`agent/executors/docker_exec.py:365-401`). This was **verified by running the agent**
+against a fake daemon: the container was politely stopped rather than killed, and the run
+was then classified `failed`.
 
 **BEHAVIOUR, and it is the boundary of that watch, which everything said about the deadline
 below inherits.** The loop holding that clock check is entered only after the agent has
@@ -1004,7 +1042,7 @@ differently, and that case is set out below, once the ordinary one has been desc
 cancellation. On a default registration the deadline is the fifteen-minute mark; see
 section 2.4.
 
-**BEHAVIOUR, and this is where the thirty seconds goes.** The agent's heartbeat thread
+**BEHAVIOUR, and this is where the grace goes.** The agent's heartbeat thread
 keeps beating while that stop is in progress — every **20 seconds** by default
 (`agent/config.py:123`). The orchestrator refuses the first heartbeat sent after the
 deadline, with a code of its own that means exactly "stop the container and report the job
@@ -1016,12 +1054,13 @@ report at all (`agent/runner.py:2465-2466`, `:2739-2746`, `:2810-2815`). **Verif
 running the agent** against a fake orchestrator answering heartbeats that way: the
 container was killed outright, never politely stopped, and no completion was ever sent.
 
-**BEHAVIOUR, so the grace is not thirty seconds — it is however long is left until the next
-heartbeat.** With the shipped intervals that is between zero and 20 seconds, about ten on
-average. If the beat happens to land in the second before the agent's watch loop notices
-the deadline, your container is killed with no SIGTERM at all. The one case in which the
-full thirty seconds really is yours is an orchestrator the agent cannot reach — and that is
-precisely the case in which nothing you write can be reported or collected either.
+**BEHAVIOUR, so the grace is not the stop timeout the agent asked docker for — it ends at
+the next heartbeat.** A heartbeat that lands before the agent's watch loop has noticed the
+deadline kills your container with **no SIGTERM at all**. One that lands after it leaves you
+however much of the interval happens to remain, which is not a quantity anything guarantees
+you (top of this section). The one case in which the whole of the stop timeout really is
+yours is an orchestrator the agent cannot reach — and that is precisely the case in which
+nothing you write can be reported or collected either.
 
 **BEHAVIOUR, and it is why the marker often cannot even be written.** Your upload
 credentials expire at the deadline, not at their own stated lifetime: the envelope is
@@ -1085,56 +1124,80 @@ written down.) The order is: check the contract version, write your credentials 
 read the job description, **start the container**, then start the agent's log thread,
 then start its heartbeat thread (`agent/runner.py:2144-2174`, with the container start
 itself at `:2235`). Fail in the first three — an unsupported contract version, a
-credentials refusal, an unreadable job description, a failed image pull or a container
-that would not be created — and there genuinely is nothing to read: no container of
-yours ever ran, and no marker exists. Fail in the last two and the container is
-**already running**. Starting a thread is an ordinary operation that fails on a busy
+credentials refusal, an unreadable job description — and on a job this agent started
+itself there genuinely is nothing to read: no container of yours ever ran, and no marker
+exists. Fail in the last two and the container is **already running**. The step between
+those two groups, starting the container, belongs to neither: a failed image pull leaves
+nothing behind, but a start that *raises* may still have left a container created and
+running. The agent knows that and says so in its own code — it records that it tried
+**before** it calls the daemon, precisely so that the terminal report goes and makes sure
+(`agent/runner.py:2216`, `:2778-2779`). That teardown usually settles it; it is not
+certain to, because a kill the agent cannot confirm ends nothing and goes into the ledger
+described further down. Starting a thread is an ordinary operation that fails on a busy
 host, and the agent treats that as a real state rather than a theoretical one, in its
 own words "a state a busy agent host genuinely reaches" (`agent/runner.py:1084`,
 `:1825`). Such a failure lands before the first heartbeat, so the claim's own
 five-minute lease has not been shortened and the report is accepted; the agent stops the
 container first and reports afterwards (`agent/runner.py:2741-2746`), and the collection
 that report arms reads any valid marker for this attempt that is already in your staging
-area. A container the agent started itself a fraction of a second earlier will not have
-written one. A container the agent **picked back up** rather than started will: a forced
-agent shutdown deliberately leaves your container running for the next agent to adopt
-(section 7.1), and that container may be minutes into its work and may already have
-written its marker.
+area. **Do not assume there is nothing there because the container had only just been
+started.** Your container begins running *inside* the call that starts it, before that call
+returns — the start is detached, so the daemon runs it as soon as it is created
+(`agent/executors/docker_exec.py:223`, `:250`) — and it goes on running through everything
+the agent does afterwards. A short job can finish, and write its marker, in that stretch. A
+container the agent **picked back up** rather than started is the same situation with more
+of it visible: a forced agent shutdown deliberately leaves your container running for the
+next agent to adopt (section 7.1), and that container may be minutes into its work and may
+already have written its marker.
 
 **BEHAVIOUR, and it is the sharpest edge of the previous paragraph.** On a job the agent
 picked back up, the container is running for the *whole* of preparation, including the
-first three steps. A failure there that the agent can still report from where it stands —
-an unsupported contract version, an unreadable job description, or the one credentials
-refusal that names the **tenant** rather than the agent — is written down as a job that
-could not run, and because the agent stops a container only when it recorded an attempt to
+first three steps. A failure there that the agent can still report from where it stands is
+written down as a job that could not run, and there are more of those than the obvious
+list suggests: an unsupported contract version, an unreadable job description, the one
+credentials refusal that names the **tenant** rather than the agent — and, in addition,
+**any unexpected error at all in that stretch**, because the job thread ends in a catch-all
+whose own comment is "a crashed job thread must still report"
+(`agent/runner.py:2125-2133`). Writing your credentials file is the clearest instance: it
+is an ordinary file write on the agent's disk, it fails on a full disk like any other, and
+that failure is nobody's special case — it lands in the catch-all and is reported. Because
+the agent stops a container only when it recorded an attempt to
 get hold of one, and that record is written inside the very step this failure happened
 before (`agent/runner.py:2216`, `:2778-2779`), yours is not stopped. The run is declared
 over, collection is armed, and your process is still running and still writing into the
 same staging area. It is here so that "the job failed before anything started" is not read
 as a guarantee that nothing of yours was running. Read from the source, not executed.
 
-**BEHAVIOUR, and it is what ends that overlap, which is bounded rather than open.** Two
-things narrow it, one makes it visible, and one closes it. It needs an adopted container
-that is still **running**: adoption picks up the container of that name whatever state it
-is in (`agent/executors/docker_exec.py:276-300`), and one that had already exited collides
-with nothing. It needs a failure of the reportable kind above: a lost lease, or a refusal
-aimed at the **agent's own identity**, fences instead — and a fence addresses the container
-**by name** rather than by the handle this job happens to hold, so it stops yours even
-though nothing had been recorded about it (`agent/runner.py:2113-2116` and `:2553-2589`;
-`:1690-1767` for the identity case, which does the same for every container on the
-machine). Your node is also not blind to it: finishing a job is followed by the agent
-deleting that job's credentials directory (`agent/runner.py:2749`,
-`agent/creds.py:117-130`), so the file at `LSPO_CREDENTIALS_FILE` disappears underneath a
-container that is still running. A refresh replaces that file by renaming a new one over it
-and never leaves it missing (section 4.3), so "it is not there" is not a refresh caught
-half-way — it is this. Whether you watch for it or not, the next reconciliation ends it:
-every **120 seconds** by default the agent re-reads the orchestrator's list of the jobs it
-holds, the finished job is no longer on that list, and a container this agent owns that the
+**BEHAVIOUR, and it is what narrows that overlap.** Two things make it rarer and one makes
+it visible. It needs an adopted container that is still **running**: adoption picks up the
+container of that name whatever state it is in (`agent/executors/docker_exec.py:276-300`),
+and one that had already exited collides with nothing. It needs a failure of the reportable
+kind above: a lost lease, or a refusal aimed at the **agent's own identity**, fences instead
+— and a fence addresses the container **by name** rather than by the handle this job happens
+to hold, so it stops yours even though nothing had been recorded about it
+(`agent/runner.py:2113-2116` and `:2553-2589`; `:1690-1767` for the identity case, which
+does the same for every container on the machine). Your node is also not blind to it:
+finishing a job is followed by the agent deleting that job's credentials directory
+(`agent/runner.py:2749`, `agent/creds.py:117-130`), so the file at `LSPO_CREDENTIALS_FILE`
+disappears underneath a container that is still running. A refresh replaces that file by
+renaming a new one over it and never leaves it missing (section 4.3), so "it is not there"
+is not a refresh caught half-way — it is this.
+
+**BEHAVIOUR, and it is what ends the overlap — which is not a clock.** What finally stops
+the abandoned container is the agent's periodic **reconciliation**: it re-reads the
+orchestrator's list of the jobs it holds, and a container this agent owns that a complete
 list does not name is killed (`agent/config.py:124`, `agent/runner.py:1019-1035`,
-`:1285-1295`). So the two writers overlap for about two minutes at the outside, not
-indefinitely — with the one caveat that a list the agent cannot read sweeps nothing and is
-tried again on the next pass. Read from the source, like the paragraph before it: none of
-this was executed either.
+`:1285-1295`). The interval between passes is a setting. The terminator, though, is not the
+next pass — it is **the next pass that both succeeds and takes the container down**, and
+nothing bounds how long that takes. A list the agent cannot read, and a list that came back
+truncated, sweep nothing and are simply tried again (`agent/runner.py:999-1030`); a job the
+agent could not pick back up does the same (`:1036-1050`). And a kill that cannot be
+confirmed ends nothing either: it goes into the agent's ledger of unconfirmed teardowns,
+which stops that agent claiming new work but leaves your process exactly where it was
+(`agent/runner.py:1349-1400`, `:1500-1532`). So the overlap is not open by design, and it
+is also not closed by any deadline: **design as though a second writer may share your
+staging area for as long as it takes**, rather than for a stated number of minutes. Read
+from the source, like the paragraph before it: none of this was executed either.
 
 **BEHAVIOUR, and it is worth stating plainly, because the shape of this section invites
 you to hunt for the exception.** The endings that reliably deliver something are the
@@ -1144,7 +1207,7 @@ stops imposed from outside, an operator's cancellation and the runtime deadline 
 deliver nothing when they land on a container that was still running — which is the
 ordinary case for both, and both gaps are recorded as platform defects to be fixed.
 (Both have one narrow branch that behaves otherwise: a deadline reached while the job
-was still being prepared, set out immediately above, and a cancellation arriving after
+was still being prepared, set out above, and a cancellation arriving after
 your container had already exited and reported, set out further down this section.) A
 **fence** is the one that is not categorical: three of the six leave the agent able to
 report, and where that report is also *accepted* — the agent's heartbeat thread dying is
@@ -1219,9 +1282,10 @@ exactly: renew its lease **before** that transaction commits and read the cancel
 its transaction (`runners/reports.py:188-212`). A heartbeat that begins a moment later is
 refused and fences instead. A heartbeat that finishes a moment earlier is answered `cancel:
 false`, and then the *next* one — up to a full interval later — is the one that gets
-refused. Heartbeats are **20 seconds** apart by default (`agent/config.py:123`) and each is
-a single HTTP request, so that window is a small fraction of the interval. **The ordinary
-outcome of pressing Cancel is that your container is killed outright.**
+refused. Heartbeats are at least **20 seconds** apart (`agent/config.py:123`) and the
+straddle has to happen inside the handling of one request, so the window that produces a
+polite stop is a vanishing fraction of the interval that does not. **The ordinary outcome
+of pressing Cancel is that your container is killed outright.**
 
 **BEHAVIOUR.** There is a second, slower route to the same kill. The agent periodically
 re-reads the orchestrator's list of jobs assigned to it and fences everything the list does
@@ -1281,12 +1345,14 @@ diagnostics carrying no output port (`pipelines/cancellation.py:313-318`,
 `pipelines/external_finalize.py:1932-1999`). Nothing downstream receives it. Your process is
 long gone by then, so there is nothing here for your node to do.
 
-**RECOMMENDATION.** Reserve part of the grace for step 4, and make sure your network calls
-cannot swallow it. A cooperative flag cannot be checked while you are blocked in a socket
-read: a 120 second read timeout against a grace of at most 30 seconds — and in practice
-much less, see above — means a stop that lands during a transfer never reaches your handler
-at all, and your process is killed mid-write. Use timeouts and chunk sizes well inside a
-handful of seconds.
+**RECOMMENDATION.** Assume a stop reaches you with very little time behind it, and make
+sure your network calls cannot swallow what there is before step 4 gets to run. A
+cooperative flag cannot be checked while you are blocked in a socket
+read, so a read timeout measured in minutes — this repository's `node.py` has one of 120
+seconds — means a stop landing during a transfer never reaches your handler at all, and
+your process is killed mid-write. There is no grace period to size those timeouts against
+(top of this section), so the only workable design is timeouts and chunk sizes short enough
+that a stop lands *between* calls: seconds, not minutes.
 
 **RECOMMENDATION, and this one decides whether partial work survives at all.** Accumulate
 your object inventory somewhere the failure and stop paths can still see it, not in a local
@@ -1304,7 +1370,7 @@ is a third way your container is stopped, and it is never polite — and it is a
 of the others usually end.
 
 **BEHAVIOUR.** On the second path your container is **killed outright** — one SIGKILL, no
-SIGTERM first, no thirty seconds, no opportunity to write anything
+SIGTERM first, no grace of any length, no opportunity to write anything
 (`agent/executors/docker_exec.py:417-440`, called from `agent/runner.py:2553-2589`). The
 agent calls this **fencing**, and it does it whenever it concludes that it no longer speaks
 for your job, because the one thing the design will not tolerate is two processes writing
@@ -1327,7 +1393,7 @@ rather than an outcome.
 | What happened | Container | May the agent still report? |
 |---|---|---|
 | The orchestrator became unreachable and the job's lease ran out (`agent/runner.py:2538-2551`) | SIGKILL | **No.** There is nobody reachable to tell |
-| The job stopped being listed as assigned to this agent — revoked, or its launch already went terminal elsewhere (`agent/runner.py:1112-1163`) | SIGKILL, delivered a moment later by the sweep that matches containers by name, or by the start path if no container exists yet | **Yes**, deliberately: the report is what frees the job's capacity slot |
+| The job stopped being listed as assigned to this agent — revoked, or its launch already went terminal elsewhere (`agent/runner.py:1112-1163`) | SIGKILL, delivered by the sweep that matches containers by name — on whichever reconciliation pass notices, not at the instant the job stopped being listed — or by the start path if no container exists yet | **Yes**, deliberately: the report is what frees the job's capacity slot |
 | The organization that owns the job was switched off, arriving as a 403 (`agent/runner.py:2661-2677`) | SIGKILL | **Yes**, for the same reason. Other jobs on the same agent are untouched |
 | The agent's own identity was refused — a rotated or retired runner, a drained pool (`agent/runner.py:1690-1767`) | SIGKILL, for **every** job it holds, then the agent exits | **No.** The credential it would report with is exactly what stopped being recognised |
 | The agent's heartbeat thread failed — the measured case was its disk filling up while writing your refreshed credentials (`agent/runner.py:2376-2393`) | SIGKILL | **Yes**, carrying the real reason: "the disk was full", not a blank failure |
@@ -1377,7 +1443,8 @@ it appears and disappears together with your process, and the two are separated 
 real interval: after the marker's upload has finished, your process still has to return
 from whatever it was doing and exit, and only then can the agent's poll of the docker
 daemon see it go (`agent/runner.py:2304-2308`, `agent/executors/docker_exec.py:377-386`).
-**No length is quoted for that interval, and none should be assumed.** The platform's
+**No length is quoted for that interval, and none should be assumed** — as for every
+interval on every stop path (top of section 7). The platform's
 share of it is one poll of the daemon. The rest is your own program between the upload
 returning and the process exiting — unwinding, flushing, whatever your runtime does on
 the way out — which is bounded by nothing the platform controls and is known only to
@@ -1395,13 +1462,38 @@ the difference matters to anyone looking at a cancelled-looking run that deliver
 output nobody expected. Read from the source; none of the runs behind these documents
 exercised a fence.
 
-**RECOMMENDATION.** Do not design a node whose entire output appears in its last minute. A
-SIGKILL ends your writing where it stands — what you had already finished and inventoried
-may still be collected, on the fences that report, but nothing you would have written after
-it ever is. The only defence is therefore to have less at risk when the kill lands: finish
-and upload work in units, keep runs comfortably inside their budget, and
-emit progress (section 3.4) so that an operator watching a long step can see it is alive
-rather than cancelling it on suspicion.
+**RECOMMENDATION.** Do not design a node whose entire output appears in its last minute.
+Finish and upload work in units, hold the inventory of what you uploaded where every exit
+path can reach it (section 7), keep runs comfortably inside their budget, and emit progress
+(section 3.4) so that an operator watching a long step can see it is alive rather than
+cancelling it on suspicion.
+
+**BEHAVIOUR, and it is here so that the recommendation above is not read as insurance
+against a fence.** Working in units pays on the endings **you** report: your own failure,
+or a stop you take yourself by exiting 20. On those you write a marker on the way out, it
+inventories everything already uploaded, and salvage publishes exactly that (section 5).
+Against a **fence** it buys nothing by itself. A SIGKILL ends your writing where it stands,
+and collection publishes only what a marker *already in staging* names — so under the
+write-the-marker-last discipline, every object you uploaded before the kill is unreachable
+no matter how neatly it was staged, because the document naming it was never written. Nor
+does a rerun pick that work up: a retried attempt is a new attempt with its own staging
+area, and a marker is only ever read for the attempt that wrote it (section 5). So working
+in units buys you the endings you report yourself, a smaller memory footprint and a visible
+progress trail — not protection from a fence.
+
+**RECOMMENDATION, against a strategy this document deliberately does not adopt.** There is
+one way to make partial output survive a fence: write an intermediate marker after each
+unit, each one naming only objects whose upload has finished, so that whenever a kill lands
+some marker is already there. Nothing in the platform forbids it. It is not recommended
+here, for three reasons. It rests on being able to replace the marker at its one fixed key
+as often as you like, which nothing in these documents has tested. It multiplies the number
+of times you can get the ordering wrong, and the penalty for
+naming an object that is still being written is not a partial delivery but the loss of the
+**whole** one (section 8). And what it recovers arrives as diagnostics carrying no output
+port, which no downstream step can read (section 8) — so it buys an operator something to
+look at, not a delivery. If you adopt it anyway, treat every marker write as the strict
+"after all its objects" case, and do not let it tempt you into treating a fence as a
+recoverable ending.
 
 ---
 

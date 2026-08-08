@@ -170,7 +170,9 @@ the ability to enrol more agents lying around on that machine
 
 **BEHAVIOUR, for the table below.** All are `LSPO_AGENT_*` and all are the agent operator's
 to set, not yours (`agent/config.py:113-137`, `:333-346`). The defaults are what your node
-gets unless somebody changed them.
+gets unless somebody changed them. The time-valued ones are **settings, not guarantees**:
+they say how often something is attempted, never how long anything takes — least of all
+stopping a container ([PROTOCOL.md](PROTOCOL.md#7-cancellation)).
 
 | Setting | Default | Why a node author cares |
 |---|---|---|
@@ -311,17 +313,30 @@ which you cannot change from a node.
   operator cancels it. If you are testing "what if my machine dies mid-job", this is what
   you will see — and it is also where a job that simply **ran out of time** ends up, see
   the next bullet.
+* **No bounded stop, on any path.** Nothing here guarantees how long it takes to stop a
+  container: not the gap between a deadline passing and the first signal, not the time
+  between that signal and the kill, not how soon a fence lands, not how long a container
+  that should be gone can keep writing. Every interval is a timer of ours plus a docker
+  daemon, an HTTP request that may be retried, and a periodic pass that may fail and be
+  tried again with nothing capping the repeats. Figures do appear in these documents and
+  in the settings table above — read them as settings and as typical values, never as
+  limits. The full statement, and what it means for a node author, is at the top of
+  [PROTOCOL.md](PROTOCOL.md#7-cancellation). For an operator the practical form is: never
+  size a maintenance window, a drain or a redeploy on the assumption that a stop completes
+  in a known time.
 * **Hitting the runtime budget leaves a running container's run parked, and collects
   nothing.** The agent does stop the container when the budget runs out, but the
   orchestrator refuses the terminal report that would normally finish the job: the last
   heartbeat before the deadline shortened the lease to end at the deadline, and a report
   on an expired lease is turned away. Nothing arms collection, so no marker is read and
   nothing the step produced is published, and the execution stays at "Waiting for
-  runner" until somebody cancels it. The 30 second grace the agent asks docker for is
-  also cut short — the platform's own next heartbeat comes back refused and the agent
-  kills the container, which with the shipped intervals happens somewhere in the first
-  20 seconds. The one job that ends differently is one still being **prepared** when its
-  budget runs out: the deadline is not being watched yet, the claim's own five-minute
+  runner" until somebody cancels it. The stop begins politely, but the grace the agent
+  asks docker for is cut short — the platform's own next heartbeat comes back refused and
+  the agent kills the container. When that lands is not something a node or an operator
+  can plan around; no interval on any stop path is bounded
+  ([PROTOCOL.md](PROTOCOL.md#7-cancellation)). The one job that ends differently is one
+  still being **prepared** when its budget runs out: the deadline is not being watched
+  yet, the claim's own five-minute
   lease has not been shortened yet, and a failure there is reported and accepted, so the
   run finishes as failed rather than parking. Whether that one collects anything depends
   on where in preparation it died, and "it failed during preparation" does not answer
@@ -329,8 +344,10 @@ which you cannot change from a node.
   heartbeat threads are. A failure in the earlier steps — an unreadable job description,
   a failed image pull — leaves no container and nothing to collect; a failure starting
   one of those threads, which a busy host really does produce, leaves the container
-  running and still sends the report that arms collection. Full derivation, and which
-  half of it was executed rather than read, in
+  running and still sends the report that arms collection. The start itself is the
+  ambiguous middle: a `docker run` that raises may still have left a container running,
+  which is why the agent goes and takes one down by name before it reports. Full
+  derivation, and which half of it was executed rather than read, in
   [PROTOCOL.md](PROTOCOL.md#7-cancellation). The practical consequence for an operator
   is the same in both cases: give a step a budget it will comfortably finish inside; a
   budget that is merely "close enough" does not degrade gracefully, it loses the run.
@@ -415,8 +432,8 @@ two rows where that distinction bites are marked inline.
 | Run fails naming a hash or size mismatch | the object changed after you hashed it, or the marker was written before the upload finished | RULE — every published object is re-read and held to the marker | hash the bytes you actually wrote. (*RECOMMENDATION, not part of the rule*: write the marker last — nothing observes write order, so this failure is the only symptom you will ever see of getting it wrong) |
 | Uploads start failing partway through a long run | the credentials envelope expired, roughly fifteen minutes in | BEHAVIOUR — normally visible only once somebody raises the node's `timeout_seconds` past 900, because on a default registration the credentials expire at the same moment the container is asked to stop. Not exclusively, though: the stop has a grace period, so a node that handles the stop and writes its marker on the way out hits the expiry inside it even on the default | re-read the credentials file at or near `expires_at` |
 | Upload refused with a policy error | the object key does not start with `staging.post.key_prefix`, or the object is over 1 GiB | RULE — enforced by the storage service, so the refusal is an HTTP error | prefix the key explicitly; split the object |
-| The container is stopped at almost exactly fifteen minutes and the run then sits at "Waiting for runner" forever | the runtime budget the revision declared (900 seconds by default) ran out | BEHAVIOUR — a SIGTERM, then a SIGKILL that arrives well inside the thirty seconds it advertises, and a terminal report the orchestrator refuses because the lease was shortened to end at the deadline. Nothing is collected, and a run stopped this way is not marked failed either ([PROTOCOL.md](PROTOCOL.md#7-cancellation)) | set `timeout_seconds` on the pipeline node, or publish a revision declaring more, so the step finishes on its own; then cancel the parked run to release its quota slot. A SIGTERM handler makes the container exit cleanly, but it does not make this case recoverable |
-| The container is killed with no warning and nothing is collected | the job was fenced. Six triggers, listed in [PROTOCOL.md](PROTOCOL.md#71-fencing-the-stop-with-no-grace-period-at-all); the common two are an orchestrator unreachable for about six minutes, and a job revoked while it ran. **An operator pressing Cancel produces this same symptom**, and is the commonest cause of it; a step running out of its runtime budget produces it too, the kill landing at the platform's own next heartbeat and so somewhere in the 20 seconds after the deadline | BEHAVIOUR — a SIGKILL with no grace period, so no further marker can be written. Three of the six leave the agent able to report, and where that report is accepted, collection runs and reads any valid marker that was already in staging — which under the write-the-marker-last discipline is usually, not certainly, none; on the other three the execution stays parked until an operator cancels it, and cancelling collects nothing either | check the agent's connectivity and the agent's own log for the fence reason; nothing in the node can prevent this |
+| The container is stopped at almost exactly fifteen minutes and the run then sits at "Waiting for runner" forever | the runtime budget the revision declared (900 seconds by default) ran out | BEHAVIOUR — a SIGTERM, then a SIGKILL as soon as the platform's next heartbeat is refused, which is normally long before the stop timeout the agent asked docker for, and a terminal report the orchestrator refuses because the lease was shortened to end at the deadline. Nothing is collected, and a run stopped this way is not marked failed either ([PROTOCOL.md](PROTOCOL.md#7-cancellation)) | set `timeout_seconds` on the pipeline node, or publish a revision declaring more, so the step finishes on its own; then cancel the parked run to release its quota slot. A SIGTERM handler makes the container exit cleanly, but it does not make this case recoverable |
+| The container is killed with no warning and nothing is collected | the job was fenced. Six triggers, listed in [PROTOCOL.md](PROTOCOL.md#71-fencing-the-stop-with-no-grace-period-at-all); the common two are an orchestrator the agent cannot reach for longer than the job's lease plus the agent's `LEASE_EXPIRY_GRACE_S`, and a job revoked while it ran. **An operator pressing Cancel produces this same symptom**, and is the commonest cause of it. A step running out of its runtime budget produces it too, by a different route: the stop starts politely, and the platform's next heartbeat comes back refused and turns it into a kill — or, when the agent cannot reach the orchestrator at all and no refusal ever arrives, docker's own kill at the end of the stop timeout does it instead. **None of those arrivals is bounded in time**, and none of the intervals above should be planned around ([PROTOCOL.md](PROTOCOL.md#7-cancellation)) | BEHAVIOUR — a SIGKILL with no grace period, so no further marker can be written. Three of the six leave the agent able to report, and where that report is accepted, collection runs and reads any valid marker that was already in staging — which under the write-the-marker-last discipline is usually, not certainly, none; on the other three the execution stays parked until an operator cancels it, and cancelling collects nothing either | check the agent's connectivity and the agent's own log for the fence reason; nothing in the node can prevent this |
 | A stopped run keeps going, then dies | no SIGTERM handler, so PID 1 discarded the signal and the grace ran out — or was cut short by the platform's next heartbeat | BEHAVIOUR (discarding the signal is a property of Linux, not of the platform) | install a handler that sets a flag |
 | A cancelled run's partial output does not reach anything downstream | nothing was collected, because cancelling a step whose container is **still running** does not read its marker | BEHAVIOUR — by design, on both branches of the cancellation race. One exception, and it is not about a running container: a cancellation arriving while collection is **already under way** lets that collection finish, and what it verified is attached to the cancelled run as diagnostics under no output port — visible in the artifact browser, readable by nobody downstream ([PROTOCOL.md](PROTOCOL.md#7-cancellation)) | nothing to fix in the node. If partial output matters, let the step finish or fail on its own rather than cancelling it |
 | Logs stop partway through | you exceeded the shipping rate, or a single line exceeded 64 KiB and its tail was discarded | BEHAVIOUR — the excess is dropped silently | fewer, shorter lines |

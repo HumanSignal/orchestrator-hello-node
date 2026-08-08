@@ -381,8 +381,10 @@ node as broken. That is exactly why the platform mounts the directory
 cooperative flag cannot be checked while the process is blocked in a socket read, and that
 is the case a real stop hits. Assert three things: a `cancelled` marker exists, it
 inventories the objects that were already uploaded, and the process exited **within a few
-seconds** — not merely within the 30 seconds the grace nominally offers, for the reason
-below.
+seconds**. Pick that threshold yourself and keep it small: there is no grace period to
+measure it against, because no interval on any stop path is guaranteed
+([PROTOCOL.md](PROTOCOL.md#7-cancellation)). A node that needs the whole of a stop's
+notional grace is a node that gets nothing done on a stop that gives it none.
 
 **BEHAVIOUR, and it decides what this test is evidence of.** A local SIGTERM models your
 node's own behaviour on a stop, and nothing more. It is not a model of what the platform
@@ -431,9 +433,9 @@ does not, and nothing shorter will reveal the difference.
 
 **BEHAVIOUR, and it is why that test needs a setup step.** A node registered either
 documented way is given a runtime budget of **900 seconds**, and at that moment the agent
-begins stopping your container — a SIGTERM, then a SIGKILL that in practice arrives well
-inside the thirty seconds it advertises ([PROTOCOL.md](PROTOCOL.md#7-cancellation)). So a
-job "longer than fifteen minutes" is simply stopped, the run is ordinarily left parked at
+begins stopping your container — a SIGTERM, then a SIGKILL, with no dependable interval
+between the two ([PROTOCOL.md](PROTOCOL.md#7-cancellation)). So a job "longer than fifteen
+minutes" is simply stopped, the run is ordinarily left parked at
 "Waiting for runner" rather than reported — until you cancel it yourself, which is also how
 you clear the quota slot the experiment is holding — and it proves nothing about
 credentials.
