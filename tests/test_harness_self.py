@@ -9,11 +9,13 @@ These tests hold the harness to the claims the rest of the suite leans on:
 
 * the prefix fence, the POST policy and the credential check really refuse;
 * a credential expires when it says it will — and, crucially, does NOT die merely
-  because a newer one was issued;
+  because a newer one was issued, nor after its request has already been accepted;
 * a fresh envelope really replaces the file, atomically, and a reader really sees it;
 * the order objects arrive in is really arrival order, and a re-upload really wins;
-* a container that never exits is reported as a container that never exited;
-* this harness's copy of the contract accepts the orchestrator's own frozen documents.
+* a container that never exits is reported as a container that never exited, and a
+  container that has vanished is never reported as a result at all;
+* this harness's copy of the contract accepts the orchestrator's own frozen documents,
+  and every rule it claims to quote is really in them.
 
 They talk to the endpoint directly, with an HTTP client, so a bug in ``Job`` cannot make
 them pass.
@@ -29,14 +31,15 @@ import pathlib
 import pytest
 import requests
 
-from conformance import contract, docker
+from conformance import citations, contract, docker
 from conformance.fakes3 import Blob, Endpoint
 from conformance.job import InputSpec, Job
 from conformance.markers import harness_self_test, our_policy, traces_to
 
 PREFIX = 'conformance/pipelines/1/executions/2/attempts/1/gen-1/'
 LOCALHOST = '127.0.0.1'
-FIXTURES = pathlib.Path(__file__).resolve().parent.parent / 'conformance' / 'fixtures'
+TESTS_DIR = pathlib.Path(__file__).resolve().parent
+FIXTURES = TESTS_DIR.parent / 'conformance' / 'fixtures'
 
 _INSTRUMENT = (
     'The subject is this harness. A conformance verdict is a measurement, and a measurement from an '
@@ -162,23 +165,37 @@ def test_a_credential_expires_but_is_not_revoked_by_a_newer_one(endpoint):
 
 
 @harness_self_test
-@our_policy(
-    'The mid-transfer expiry the rotation suite depends on: the store takes the body and refuses '
-    'afterwards. Without this the "recover from a refusal" test could pass against an endpoint that '
-    'never refused anything. ' + _INSTRUMENT
+@traces_to(
+    'runners/credentials.py: the envelope carries "one presigned POST policy that admits uploads under '
+    'this launch\'s generation prefix and nowhere else" and "the moment all of that stops working". '
+    'Nothing in it, and nothing in agent/creds.py, un-authorizes a request that was already accepted — '
+    'so this store must not either, and this proves it does not.'
 )
-def test_a_credential_can_be_killed_while_a_request_is_in_flight(endpoint):
-    """Setup: a hook that expires the credential once the body has been accepted.
-    Action: post. Validate: 403, and nothing recorded."""
-    from conformance.fakes3 import expire_and_refresh_when, matching
+def test_an_accepted_request_is_never_refused_afterwards(endpoint):
+    """The revocation model, gone for good, proven rather than asserted in a comment.
 
-    token = endpoint.mint()
-    endpoint.hooks.on_accepted.append(expire_and_refresh_when(matching('upload', index=1)))
+    Setup:    a credential that expires DURING an upload — one second of life, and a hook
+              that holds the request open for two before the store answers.
+    Action:   post.
+    Validate: accepted. The credential was live when the request arrived, and an issuer
+              cannot take a signature back once it is in flight.
+
+    The version of this endpoint before this round could express the opposite: a hook
+    could set an expiry to minus infinity after the body had been read, and the request
+    was authorized a second time on the way out. That is revocation, production has no
+    way to produce it, and a rotation test built on it demanded that a step retry a
+    transfer the store had already taken.
+    """
+    from conformance.fakes3 import delay_when, matching
+
+    token = endpoint.mint(ttl_s=1.0)
+    endpoint.hooks.on_request.append(delay_when(matching('upload', index=1), 2.0))
 
     response = post(endpoint, token, PREFIX + 'outputs/a.csv', b'x')
 
-    assert response.status_code == 403, response.text
-    assert endpoint.uploads == []
+    assert response.status_code == 204, response.text
+    assert endpoint.uploaded('outputs/a.csv') is not None
+    assert not endpoint.is_live(token), 'the credential was supposed to have expired by now'
 
 
 @harness_self_test
@@ -311,6 +328,51 @@ def test_a_container_that_never_exits_is_never_reported_as_a_success(image):
 
 @harness_self_test
 @our_policy(
+    'The cancellation tests read a container\'s fate from three docker calls, and a harness that let any '
+    'of the three fail quietly would report an infrastructure fault as a step\'s behaviour. `docker stop` '
+    'failing outright is the dangerous one: it returns in a fraction of a second having done nothing, '
+    'which is indistinguishable from a step that shut down instantly — short elapsed time, no marker, no '
+    'further work — and those tests bypass wait(), so the hung-container self-test does not cover them. '
+    + _INSTRUMENT
+)
+def test_a_container_that_disappeared_is_never_read_as_a_result(image):
+    """Every way the harness asks about a container must raise when the answer is gone.
+
+    Setup:    a long-running container, removed out from under the harness.
+    Action:   inspect it, wait for it, collect it, and stop it.
+    Validate: all four raise ``ContainerVanished`` rather than answering.
+
+    ``inspect`` used to map EVERY non-zero ``docker inspect`` onto ``exit_code=None`` and
+    ``stop`` used to discard its return code entirely, so a daemon fault could arrive at
+    a test as an ordinary result — and in the cancellation tests, as a PASS.
+    """
+    container = docker.start(
+        image,
+        name=f'lspo-conformance-vanish-{os.getpid()}',
+        env={},
+        creds_dir=None,
+        entrypoint='python',
+        command=('-c', 'import time; time.sleep(120)'),
+    )
+    container.remove()
+
+    answered = []
+    for description, call in (
+        ('inspect', container.inspect),
+        ('wait', lambda: container.wait(timeout=3)),
+        ('collect', container.collect),
+        ('stop', lambda: container.stop(grace=1)),
+    ):
+        try:
+            call()
+        except docker.ContainerVanished:
+            continue
+        answered.append(description)
+    assert not answered, f'{answered} answered about a container that is gone instead of raising'
+
+
+@harness_self_test
+@our_policy(
     'Two credential tests rest entirely on this docker mechanism, so it is proven rather than assumed. '
     + _INSTRUMENT
 )
@@ -415,6 +477,56 @@ def test_the_harness_injects_exactly_the_variables_the_agent_always_sets(image, 
 
     assert sorted(injected) == sorted(contract.INJECTED_ENV)
     assert contract.LEGACY_CREDENTIALS_ENV not in injected
+
+
+@harness_self_test
+@our_policy(
+    'The citation on a basis_contract test is the whole of its authority, and until this round the only '
+    'thing checked was that it mentioned an authoritative FILE — which a paraphrase, a stale quotation or '
+    'no quotation at all passes just as easily. This checks every quoted fragment against the platform\'s '
+    'real sources. What it CANNOT check is whether the sentence supports the claim; every over-claim '
+    'corrected in this harness so far cited a real file and quoted a real sentence, so that judgement '
+    'stays with a reviewer. ' + _INSTRUMENT
+)
+def test_every_contract_citation_quotes_the_platform_verbatim():
+    """The one check that measures a citation against the thing it cites.
+
+    Setup:    ``LSPO_ORCHESTRATOR_SRC`` pointing at an orchestrator checkout — optionally
+              with ``LSPO_ORCHESTRATOR_REF`` to read a git ref rather than the working
+              tree. Without it this test skips: this repository is standalone and does
+              not vendor the platform, and a check that passed because it had nothing to
+              read would be worse than none.
+    Action:   read every citation written in ``tests/`` straight out of the source, and
+              look each quoted fragment up in the files that citation names.
+    Validate: every fragment occurs, ignoring case, wrapping and Sphinx markup.
+
+    **Read from the files, not from the collected tests**, and the difference is not
+    academic: the first version of this walked the session's items, so running it on its
+    own — the obvious way to run it — checked the single test that had been selected and
+    passed. A check that is weaker the more precisely you aim it is not a check.
+
+    A fragment that has gone missing means one of two things, and both need a human: the
+    platform reworded a rule (so the restatement may now be wrong), or the citation was
+    never a quotation in the first place.
+    """
+    read_source = citations.source_reader()
+    if read_source is None:
+        pytest.skip(
+            f'set {citations.SRC_ENV} to an orchestrator checkout (and optionally {citations.REF_ENV} to '
+            f'a git ref) to check every quoted rule against the real sources. Unset, this harness can '
+            f'only check that a citation NAMES an authoritative file and quotes something rule-length, '
+            f'which collection already enforces'
+        )
+    written = citations.citations_in((TESTS_DIR).glob('test_*.py'))
+    assert len(written) > 20, f'only {len(written)} citations were found; this check is not reading the suite'
+
+    problems: list[str] = []
+    for where, citation in written:
+        if not citation:
+            problems.append(f'{where}: the citation is not a plain string, so it cannot be checked')
+            continue
+        problems += [f'{where}: {problem}' for problem in citations.verbatim_problems(citation, read_source)]
+    assert not problems, 'citations that do not quote the platform verbatim:\n  ' + '\n  '.join(problems)
 
 
 def _env_in_container(image: str, *, name: str, unset: tuple[str, ...]) -> dict[str, str]:

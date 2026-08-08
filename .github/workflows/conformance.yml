@@ -4,18 +4,23 @@ name: conformance
 # it. The harness needs a real docker daemon; it refuses to run rather than simulate a
 # container, because a harness that fakes the container proves nothing.
 #
-# WHY THIS IS GREEN TODAY. Twenty-one tests are known to fail against node.py as it
-# stands (see CONFORMANCE-BASELINE.md). They carry the marker `expected_red_until_fixed`
-# and run as STRICT expected failures, so today's run is green with them reported as
-# `xfailed`. The moment somebody fixes one of those the test PASSES, strict xfail turns
-# the run RED, and the failure says which test to promote out of the expected-red group.
-# That is the signal this workflow exists for: it is not a gate on the node being correct,
-# it is a gate on the record of what is wrong staying accurate.
+# WHY THIS IS GREEN TODAY. Twenty tests are known to fail against node.py as it stands
+# (see CONFORMANCE-BASELINE.md). They carry the marker `expected_red_until_fixed` and run
+# as STRICT expected failures, so today's run is green with them reported as `xfailed`.
+# The moment somebody fixes one of those the test PASSES, strict xfail turns the run RED,
+# and the failure says which test to promote out of the expected-red group. That is the
+# signal this workflow exists for: it is not a gate on the node being correct, it is a
+# gate on the record of what is wrong staying accurate.
 #
-# Ten of the twenty-one are contract violations, three are this repository's own
-# compatibility policy, and eight are reference-quality expectations the contract permits
-# a real node to skip. The per-basis counts are printed below, because that distinction is
-# what stops a documentation slice teaching a preference as a rule.
+# Six of the twenty are contract violations, three are this repository's own compatibility
+# policy, and eleven are reference-quality expectations the contract permits a real node to
+# skip. The per-basis counts are printed below, because that distinction is what stops a
+# documentation slice teaching a preference as a rule.
+#
+# NOT CHECKED HERE: that each basis_contract citation quotes its source verbatim. That
+# needs a checkout of the orchestrator, which this repository does not have — run it with
+# LSPO_ORCHESTRATOR_SRC set, from a machine that does. Collection still enforces the half
+# that needs nothing: a citation must name an authoritative file AND quote a rule out of it.
 
 on:
   push:

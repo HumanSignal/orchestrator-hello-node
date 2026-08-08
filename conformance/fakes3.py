@@ -24,7 +24,8 @@ in one where a previous version of this file did not.**
    the refusal, so a test can prove the fence was exercised rather than merely never
    tripped.
 
-3. *Credentials expire; they are not revoked.* **This is the correction that matters.**
+3. *Credentials expire; they are not revoked, and they are never un-authorized in
+   flight.* **This is the correction that matters, and this round finished it.**
    Issuing a fresh envelope does NOT invalidate the URLs already handed out: a presigned
    URL is a signature over a deadline, and nothing an issuer does afterwards can take it
    back. It stops working when its own ``expires_at`` passes, and not before. An earlier
@@ -34,12 +35,15 @@ in one where a previous version of this file did not.**
    platform does not make (``agent/creds.py``: the agent refreshes *before* expiry
    precisely "so the workload never has to handle an expired file").
 
-   Expiry is therefore evaluated **at the moment a request arrives**, exactly as S3
+   Expiry is evaluated **once, at the moment a request arrives**, exactly as S3
    authorizes a request when it receives it. A transfer that was authorized does not
-   fail retroactively because it took a long time. For the one case where a test needs a
-   credential to die mid-request — a refusal arriving after the body was accepted — there
-   is an explicit :meth:`Endpoint.expire`, so that case is deterministic rather than a
-   race against a clock.
+   fail retroactively because it took a long time. The version before this one still
+   had half of the old model left in it: a hook could set a credential's expiry to minus
+   infinity AFTER the body had been read and the request was re-authorized on the way
+   out, so an accepted upload could still be refused. That is revocation wearing an
+   expiry's clothes, production cannot produce it, and nothing on the platform's side
+   asks a step to retry an in-flight transfer that was already authorized. Both the hook
+   and the second authorization are gone.
 
 What it does NOT emulate: AWS signature verification (the "signature" here is an opaque
 token naming a credential generation), request-time skew, multipart *chunked* uploads,
@@ -155,19 +159,22 @@ class Rejection:
 
 @dataclass
 class _Hooks:
-    """Test-registered behaviour, in the two places where behaviour can be injected."""
+    """Test-registered behaviour, at the ONE point where behaviour can be injected.
 
-    #: Consulted before anything else happens. May raise :class:`Refused`, sleep, or
-    #: rotate credentials. Return value ignored.
+    One hook point, deliberately. There used to be three — before the request, after the
+    body had been read, and after the response had been written — and the last two
+    existed only to express things that cannot happen: a request being un-authorized
+    after it was accepted, and a rotation landing at a moment the client could observe
+    before the harness did. Both produced tests that a correct node could fail. A hook
+    that fires while the request is still being authorized can express everything the
+    suite legitimately needs: refuse it, hold it open, or publish a fresh ``creds.json``
+    while it is in flight.
+    """
+
+    #: Consulted before the request is authorized. May raise :class:`Refused`, sleep, or
+    #: rotate credentials. Hooks run in the order they were appended, which is how a test
+    #: says "publish the replacement, THEN hold the response open". Return value ignored.
     on_request: list[Callable[['Endpoint', Request], None]] = field(default_factory=list)
-    #: Consulted once the request body is fully read but before a response is written.
-    #: This is where "the credential expired mid-operation" lives: the store accepted
-    #: the bytes and then refused, which is exactly what an expiring policy looks like.
-    on_accepted: list[Callable[['Endpoint', Request], None]] = field(default_factory=list)
-    #: Consulted after the response has been fully written. This is where a rotation
-    #: that must NOT affect the request it follows lives — "the credentials changed the
-    #: moment the last input finished downloading".
-    on_responded: list[Callable[['Endpoint', Request], None]] = field(default_factory=list)
 
 
 class Endpoint:
@@ -192,9 +199,6 @@ class Endpoint:
         self._stated_expiry: dict[str, datetime | None] = {}
         #: token → the POST fields issued with it, so an upload can be held to them.
         self._policies: dict[str, dict[str, str]] = {}
-        #: Credentials a test killed outright (:meth:`expire`) rather than letting run
-        #: out. Kept only so a refusal can say which of the two happened.
-        self._killed: set[str] = set()
         #: Called with the new token whenever :meth:`refresh` runs — the harness wires
         #: this to the atomic replacement of ``creds.json``.
         self.on_rotate: Callable[[str], None] = lambda token: None
@@ -257,20 +261,6 @@ class Endpoint:
         token = self.mint(ttl_s)
         self.on_rotate(token)
         return token
-
-    def expire(self, token: str | None = None) -> None:
-        """Make one generation expire NOW, deterministically.
-
-        For the one situation a wall clock cannot express reliably: the credential dying
-        *during* a request, so the refusal arrives after the store has already taken the
-        body. Defaults to the newest generation.
-        """
-        with self._lock:
-            target = token or (self._tokens[-1] if self._tokens else '')
-            if target:
-                self._expiry[target] = -math.inf
-                self._stated_expiry[target] = datetime.now(timezone.utc) - timedelta(seconds=1)
-                self._killed.add(target)
 
     @property
     def token(self) -> str:
@@ -406,25 +396,18 @@ class Endpoint:
     def _check_token(self, request: Request) -> None:
         """Refuse a credential that had already expired when this request ARRIVED.
 
-        Judged at arrival, the way S3 authorizes a request when it receives it — so a
-        transfer that was authorized cannot fail retroactively for taking too long, and a
-        credential the test explicitly killed mid-request (:meth:`expire`, which sets the
-        expiry to minus infinity) fails whenever it is re-checked.
+        Judged at arrival, ONCE, the way S3 authorizes a request when it receives it. A
+        transfer that was authorized cannot fail retroactively for taking too long, and
+        nothing here can un-authorize one — an issuer signs a deadline and cannot take it
+        back.
         """
         if self.is_live(request.token, at=request.arrived_at):
             return
-        with self._lock:
-            killed = request.token in self._killed
-        when = (
-            'expired while this request was in flight — the body was accepted first'
-            if killed
-            else 'had already expired when the request arrived'
-        )
         raise Refused(
             403,
             'AccessDenied',
-            f'the credential {request.token!r} presented for {request.kind} {request.name!r} {when}; '
-            f'the newest generation is {self.token!r}',
+            f'the credential {request.token!r} presented for {request.kind} {request.name!r} had already '
+            f'expired when the request arrived; the newest generation is {self.token!r}',
         )
 
     def _check_post_fields(self, request: Request) -> None:
@@ -492,11 +475,6 @@ def _make_handler(endpoint: 'Endpoint'):
                 endpoint._check_token(request)
                 if blob is None:
                     raise Refused(404, 'NoSuchKey', f'no object named {name!r}')
-                endpoint._run(endpoint.hooks.on_accepted, request)
-                # Asked again AFTER the accept hooks, so "the credential expired between
-                # the store accepting this request and answering it" is expressible: a
-                # hook rotates, and the answer is the 403 a real expiring policy gives.
-                endpoint._check_token(request)
             except Refused as refused:
                 endpoint._record_rejection(request, refused)
                 self._error(refused)
@@ -510,7 +488,6 @@ def _make_handler(endpoint: 'Endpoint'):
                     self.wfile.write(chunk)
             except (BrokenPipeError, ConnectionResetError):
                 pass  # the step died mid-transfer; that is a result, not an error here
-            endpoint._run(endpoint.hooks.on_responded, request)
 
         # ---------------------------------------------------------------- uploads
 
@@ -540,8 +517,6 @@ def _make_handler(endpoint: 'Endpoint'):
                     )
                 if len(payload) > endpoint.max_object_bytes:
                     raise Refused(400, 'EntityTooLarge', f'object of {len(payload)} bytes exceeds the policy ceiling')
-                endpoint._run(endpoint.hooks.on_accepted, request)
-                endpoint._check_token(request)
             except Refused as refused:
                 endpoint._record_rejection(request, refused)
                 self._error(refused)
@@ -563,7 +538,6 @@ def _make_handler(endpoint: 'Endpoint'):
             self.send_response(204)
             self.send_header('Content-Length', '0')
             self.end_headers()
-            endpoint._run(endpoint.hooks.on_responded, request)
 
         # ----------------------------------------------------------------- errors
 
@@ -636,26 +610,17 @@ def refresh_when(predicate, *, ttl_s: float | None = None):
     It does NOT invalidate the credential the step may already be holding — nothing can.
     A step that is still inside its own expiry keeps working, which is exactly what
     production does and what an earlier version of this harness wrongly punished.
+
+    **Append it BEFORE the hook that holds the response open.** The replacement has to be
+    on disk while the request is still in flight; publishing it once the response has
+    gone out is a race the step can lose through no fault of its own — it can receive the
+    body and re-open ``creds.json`` before the swap lands, read the document that is
+    about to be replaced, and fail. A test that intermittently fails a correct
+    implementation is worse than no test.
     """
 
     def hook(endpoint: 'Endpoint', request: Request) -> None:
         if predicate(request):
-            endpoint.refresh(ttl_s)
-
-    return hook
-
-
-def expire_and_refresh_when(predicate, *, ttl_s: float | None = None):
-    """Kill the credential in use RIGHT NOW and publish a fresh one in its place.
-
-    The mid-operation expiry: the store has taken the body and the refusal arrives
-    afterwards. The only correct response from a step is to re-read the credentials file
-    — which by then holds a live envelope — and repeat the transfer.
-    """
-
-    def hook(endpoint: 'Endpoint', request: Request) -> None:
-        if predicate(request):
-            endpoint.expire(request.token)
             endpoint.refresh(ttl_s)
 
     return hook

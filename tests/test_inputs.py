@@ -7,10 +7,18 @@ that hash is its statement about what this step is supposed to be reading.
 does not require a step to verify its inputs, to copy them anywhere, or to produce any
 particular output at all — it describes the documents, not the work. What makes these
 tests worth running is that this repository is the file customers copy: the behaviour
-asserted here is the behaviour the example is supposed to teach, and the orchestrator's
-own test for this node asserts the same things. Two tests here ARE conformance, and both
-are about documents rather than about copying: the marker must be one the collector can
-parse, and every relpath it inventories must name an object that really exists under it.
+asserted here is the behaviour the example is supposed to teach, and for the pin checks
+the orchestrator's own test for this node asserts the same thing.
+
+**Where that last claim holds, precisely.** ``tests/test_hello_node_example.py`` requires
+the phrases *"hashes to"* and *"the job pinned"* in the marker's error — for the
+hash-mismatch case, and only there. It says nothing about the wording of the wrong-size
+message or the missing-pin message. This file mirrors the orchestrator on the case it
+really covers and says plainly, on the others, that the expectation is ours.
+
+Two tests here ARE conformance, and both are about documents rather than about copying:
+the marker must be one the collector can parse, and every relpath it inventories must
+name an object that really exists under it.
 """
 
 from __future__ import annotations
@@ -36,11 +44,23 @@ _PIN_CHECKING = (
 )
 
 _COPYING = (
-    'The contract permits arbitrary output semantics: a step may produce anything, or nothing. That the '
-    'reference node copies each input through unchanged is ITS behaviour, and the reason to pin it is '
-    'that customers copy this file — a passthrough that quietly mangled a name or dropped a byte would '
-    'be taught to everyone who started from it.'
+    'The contract permits arbitrary output semantics: a step may produce anything, or nothing, at any '
+    'relpath it likes. That the reference node copies each input through unchanged to '
+    'outputs/<the input\'s relpath> is ITS behaviour, and the reason to pin it is that customers copy '
+    'this file — a passthrough that quietly mangled a name or dropped a byte would be taught to '
+    'everyone who started from it.'
 )
+
+#: Names that are ordinary object keys and look like escapes. Shared by the two tests
+#: below, which ask different questions about the same run and rest on different
+#: authorities: whether the marker names real keys (the collector's rule) and whether the
+#: bytes came through under the name they went in with (this node's own behaviour).
+AWKWARD_NAMES = [
+    InputSpec(relpath='100%25-done.csv', data=b'percent\n'),
+    InputSpec(relpath='with space.csv', data=b'space\n'),
+    InputSpec(relpath='ünïcode-日本.csv', data=b'unicode\n'),
+    InputSpec(relpath='year=2026/month=08/rows.csv', data=b'nested\n'),
+]
 
 
 @conforms_today
@@ -88,9 +108,11 @@ def test_several_inputs_are_all_copied(make_job):
 @conforms_today
 @traces_to(
     'pipelines/external_finalize.py _publish_and_verify resolves every inventoried relpath against the '
-    'staging prefix and copies it — "for obj in marker.objects: source = _resolve_object_uri('
-    'staging_prefix, obj.relpath)". A marker whose relpath does not name the key the object was written '
-    'under fails collection on a missing object, with no hint that the NAME was the problem.'
+    'staging prefix and copies it: "for obj in marker.objects:" … "source = _resolve_object_uri('
+    'staging_prefix, obj.relpath)". Its docstring — "Copy every promised object into the published area, '
+    'then verify what LANDED there" — is the whole of what collection publishes, so a marker whose '
+    'relpath does not name the key the object was written under fails on a missing object, with no hint '
+    'that the NAME was the problem.'
 )
 def test_the_inventory_names_the_keys_the_objects_were_really_written_under(make_job):
     """Percent signs, spaces and non-ASCII are ordinary object keys, not escapes.
@@ -98,39 +120,61 @@ def test_the_inventory_names_the_keys_the_objects_were_really_written_under(make
     Setup:    three inputs whose names contain a literal ``%``, a space, and non-Latin
               characters, plus one with directory components.
     Action:   run.
-    Validate: every relpath the marker inventories resolves to an object the store
-              actually holds, byte for byte.
+    Validate: every relpath the marker inventories names an object the store really
+              received.
 
-    This is the conformance half of "the copy went through": a step that
-    percent-encodes a key on the way out and reports the un-encoded name in its marker
-    publishes an inventory that does not match the store, and collection fails on an
-    object nobody can find.
+    A step that percent-encodes a key on the way out and reports the un-encoded name in
+    its marker publishes an inventory that does not match the store, and collection fails
+    on an object nobody can find.
+
+    This test used to also require every input to reappear at ``outputs/<its relpath>``.
+    That is a real expectation of this reference node and it is asserted immediately
+    below — but the collector's rule says nothing about where a step puts its outputs or
+    whether it copies anything at all, so the two claims cannot share one citation.
     """
-    inputs = [
-        InputSpec(relpath='100%25-done.csv', data=b'percent\n'),
-        InputSpec(relpath='with space.csv', data=b'space\n'),
-        InputSpec(relpath='ünïcode-日本.csv', data=b'unicode\n'),
-        InputSpec(relpath='year=2026/month=08/rows.csv', data=b'nested\n'),
-    ]
-    job = make_job(inputs=inputs)
+    job = make_job(inputs=AWKWARD_NAMES)
     result = job.run()
     assert result.exit_code == 0, result.output
 
     uploaded = set(job.endpoint.keys_in_order())
-    for obj in job.marker()['objects']:
-        assert obj['relpath'] in uploaded, (
-            f'the marker inventories {obj["relpath"]!r}, which the store never received; it holds {sorted(uploaded)}'
+    inventoried = [obj['relpath'] for obj in job.marker()['objects']]
+    assert inventoried, 'the marker inventories nothing, so this test has nothing to check'
+    for relpath in inventoried:
+        assert relpath in uploaded, (
+            f'the marker inventories {relpath!r}, which the store never received; it holds {sorted(uploaded)}'
         )
-    for spec in inputs:
+
+
+@conforms_today
+@reference_quality(_COPYING)
+def test_awkward_names_survive_the_copy_unchanged(make_job):
+    """Setup:    the same four names — a literal ``%``, a space, non-Latin characters and
+              directory components.
+    Action:   run.
+    Validate: each input's bytes are readable at ``outputs/<its relpath>``.
+    """
+    job = make_job(inputs=AWKWARD_NAMES)
+    result = job.run()
+    assert result.exit_code == 0, result.output
+
+    for spec in AWKWARD_NAMES:
         assert job.endpoint.body_of(f'outputs/{spec.relpath}') == spec.data
 
 
 @conforms_today
-@reference_quality(_PIN_CHECKING)
+@reference_quality(
+    _PIN_CHECKING
+    + ' The exact WORDING is pinned here for one case only, and this is that case: the orchestrator\'s '
+    'own test_an_input_that_does_not_match_its_pin_fails_the_step asserts "\'hashes to\' in '
+    'marker[\'error\'] and \'the job pinned\' in marker[\'error\']". Two suites asserting the same '
+    'sentence is what turns a message into an interface, and this file is on the other side of it.'
+)
 def test_an_input_whose_bytes_changed_is_refused(make_job):
     """Setup:    an input pinned to one digest, served as different bytes of the same length.
     Action:   run.
-    Validate: the step refuses it, exits permanent (10), and says which object.
+    Validate: the step refuses it, exits permanent (10), names the object, and says both
+              what it got and what was pinned — in the words the orchestrator's own test
+              for this file expects.
     """
     job = make_job(inputs=[InputSpec(relpath='swapped.csv', data=b'pinned', served=b'pinnEd')])
     result = job.run()
@@ -138,11 +182,23 @@ def test_an_input_whose_bytes_changed_is_refused(make_job):
     assert result.exit_code == contract.EXIT_PERMANENT, f'expected a permanent refusal:\n{result.output}'
     marker = job.marker()
     assert marker['status'] == 'failed'
-    assert 'swapped.csv' in (marker['error'] or ''), marker['error']
+    error = marker['error'] or ''
+    assert 'swapped.csv' in error, error
+    for phrase in ('hashes to', 'the job pinned'):
+        assert phrase in error, (
+            f'the orchestrator\'s own test for this file requires the phrase {phrase!r} in the marker\'s '
+            f'error; it says: {error!r}'
+        )
 
 
 @conforms_today
-@reference_quality(_PIN_CHECKING)
+@reference_quality(
+    _PIN_CHECKING
+    + ' Note what is NOT borrowed here: the orchestrator asserts particular wording only for the '
+    'hash-mismatch message, never for this one. That the size failure names the pinned number is an '
+    'expectation of ours alone — a size error saying only "the input is the wrong size" would be '
+    'conformant, and useless to whoever has to work out which side is wrong.'
+)
 def test_an_input_of_the_wrong_size_is_refused(make_job):
     """Setup:    an input the JOB pins at 999 bytes — in the manifest and the envelope
               alike, as production copies one validated list into both — which the store

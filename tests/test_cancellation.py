@@ -99,27 +99,46 @@ def test_a_step_stopped_during_a_download_does_not_claim_it_succeeded(make_job, 
 
 @expected_red_until_fixed
 @reference_quality(_COOPERATIVE_SHUTDOWN)
-def test_a_step_stopped_during_an_upload_inventories_what_it_left_behind(make_job, sample_input):
-    """Setup:    the store holds the FIRST upload open for twelve seconds.
-    Action:   wait until the upload has arrived, then stop the container.
+def test_a_step_stopped_during_an_upload_inventories_what_it_left_behind(make_job):
+    """Setup:    TWO inputs, with the store holding the SECOND upload open for twelve
+              seconds — so the first output has genuinely landed and been acknowledged
+              before anything is signalled.
+    Action:   wait until the second upload has arrived, then stop the container.
     Validate: it stops inside the grace, does not claim success, and the marker it leaves
               inventories every object that actually landed.
+
+    **Two inputs, and that is the whole design of this test.** With one, the object whose
+    upload is being held has not been recorded yet — this store, like a real one, records
+    an upload when it answers, not when the bytes arrive — so "everything that landed is
+    inventoried" would compare an empty set against whatever the marker says and be true
+    however the step behaved. It failed today only because of the assertions above it.
+    Holding the SECOND upload puts one acknowledged object on the ledger, which is what
+    the step then has to account for.
 
     Cancelling during a write is the harder half: the step has produced something, so the
     marker it leaves is not merely a status — it is the inventory that decides whether
     that work is salvaged or abandoned (``_salvage_what_the_step_produced`` publishes
     exactly what the marker names).
     """
-    job = make_job(inputs=[sample_input])
-    job.endpoint.hooks.on_request.append(delay_when(matching('upload', index=1), HELD_OPEN_SECONDS))
+    job = make_job(inputs=THREE_INPUTS[:2])
+    job.endpoint.hooks.on_request.append(delay_when(matching('upload', index=2), HELD_OPEN_SECONDS))
 
     container = job.start()
-    assert job.endpoint.wait_for('upload', timeout=60), 'the step never started uploading'
+    assert _wait_for_upload_number(job, 2), 'the step never reached its second upload'
     grace_used = container.stop(grace=docker.STOP_GRACE_SECONDS)
     result = container.collect()
 
     _assert_stopped_cleanly(job, result, grace_used)
     landed = [key for key in job.endpoint.keys_in_order() if key.startswith('outputs/')]
+    assert landed, (
+        'no upload had been acknowledged when the step stopped, so there is nothing an inventory could '
+        'be missing and this test would prove nothing'
+    )
+    uploaded = job.endpoint.keys_in_order()
+    assert contract.MARKER_FILENAME in uploaded, (
+        f'the step left no marker at all, so the {len(landed)} object(s) it had already written are '
+        f'abandoned: salvage publishes exactly what a marker names. The store holds {uploaded}'
+    )
     inventoried = {obj['relpath'] for obj in job.marker()['objects']}
     assert set(landed) <= inventoried, (
         f'{sorted(set(landed) - inventoried)} landed before the step stopped but its marker does not '
@@ -151,6 +170,7 @@ def test_a_cancelled_step_stops_taking_on_new_work(make_job):
     container.stop(grace=docker.STOP_GRACE_SECONDS)
     result = container.collect()
 
+    _assert_it_really_stopped(result)
     fetched = job.endpoint.names_of('input')
     assert fetched == ['input/one.csv'], (
         f'after being asked to stop, the step went on to fetch {fetched} — {len(fetched)} of '
@@ -184,10 +204,41 @@ def test_a_step_that_cannot_be_stopped_costs_the_whole_grace_period(make_job, sa
     grace_used = container.stop(grace=docker.STOP_GRACE_SECONDS)
     result = container.collect()
 
+    _assert_it_really_stopped(result)
     assert grace_used < docker.STOP_GRACE_SECONDS - 1, (
         f'the step ignored SIGTERM: docker had to wait the full {docker.STOP_GRACE_SECONDS}s grace '
         f'({time.monotonic() - began:.1f}s measured) and then SIGKILL it. It exited {result.exit_code}, '
         f'and every cancelled job costs that same half minute of a runner slot'
+    )
+
+
+def _wait_for_upload_number(job, wanted: int, timeout: float = 60.0) -> bool:
+    """Block until the store has RECEIVED its ``wanted``-th upload request.
+
+    ``Endpoint.wait_for`` answers "has any upload arrived yet?" and stays answered, which
+    is not the question when a test needs to signal the container during a specific one.
+    The counter is stamped when the request arrives, before any hook runs, so this
+    returns while the upload is still in flight.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if job.endpoint.count_of('upload') >= wanted:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def _assert_it_really_stopped(result) -> None:
+    """The container exited. Not "docker stop returned" — exited.
+
+    ``Container.stop`` now raises if ``docker stop`` fails, which closes half of this,
+    and this closes the other half: a container that is still running when it is
+    collected has no exit code, and every assertion about what it did next is being made
+    about a process that has not finished doing it.
+    """
+    assert result.still_running is False, (
+        f'the container was still running when this test read its result, so nothing below is a '
+        f'statement about a finished step. Its output so far:\n{result.output}'
     )
 
 
@@ -198,6 +249,7 @@ def _assert_stopped_cleanly(job, result, grace_used: float) -> None:
     Exit 20 is available (``EXIT_CANCELLED``) and is the clearest thing to return, but
     the platform does not need it: the launch is already known to be cancelled.
     """
+    _assert_it_really_stopped(result)
     assert grace_used < docker.STOP_GRACE_SECONDS - 1, (
         f'the container had to be SIGKILLed after the full {docker.STOP_GRACE_SECONDS}s grace '
         f'({grace_used:.1f}s); it exited {result.exit_code}'

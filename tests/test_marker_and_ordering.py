@@ -31,19 +31,13 @@ from conformance.markers import conforms_today, reference_quality, subject_is_pl
     'ordering is the whole point — the marker\'s existence is the orchestrator\'s proof that everything '
     'it references is already readable."'
 )
-def test_the_marker_is_the_last_object_uploaded_and_is_written_once(make_job):
-    """Everything the marker names must already be readable when it appears — and it
-    appears exactly once.
+def test_the_marker_is_the_last_object_uploaded(make_job):
+    """Everything the marker names must already be readable when it appears.
 
     Setup:    two inputs, so there is more than one object to get the order wrong with.
     Action:   run.
-    Validate: the marker is the last key the store accepted, it was accepted exactly
-              ONCE, and every relpath it inventories arrived strictly before it.
-
-    "Once" is not pedantry, and the orchestrator's own example test says so in the same
-    words: a marker written twice means an earlier version of it was visible, which is
-    the exact failure the rule exists to prevent — a reader that saw the first one would
-    have treated an unfinished run as finished.
+    Validate: the marker is the last key the store accepted, and every relpath it
+              inventories arrived strictly before it.
     """
     job = make_job(inputs=[InputSpec(relpath='a.csv', data=b'a\n'), InputSpec(relpath='b.csv', data=b'b\n')])
     result = job.run()
@@ -51,12 +45,8 @@ def test_the_marker_is_the_last_object_uploaded_and_is_written_once(make_job):
 
     order = job.endpoint.keys_in_order()
     assert order[-1] == contract.MARKER_FILENAME, f'the marker was not written last: {order}'
-    assert order.count(contract.MARKER_FILENAME) == 1, (
-        f'the marker was written {order.count(contract.MARKER_FILENAME)} times: {order}. An earlier '
-        f'version of it was visible to anyone reading, and that is a finished run as far as they know'
-    )
 
-    marker_position = len(order) - 1
+    marker_position = len(order) - 1 - order[::-1].index(contract.MARKER_FILENAME)
     for obj in job.marker()['objects']:
         landed = job.endpoint.last_index(obj['relpath'])
         assert landed is not None and landed < marker_position, (
@@ -65,11 +55,38 @@ def test_the_marker_is_the_last_object_uploaded_and_is_written_once(make_job):
 
 
 @conforms_today
+@reference_quality(
+    'The ordering rule, read literally, does not forbid writing the same marker twice at the end: '
+    'external/contract.py requires it "strictly last, after every output object", and a second identical '
+    'write is still after them. What makes "once" worth asserting is the reason the rule exists — "A '
+    'marker written early would make a half-finished run indistinguishable from a complete one" — and a '
+    'marker written twice means a version of it was visible to a reader at a moment the step was still '
+    'working. The orchestrator\'s own test for this file says the same in the same words ("Once is not '
+    'pedantry"), which is why it is pinned here rather than left to chance.'
+)
+def test_the_marker_is_written_exactly_once(make_job):
+    """Setup: two inputs. Action: run. Validate: the store accepted the marker once."""
+    job = make_job(inputs=[InputSpec(relpath='a.csv', data=b'a\n'), InputSpec(relpath='b.csv', data=b'b\n')])
+    result = job.run()
+    assert result.exit_code == 0, result.output
+
+    order = job.endpoint.keys_in_order()
+    assert order.count(contract.MARKER_FILENAME) == 1, (
+        f'the marker was written {order.count(contract.MARKER_FILENAME)} times: {order}. An earlier '
+        f'version of it was visible to anyone reading, and that is a finished run as far as they know'
+    )
+
+
+@conforms_today
 @traces_to(
-    'pipelines/external_finalize.py _read_and_check_marker: "expected = (attempt.execution_id, '
-    'attempt.attempt, launch.generation); found = (marker.execution_id, marker.attempt, '
-    'marker.generation); if found != expected: … A receipt from a superseded or unrelated run must '
-    'never be collected as this one."'
+    'external/contract.py CompletionMarker: the identity fields are "required and self-describing on '
+    'purpose: collection cross-checks them against the launch it believes it is collecting, so a receipt '
+    'written by a superseded (stale generation) runner is identifiable as such from its own contents… A '
+    'receipt identifiable only by where it was found is one storage misconfiguration away from being '
+    'attributed to the wrong run." pipelines/external_finalize.py _read_and_check_marker does exactly '
+    'that: "expected = (attempt.execution_id, attempt.attempt, launch.generation)" … "found = '
+    '(marker.execution_id, marker.attempt, marker.generation)" … "if found != expected" … "A receipt '
+    'from a superseded or unrelated run must never be collected as this one."'
 )
 def test_the_marker_identifies_the_launch_it_is_a_receipt_for(make_job, sample_input):
     """A receipt identifiable only by where it was found is one misconfiguration away

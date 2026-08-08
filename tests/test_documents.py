@@ -8,7 +8,10 @@ somebody else fails to read what it wrote.
 
 Compatibility runs the other way: unknown fields are IGNORED, never rejected. A newer
 orchestrator may add keys an older customer image has never heard of, so dropping a field
-is a breaking change and adding one is not.
+is a breaking change and adding one is not. **That rule is about the contract's own
+models** — the manifest, the marker, the result document. The credential envelope is a
+plain dict with no model behind it, so the same expectation applied to IT is ours rather
+than the contract's, and the two are tested separately.
 """
 
 from __future__ import annotations
@@ -17,7 +20,13 @@ import json
 
 from conformance import contract, platform_rules
 from conformance.job import InputSpec
-from conformance.markers import conforms_today, expected_red_until_fixed, reference_quality, traces_to
+from conformance.markers import (
+    conforms_today,
+    expected_red_until_fixed,
+    our_policy,
+    reference_quality,
+    traces_to,
+)
 
 #: Comfortably over the 1 MiB ceiling on result.json, and well under the 8 MiB one on
 #: the manifest that carries it — so the ONLY document in violation is the one the step
@@ -58,18 +67,47 @@ def test_params_reach_the_step_unchanged(make_job, sample_input):
     'orchestrator may add keys that an older customer image has never heard of, and vice versa. Dropping '
     'a field is therefore a breaking change; adding one is not."'
 )
-def test_unknown_additive_fields_are_ignored_not_rejected(make_job, sample_input):
-    """A newer orchestrator adds keys; an older image must not care.
+def test_unknown_fields_in_the_manifest_are_ignored_not_rejected(make_job, sample_input):
+    """A newer orchestrator adds keys to ``invocation.json``; an older image must not care.
 
-    Setup:    an envelope, a manifest and every input entry carrying fields that do not
-              exist in this version of the contract.
+    Setup:    a manifest carrying fields that do not exist in this version of the contract.
+    Action:   run.
+    Validate: the step finishes normally.
+
+    The manifest is one of the documents that rule is about — it is a contract model, and
+    "adding one is not [a breaking change]" is a promise made to the reader of it. The
+    credential envelope is NOT one of those models, which is why it has a test of its own
+    below rather than sharing this citation.
+    """
+    job = make_job(
+        inputs=[sample_input],
+        manifest_extra={'scheduling_class': 'batch', 'tenant': {'id': 4}},
+    )
+    result = job.run()
+
+    assert result.exit_code == 0, result.output
+    assert job.marker()['status'] == 'succeeded'
+
+
+@conforms_today
+@our_policy(
+    'The credential envelope is not a contract model. external/contract.py\'s extra=\'ignore\' rule '
+    'governs the pydantic documents — the manifest, the marker, the result — and the envelope is a plain '
+    'dict built in runners/credentials.py, with no model and no stated compatibility rule for its own '
+    'unknown keys or for the entries in its inputs list. The nearest thing to a rule is that the '
+    'envelope carries its own ENVELOPE_SCHEMA_VERSION which "a shape change that an old agent could not '
+    'understand bumps", which implies additive keys do not bump it — an implication, not a sentence. So '
+    'tolerating them is our choice, and worth pinning because it is exactly how a field gets added: to '
+    'the envelope first, where the oldest customer images will see it.'
+)
+def test_unknown_fields_in_the_credential_envelope_are_ignored_not_rejected(make_job, sample_input):
+    """Setup:    an envelope, and every input entry inside it, carrying invented fields.
     Action:   run.
     Validate: the step finishes normally.
     """
     job = make_job(
         inputs=[sample_input],
         envelope_extra={'issued_by': 'a newer orchestrator', 'refresh_hint_s': 300},
-        manifest_extra={'scheduling_class': 'batch', 'tenant': {'id': 4}},
         input_extra={'content_type': 'text/csv', 'etag': 'W/"abc"'},
     )
     result = job.run()
@@ -102,10 +140,12 @@ def test_the_result_document_has_the_shape_the_contract_declares(make_job, sampl
 
 @expected_red_until_fixed
 @traces_to(
-    'external/contract.py: MAX_RESULT_BYTES = 1024 * 1024, and "The result document carries only metrics '
-    'and a summary; anything approaching a megabyte there is payload in the wrong place." external/io.py '
-    'read_result enforces it on the way IN: _read_json reads limit+1 bytes and raises '
-    'ContractDocumentTooLarge — "over its …-byte contract document limit".'
+    'external/contract.py: MAX_RESULT_BYTES = 1024 * 1024, under the heading "Contract documents are '
+    'control data, not payload, so every read AND every write is bounded" — "The result document carries '
+    'only metrics and a summary; anything approaching a megabyte there is payload in the wrong place." '
+    'external/io.py says the same about the direction that matters here: "bounding the write makes a '
+    'producer fail loudly at the point of the mistake, instead of publishing a document that only turns '
+    'out to be unreadable later, in somebody else\'s process."'
 )
 def test_the_result_document_stays_under_its_ceiling(make_job, sample_input):
     """A step must not write a document the other side is forbidden to read.

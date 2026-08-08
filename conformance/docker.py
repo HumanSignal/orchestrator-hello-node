@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -49,6 +50,34 @@ class ContainerDidNotExit(AssertionError):
     bug this harness can have, because it turns the whole baseline into fiction in the
     direction of "the node is fine".
     """
+
+
+class DockerCommandFailed(AssertionError):
+    """A ``docker`` command the harness depends on did not succeed.
+
+    Also an ``AssertionError``, and for the same reason as :class:`ContainerDidNotExit`:
+    an infrastructure fault must never be readable as an ordinary result. ``docker stop``
+    failing outright looks, to any test that ignores it, exactly like a step that shut
+    down instantly and quietly — short elapsed time, no marker, no further work. That is
+    a false GREEN on the cancellation tests, which is the direction that matters.
+    """
+
+
+class ContainerVanished(DockerCommandFailed):
+    """The container the harness started is no longer known to the daemon.
+
+    Only ever raised on a CONFIRMED "no such container" answer. The harness removes a
+    container exactly once, after it has collected it, so absence beforehand means
+    something outside these tests removed it — and everything the run would have said
+    about the node (its exit code, its logs) is gone with it. Reporting that as
+    ``exit_code=None`` would let it masquerade as an ordinary expected-red failure.
+    """
+
+
+#: How the docker CLI says "I have never heard of that container". Matched rather than
+#: assumed from the exit status, because every other failure — daemon down, permission
+#: denied, an unparseable answer — is a fault the harness must NOT treat as an outcome.
+_NO_SUCH_CONTAINER = re.compile(r'no such (?:object|container)', re.IGNORECASE)
 
 
 def require_docker() -> None:
@@ -146,6 +175,10 @@ class Container:
             ContainerDidNotExit: It was still running when ``timeout`` ran out. Never
                 returns in that case — see the exception's own docstring for why a
                 tolerated timeout is the most dangerous bug this harness could have.
+            ContainerVanished: Something removed the container. Also never returns: the
+                only honest thing to say about a container nobody can inspect is that
+                its result is unknown, and ``None`` is not that — it is a value tests
+                compare against.
         """
         deadline = time.monotonic() + timeout
         while True:
@@ -157,28 +190,81 @@ class Container:
                     f'container {self.name!r} was still {state["Status"]!r} after {timeout:.0f}s. '
                     f'Docker reports ExitCode {state.get("ExitCode")!r} for a container in that state, '
                     f'which is why this is an error rather than a result. Its output so far:\n'
-                    f'{"".join(self.logs())[-4000:]}'
+                    f'{self._logs_or_note()[-4000:]}'
                 )
             time.sleep(0.1)
 
     def inspect(self) -> dict:
+        """The daemon's own account of this container's state.
+
+        Every failure raises. A previous version mapped EVERY non-zero ``docker inspect``
+        onto ``{'Status': 'gone', 'ExitCode': None}``, which meant a daemon that had
+        fallen over, a permission problem or an unparseable answer all arrived at the
+        tests as "the step produced no exit code" — indistinguishable from an ordinary
+        expected-red failure, and green for anything that only asked whether the exit
+        code was non-zero.
+        """
         out = subprocess.run(
             ['docker', 'inspect', self.name, '--format', '{{json .State}}'], capture_output=True, text=True
         )
         if out.returncode != 0:
-            return {'Status': 'gone', 'ExitCode': None, 'OOMKilled': False}
-        return json.loads(out.stdout)
+            raise self._command_failure('inspect', out)
+        try:
+            return json.loads(out.stdout)
+        except json.JSONDecodeError as exc:
+            raise DockerCommandFailed(
+                f'docker inspect {self.name!r} answered something that is not JSON ({exc}): {out.stdout!r}'
+            ) from exc
 
     def stop(self, grace: int = STOP_GRACE_SECONDS) -> float:
-        """SIGTERM, then SIGKILL after ``grace`` — exactly what the agent's stop does."""
+        """SIGTERM, then SIGKILL after ``grace`` — exactly what the agent's stop does.
+
+        Raises on a failed ``docker stop``. That return code used to be discarded, and
+        the cost of discarding it was specific: ``docker stop`` failing immediately
+        returns in a fraction of a second, having done nothing, which reads to a
+        cancellation test as "the step shut down promptly and did no further work" — the
+        exact shape of the behaviour those tests are looking for.
+        """
         began = time.monotonic()
-        subprocess.run(['docker', 'stop', '--time', str(grace), self.name], capture_output=True, text=True)
+        out = subprocess.run(
+            ['docker', 'stop', '--time', str(grace), self.name], capture_output=True, text=True
+        )
         self._stopped_after = time.monotonic() - began
+        if out.returncode != 0:
+            raise self._command_failure('stop', out, extra=f'after {self._stopped_after:.1f}s')
         return self._stopped_after
 
     def logs(self) -> tuple[str, str]:
+        """Everything the container wrote. A failed ``docker logs`` raises rather than
+        returning empty strings, which several tests would read as "the step said
+        nothing"."""
         out = subprocess.run(['docker', 'logs', self.name], capture_output=True, text=True)
+        if out.returncode != 0:
+            raise self._command_failure('logs', out)
         return out.stdout, out.stderr
+
+    def _logs_or_note(self) -> str:
+        """The container's output for an error message, never raising over it.
+
+        Used only while composing a failure that has already been decided; letting a
+        second fault in here would replace a precise diagnosis with a vaguer one.
+        """
+        try:
+            stdout, stderr = self.logs()
+        except DockerCommandFailed as exc:
+            return f'(its output could not be read: {exc})'
+        return stdout + stderr
+
+    def _command_failure(self, verb: str, out: subprocess.CompletedProcess, *, extra: str = '') -> DockerCommandFailed:
+        message = (out.stderr or out.stdout).strip()
+        where = f'docker {verb} {self.name!r}{" " + extra if extra else ""}'
+        if _NO_SUCH_CONTAINER.search(message):
+            return ContainerVanished(
+                f'{where}: the daemon no longer knows this container ({message}). This harness removes a '
+                f'container only after collecting it, so its exit code and its logs are gone and nothing '
+                f'about the node can be concluded from this run'
+            )
+        return DockerCommandFailed(f'{where} failed with exit {out.returncode}: {message}')
 
     def collect(self) -> RunResult:
         """Everything observable about the container, right now.

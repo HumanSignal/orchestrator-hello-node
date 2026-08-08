@@ -10,8 +10,8 @@
    and refuses the whole run on any disagreement.
 4. **Test locally before involving the orchestrator.** Point `LSPO_CREDENTIALS` at a JSON
    file describing local paths — note that this is the variable *this file currently
-   reads*, not the one the orchestrator sets (`LSPO_CREDENTIALS_FILE`); see defect 1 in
-   `CONFORMANCE-BASELINE.md`:
+   reads*, not the one the orchestrator sets (`LSPO_CREDENTIALS_FILE`); see the first
+   contract defect in `CONFORMANCE-BASELINE.md`:
 
    ```json
    {"schema_version": 1, "scheme": "local",

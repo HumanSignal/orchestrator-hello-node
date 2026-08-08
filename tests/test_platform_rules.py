@@ -99,10 +99,11 @@ def test_the_agent_injects_its_own_variables_plus_what_the_manifest_asked_for():
 
 @subject_is_platform
 @traces_to(
-    'agent/runner.py _workload_env raises JobFailed for a refused name: "the manifest asks this agent to '
-    'inject environment variable(s) …, which LSPO_AGENT_ALLOWED_ENV does not permit … A silent skip '
-    'would be worse than either alternative: the step would run without a credential it was written to '
-    'need and fail somewhere deep inside, and nobody would learn that the agent had refused it."'
+    'agent/runner.py _workload_env: "a name outside LSPO_AGENT_ALLOWED_ENV fails the job — visibly, '
+    'naming the variable. A silent skip would be worse than either alternative: the step would run '
+    'without a credential it was written to need and fail somewhere deep inside, and nobody would learn '
+    'that the agent had refused it." The refusal it raises reads "the manifest asks this agent to inject '
+    'environment variable(s) " followed by the names and "ALLOWED_ENV does not permit".'
 )
 def test_a_variable_outside_the_allowlist_fails_the_job_rather_than_being_skipped():
     """The manifest NAMES variables; the agent decides, and says no out loud.
@@ -427,7 +428,7 @@ def test_the_version_gate_defaults_to_one_and_refuses_anything_that_is_not_an_in
     'external/contract.py InputPort._check_prefix_layout: layout=\'prefix\' "requires a non-empty '
     'prefix_digest", "requires a relpath on every object … the prefix_digest is computed over (relpath, '
     'size, sha256)", and refuses a digest that "does not match the digest recomputed from its own '
-    'objects — a stated digest that disagrees with the listing beside it is worse than no digest, '
+    'objects (…) — a stated digest that disagrees with the listing beside it is worse than no digest, '
     'because both sides would trust it."'
 )
 def test_a_prefix_port_must_carry_a_digest_that_matches_its_own_listing():

@@ -18,16 +18,33 @@ envelope decides where the file lives inside the container"), and the agent inje
 path as ``LSPO_CREDENTIALS_FILE``.
 
 **Where the line falls in this file.** Reading the variable the agent actually sets is
-conformance. Everything else here — falling back to the contract's default path, honouring
-the legacy name at all, which of the two wins, saying so when they disagree — is OUR
-policy. No contract mentions ``LSPO_CREDENTIALS``; we keep it working because images in
-the field bake it, and that is a compatibility choice, not a rule anybody can be held to.
+conformance: the contract states that credentials are "delivered out of band as a file at
+``credentials_file``", the agent puts that exact path in ``LSPO_CREDENTIALS_FILE``, and a
+step that looks somewhere else cannot find its credentials in a configuration the platform
+is entitled to produce.
+
+Everything else here is weaker, and this round moved two tests down to say so:
+
+* falling back to the contract's default path, honouring the legacy name at all, which of
+  the two wins, and saying so when they disagree are OUR policy. No contract mentions
+  ``LSPO_CREDENTIALS``; we keep it working because images in the field bake it.
+* **not printing your own credential is reference quality, not conformance.** It was
+  labelled as a contract rule and that was wrong: ``agent/redact.py`` says how the AGENT
+  cleans its own messages, and ``agent/runner.py`` proves a workload's output is stored
+  exactly as written — a description of the consequence, not a prohibition. It stays as
+  the strongest expectation in the file, under an honest label.
 """
 
 from __future__ import annotations
 
 from conformance import contract
-from conformance.markers import conforms_today, expected_red_until_fixed, our_policy, traces_to
+from conformance.markers import (
+    conforms_today,
+    expected_red_until_fixed,
+    our_policy,
+    reference_quality,
+    traces_to,
+)
 
 ALTERNATIVE_CREDS = '/lspo/creds/envelope.json'
 STALE_CREDS = '/lspo/creds/stale.json'
@@ -35,10 +52,13 @@ STALE_CREDS = '/lspo/creds/stale.json'
 
 @expected_red_until_fixed
 @traces_to(
-    'agent/runner.py _workload_env sets "LSPO_CREDENTIALS_FILE": context.creds.mount_file for every job, '
-    'and agent/creds.py takes that mount path from the envelope — "The FIRST envelope decides where the '
-    'file lives inside the container: … the issuer\'s own credentials_file is the authority on the mount '
-    'path." Nothing anywhere sets LSPO_CREDENTIALS.'
+    'external/contract.py InvocationManifest: "credentials are delivered out of band as a file at '
+    'credentials_file", whose own definition is "In-container path where credentials are mounted" — so '
+    'the path is the platform\'s to choose, not the image\'s. agent/runner.py _workload_env then puts '
+    'exactly that path in the environment: "LSPO_CREDENTIALS_FILE": context.creds.mount_file, for every '
+    'job. agent/creds.py takes the path from the envelope — "The FIRST envelope decides where the file '
+    'lives inside the container" — so a non-default path is a shape the platform really produces. '
+    'Nothing anywhere sets LSPO_CREDENTIALS.'
 )
 def test_the_credentials_file_variable_is_honoured(make_job, sample_input):
     """The node must read the file ``LSPO_CREDENTIALS_FILE`` names.
@@ -173,13 +193,22 @@ def test_a_disagreement_between_the_two_variables_is_reported_and_agreement_is_n
     assert_no_credential_material(noisy.output)
 
 
-@conforms_today
-@traces_to(
-    'agent/redact.py: "A presigned URL is not an address with a password attached: the query string IS '
-    'the credential." The agent redacts URLs in ITS OWN messages — but a workload\'s stdout is pumped '
-    'straight into the log buffer unredacted (agent/runner.py: stream_logs(context.handle, '
-    'context.buffer.add)), so whatever the step prints is what gets stored with the execution.'
+_NOT_LEAKING_IS_NOT_A_RULE = (
+    'Nothing makes it a CONTRACT violation for a workload to print its own credential, and this harness '
+    'labelled two tests as though it did. agent/redact.py governs how the AGENT cleans URLs out of the '
+    'messages IT composes ("A presigned URL is not an address with a password attached: the query string '
+    'IS the credential"); agent/runner.py hands a container\'s output to the log buffer verbatim '
+    '(stream_logs(context.handle, context.buffer.add)), which is a description of what happens to what '
+    'the step prints, not a rule about what it may print. So a leaky node is conformant. It is also a '
+    'node nobody should copy: whatever it prints is stored with the execution, shown to everyone who can '
+    'see the run, and searchable — and the credentials being short-lived makes a leak smaller, not '
+    'harmless. This is the strongest reference-quality expectation in the suite, and it is still not a '
+    'conformance requirement.'
 )
+
+
+@conforms_today
+@reference_quality(_NOT_LEAKING_IS_NOT_A_RULE)
 def test_an_ordinary_run_prints_no_credential_material(make_job, sample_input):
     """Whatever the step prints is stored with the execution and searchable.
 
@@ -196,11 +225,13 @@ def test_an_ordinary_run_prints_no_credential_material(make_job, sample_input):
 
 
 @expected_red_until_fixed
-@traces_to(
-    'agent/redact.py: "requests in particular puts the full URL into the text of an HTTP error (403 '
-    'Client Error: Forbidden for url: https://…?X-Amz-Signature=…), so redacting only the URI the agent '
-    'interpolates itself would miss the most likely leak by far." The agent applies that to its own '
-    'messages only; agent/runner.py hands the container\'s output to the log buffer verbatim.'
+@reference_quality(
+    _NOT_LEAKING_IS_NOT_A_RULE
+    + ' The specific trap this one measures is named in agent/redact.py: "requests in particular puts '
+    'the full URL into the text of an HTTP error (403 Client Error: Forbidden for url: '
+    'https://…?X-Amz-Signature=…), so redacting only the URI the agent interpolates itself would miss '
+    'the most likely leak by far." The natural way to report a failed fetch is exactly what publishes '
+    'the credential.'
 )
 def test_a_refused_request_does_not_print_the_presigned_url(make_job, sample_input):
     """A 403 must be reported without quoting the credential that earned it.

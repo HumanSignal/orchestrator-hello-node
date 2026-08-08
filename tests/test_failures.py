@@ -7,9 +7,13 @@ dies before it can write anything, and because it decides whether the orchestrat
 retries. The numbers mean what ``external/contract.py`` says they mean: ``1`` asks for a
 retry, ``10`` says never retry me.
 
-**The marker is load-bearing**, because "the step said why" is a far better failure
-report than "the process died", and because a failure marker's inventory is the only
-thing the collector's salvage path can publish.
+**The marker is load-bearing but it is not REQUIRED**, and this file used to blur the
+two. ``pipelines/external_finalize.py`` ``_step_account`` says a failed step is "invited
+by the contract to write a marker", ``_marker_for_this_attempt`` treats an absent one as
+an ordinary outcome, and ``error`` is declared ``str | None = None``. So "a failed run
+writes a marker, carrying a reason" is what a reference node should do, not a rule — and
+it is labelled that way now. What the contract does constrain is the marker a step
+CHOOSES to write: every test below that reads one asks first whether one exists.
 
 **In-node retry is NOT required.** This file used to demand that a step retry a 503
 itself. It does not have to: the contract's whole mechanism for a transient fault is to
@@ -20,6 +24,8 @@ failure it had — and that is where the real defect is.
 """
 
 from __future__ import annotations
+
+import pytest
 
 from conformance import contract
 from conformance.fakes3 import matching, refuse_when
@@ -32,30 +38,91 @@ THREE_INPUTS = [
     InputSpec(relpath='three.csv', data=b'three\n'),
 ]
 
+_A_MARKER_IS_INVITED = (
+    'The contract INVITES a failure marker rather than requiring one, and its error field is optional. '
+    'pipelines/external_finalize.py _step_account: "A failed or cancelled step is invited by the '
+    'contract to write a marker carrying its error and exit_code, and that is the most useful sentence '
+    'anyone will read about the run — the orchestrator can only ever say \'it failed\', while the step '
+    'can say what failed." _marker_for_this_attempt treats an absent marker as an ordinary outcome, and '
+    'external/contract.py declares "error: str | None = None". So a silent failure is conformant. A '
+    'reference node should still explain itself, because the alternative is that every failure of every '
+    'node copied from this one is diagnosed from an exit code alone.'
+)
+
+
+def _marker_if_the_step_wrote_one(job):
+    """The marker, or a skip. Absence is legal, so it must not read as a pass or a fail.
+
+    Returning early would count as a pass — and under strict xfail an expected-red test
+    that passes turns the run red, which would be a false alarm about a step that did
+    something the contract permits. Skipping says the honest thing: the rule this test
+    restates had nothing to constrain in this run.
+    """
+    if contract.MARKER_FILENAME not in job.endpoint.keys_in_order():
+        pytest.skip(
+            'the step wrote no completion marker, which the contract permits — the rule this test '
+            'restates constrains the marker a step CHOOSES to write, so there is nothing to check here. '
+            'That the marker is missing at all is a reference-quality gap, measured by '
+            'test_a_failed_run_explains_itself_in_a_marker'
+        )
+    return job.marker()
+
 
 @conforms_today
 @traces_to(
-    'external/contract.py classify_exit: "Unknown codes classify as transient … a step that means "do '
-    'not retry me" must say so with EXIT_PERMANENT" — with EXIT_PERMANENT = 10.'
+    'external/contract.py: "The process exit code is the ONLY signal available when a job dies before it '
+    'can write a marker, so the numbers carry meaning", with EXIT_PERMANENT = 10 and classify_exit: '
+    '"Unknown codes classify as transient … a step that means "do not retry me" must say so with '
+    'EXIT_PERMANENT."'
 )
-def test_a_permanent_failure_writes_a_marker_and_exits_ten(make_job):
-    """A failed run still writes a marker. Setup: a corrupted input. Action: run.
-    Validate: exit 10, a ``failed`` marker, and a reason."""
+def test_a_permanent_failure_exits_ten(make_job):
+    """The code a step returns for a failure it knows will not go away.
+
+    Setup:    an input whose bytes do not match its pin — a failure re-running cannot fix.
+    Action:   run.
+    Validate: the process exits 10, which the contract classifies as ``permanent``.
+
+    Only the exit code. Whether a marker was written, and what it says, is a separate
+    question with a separate authority, and this test used to answer both at once under
+    the citation for one of them.
+    """
     job = make_job(inputs=[InputSpec(relpath='bad.csv', data=b'pinned', served=b'pinnEd')])
     result = job.run()
 
     assert result.exit_code == contract.EXIT_PERMANENT
     assert contract.classify_exit(result.exit_code) == contract.CLASS_PERMANENT
+
+
+@conforms_today
+@reference_quality(_A_MARKER_IS_INVITED)
+def test_a_failed_run_explains_itself_in_a_marker(make_job):
+    """"The step said why" is a far better failure report than "the process died".
+
+    Setup:    the same unverifiable input.
+    Action:   run.
+    Validate: a marker was written, it says ``failed``, and it carries a reason.
+
+    Every one of those three is optional as far as the contract goes. Together they are
+    the difference between a run somebody can diagnose and one they cannot.
+    """
+    job = make_job(inputs=[InputSpec(relpath='bad.csv', data=b'pinned', served=b'pinnEd')])
+    result = job.run()
+    assert result.exit_code != 0, 'the run was supposed to fail'
+
+    uploaded = job.endpoint.keys_in_order()
+    assert contract.MARKER_FILENAME in uploaded, f'the step failed silently; the store saw {uploaded}'
     marker = job.marker()
     assert marker['status'] == 'failed'
-    assert marker['error'], 'the marker gives no reason'
-    assert contract.MARKER_FILENAME == job.endpoint.keys_in_order()[-1]
+    assert marker['error'], 'the marker gives no reason, so the run is diagnosable only from an exit code'
 
 
 @conforms_today
 @traces_to(
-    'external/contract.py: EXIT_TRANSIENT = 1, and classify_exit maps it to "transient" — the code that '
-    'asks the orchestrator to run the attempt again. The step does not have to retry anything itself.'
+    'external/contract.py, on the exit codes: "The process exit code is the ONLY signal available when a '
+    'job dies before it can write a marker, so the numbers carry meaning. Anything unrecognised is '
+    'treated as transient (retry) — the safe default, because a step that failed permanently is expected '
+    'to say so explicitly." EXIT_TRANSIENT = 1 is the code that asks the orchestrator to run the attempt '
+    'again; nothing asks the step to retry anything itself.'
 )
 def test_a_transient_read_refusal_is_reported_as_transient(make_job):
     """A store that keeps answering 503 must end the run with a retryable exit code.
@@ -128,11 +195,13 @@ def test_a_stated_exit_code_matches_the_one_the_process_returned(make_job):
 
     Setup:    a store that refuses one input's reads with 503 every time.
     Action:   run.
-    Validate: **if** the marker carries an ``exit_code``, it equals the process's.
+    Validate: **if** there is a marker and **if** it carries an ``exit_code``, that code
+              equals the process's.
 
-    ``exit_code`` is optional (``ContractInt | None``), and a marker that omits it is
-    perfectly conformant — so this asserts nothing about markers that stay silent. Today
-    the node is not silent: it writes 10 for every unsuccessful run whatever the process
+    Both conditions are real. A failed step need not write a marker at all, and
+    ``exit_code`` is optional within one (``ContractInt | None``) — a marker that stays
+    silent about it is perfectly conformant, so this asserts nothing about one. Today the
+    node is not silent: it writes 10 for every unsuccessful run whatever the process
     returned, and here the process returns 1. The orchestrator then retries the attempt
     (correct, from the exit code) while the sentence attached to the run says the step
     exited 10 — a permanent failure — which is the document anybody investigating reads
@@ -144,10 +213,10 @@ def test_a_stated_exit_code_matches_the_one_the_process_returned(make_job):
     result = job.run()
 
     assert result.exit_code not in (0, None), 'the run was supposed to fail'
-    marker = job.marker()
+    marker = _marker_if_the_step_wrote_one(job)
     stated = marker.get('exit_code')
     if stated is None:
-        return  # silence is legal; nothing to contradict
+        pytest.skip('the marker states no exit_code, which the contract permits — there is nothing to contradict')
     assert stated == result.exit_code, (
         f'the marker says the step exited {stated}, the process exited {result.exit_code}. '
         f'The failure reason attached to this run will read "The step exited with code {stated}"'
@@ -166,8 +235,13 @@ def test_what_a_failed_run_already_produced_is_still_salvageable(make_job):
     Setup:    three inputs; the SECOND is served with bytes that do not match its pin,
               so the step fails after it has already copied the first one.
     Action:   run.
-    Validate: the failure marker inventories what really landed — the first output — so
-              collection can salvage and publish it.
+    Validate: **if** the step wrote a marker, its inventory names what really landed —
+              the first output — so collection can salvage and publish it.
+
+    The condition matters: no rule requires a failed step to write a marker. What the
+    rule requires is that a marker's ``objects`` be "every object produced", so an
+    inventory that omits something the step really wrote is a document contradicting its
+    own definition.
 
     The collector's salvage path reads the marker's ``objects`` list and copies exactly
     what is named there. A failure marker with an empty inventory therefore does not mean
@@ -188,7 +262,7 @@ def test_what_a_failed_run_already_produced_is_still_salvageable(make_job):
     landed = [key for key in job.endpoint.keys_in_order() if key.startswith('outputs/')]
     assert landed, 'nothing was uploaded before the failure, so this test proves nothing'
 
-    inventoried = {obj['relpath'] for obj in job.marker()['objects']}
+    inventoried = {obj['relpath'] for obj in _marker_if_the_step_wrote_one(job)['objects']}
     assert set(landed) <= inventoried, (
         f'{sorted(set(landed) - inventoried)} were uploaded and then abandoned: the failure marker '
         f'inventories {sorted(inventoried) or "nothing"}, so salvage will publish none of them'

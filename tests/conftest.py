@@ -5,8 +5,12 @@ Three things happen here that are worth reading before the tests.
 **Every test declares one GROUP and one BASIS**, and collection fails otherwise. The
 group says whose behaviour is on trial; the basis says by what authority. A
 ``basis_contract`` citation must name a file in ``conformance.markers``'s list of
-authoritative sources — an assertion nobody can trace to a written rule does not get to
-call itself conformance. Run ``--print-labels`` to see the whole table.
+authoritative sources AND quote a sentence out of it — an assertion nobody can trace to a
+written rule does not get to call itself conformance, and naming the area a rule lives in
+is not the same as citing the rule. ``conformance/citations.py`` owns both checks, and
+its module docstring is honest about the one they cannot make: that the quoted sentence
+actually SUPPORTS the assertion is a judgement about meaning, not a string search. Run
+``--print-labels`` to see the whole table.
 
 **Every ``expected_red_until_fixed`` test is turned into a STRICT expected failure.**
 CI is therefore green today, with the gaps visible in the report as ``xfailed``. The
@@ -27,9 +31,9 @@ import uuid
 
 import pytest
 
-from conformance import docker
+from conformance import citations, docker
 from conformance.job import InputSpec, Job
-from conformance.markers import AUTHORITATIVE_SOURCES, BASES, EXPECTED_RED_REASON, GROUPS
+from conformance.markers import BASES, EXPECTED_RED_REASON, GROUPS
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -72,12 +76,11 @@ def pytest_collection_modifyitems(config, items):
         if not citation:
             problems.append(f'{item.nodeid} carries {basis_name} with no citation or rationale')
             continue
-        if basis_name == 'basis_contract' and not any(source in citation for source in AUTHORITATIVE_SOURCES):
-            problems.append(
-                f'{item.nodeid} claims basis_contract but its citation names none of the authoritative '
-                f'sources: {citation!r}'
-            )
-            continue
+        if basis_name == 'basis_contract':
+            flaw = citations.structural_problem(citation)
+            if flaw:
+                problems.append(f'{item.nodeid} claims basis_contract but {flaw}. Citation: {citation!r}')
+                continue
         if groups[0][0] == 'expected_red_until_fixed' and not config.getoption('--red-for-real'):
             item.add_marker(pytest.mark.xfail(strict=True, reason=EXPECTED_RED_REASON))
 
