@@ -1,0 +1,58 @@
+name: conformance
+
+# Builds this repository's own image and runs the black-box conformance harness against
+# it. The harness needs a real docker daemon; it refuses to run rather than simulate a
+# container, because a harness that fakes the container proves nothing.
+#
+# WHY THIS IS GREEN TODAY. Twenty-three tests are known to fail against node.py as it
+# stands (see CONFORMANCE-BASELINE.md). They carry the marker `expected_red_until_fixed`
+# and run as STRICT expected failures, so today's run is green with them reported as
+# `xfailed`. The moment somebody fixes one of those defects the test PASSES, strict xfail
+# turns the run RED, and the failure says which test to promote out of the expected-red
+# group. That is the signal this workflow exists for: it is not a gate on the node being
+# correct, it is a gate on the record of what is wrong staying accurate.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  conformance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install the harness's dependencies
+        run: pip install --no-cache-dir -r requirements-dev.txt
+
+      - name: Show what the daemon can enforce
+        # Swap accounting decides whether one test (an input larger than the container's
+        # memory) can run at all. Without it the daemon ignores --memory-swap, a container
+        # over its RAM ceiling pages out instead of being killed, and the test would answer
+        # the question for a reason that has nothing to do with the step — so it skips
+        # itself and says so. Printing this makes that skip explicable in the log.
+        run: |
+          docker version
+          docker info --format 'swap-limit warnings: {{json .Warnings}}'
+
+      - name: Run the conformance suite
+        run: python -m pytest -v
+
+      - name: Test groups in this run
+        if: always()
+        # Each group is counted separately, because a green total means nothing without
+        # knowing what was being held to account. If `conforms_today` or `harness_self_test`
+        # ever drops to zero, the suite has stopped proving anything.
+        run: |
+          for group in expected_red_until_fixed subject_is_platform harness_self_test conforms_today; do
+            echo -n "$group: "
+            python -m pytest --collect-only -q -m "$group" | tail -1
+          done
