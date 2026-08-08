@@ -469,8 +469,9 @@ apart either treats advice as law or treats law as advice. Both are expensive.
       worth.** **Neither of the two stops named here preserves what you write.** An
       **operator pressing Cancel** usually does not reach your process at all — it normally
       arrives as a SIGKILL — and on the rare occasion it arrives as a SIGTERM, nothing you
-      write is collected. The **runtime deadline** does begin as a SIGTERM, but the grace
-      behind it is cut short by the platform's own next heartbeat, your upload credentials
+      write is collected. The **runtime deadline** normally begins as a SIGTERM — normally,
+      not always — but whatever interval follows it is cut short by the platform's own
+      next heartbeat, your upload credentials
       expired at the deadline, and the terminal
       report that would have made a marker count is refused — so nothing is collected there
       either, and a container stopped that way leaves its run parked at "Waiting for

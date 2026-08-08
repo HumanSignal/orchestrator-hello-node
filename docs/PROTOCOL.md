@@ -425,7 +425,8 @@ handed already expires at the deadline, so a node that never re-reads its creden
 will *usually* not fail visibly on that account — it will simply be terminated. Usually
 and not always, and the exception is worth knowing because it is the well-behaved node
 that meets it: the envelope expires at the moment your container is *asked* to stop, not
-at the moment it dies, and between those two there is a grace period (section 7). A node
+at the moment it dies, and when the stop does arrive politely there is an interval between
+those two — of no guaranteed length, and possibly of none at all (section 7). A node
 that catches the SIGTERM and does what this document recommends — re-read the
 credentials, write the marker last, exit — is making its final upload inside exactly
 that window, and that upload is refused for expired credentials. So the coincidence
@@ -694,8 +695,8 @@ node registered the default way is given a 900-second runtime budget, the same 9
 seconds the credentials last, so the two run out together and the container is *asked to
 stop* at the moment its credentials die. That coincidence hides the failure from most
 nodes but not from all of them: being asked to stop is not being dead, and a node that
-handles the stop and writes its marker on the way out is doing that upload inside the
-grace period, with credentials that expired a moment earlier (section 2.4, section 7).
+handles the stop and writes its marker on the way out is doing that upload *after* the
+deadline, with credentials that expired as it passed (section 2.4, section 7).
 Otherwise the failure appears the first time an operator raises the budget, which is
 exactly when the node is finally being asked to do something substantial. Write for that
 case now; it is not a hypothetical, it is the second week.
@@ -995,15 +996,17 @@ enough that a stop lands *between* calls rather than inside one; and never assum
 container which has been asked to stop has stopped.
 
 This paragraph is **background**, about these documents rather than about the platform.
-Read every duration in them as typical rather than bounded. Where a figure is quoted it is
-one of two things: a **setting** of ours, given so you can find it and an operator can
-change it, or a genuine **ceiling** fixed by our own configuration and worth knowing for
-capacity and cost — the runtime budget (section 2.4), the credential lifetime (section
-4.3), the ceiling on how many inputs fit in one job description (section 2.3). Those are
-bounds. Nothing about the timing of a stop is one. Earlier drafts quoted figures for
-several of these intervals; each review round falsified another one, so they have been
-removed rather than hedged, and the passages below inherit this statement instead of
-repeating it.
+The statement above is about **how long something takes**, and every figure of that kind
+in these documents is typical rather than bounded. It is not about **values the platform
+stamps or enforces**, which are exact and are meant to be reasoned with: the runtime budget
+(section 2.4), the deadline after which your upload credentials stop working (section 4.3),
+the lease stamped when your job is claimed (below), the ceiling on how many inputs fit in
+one job description (section 2.3). The rest are **settings**, quoted so that you can find
+them and an operator can change them — how often a heartbeat is attempted, how often the
+agent reconciles. A setting tells you how often something is tried, never how long it
+takes. Earlier drafts quoted figures for the durations too; each review round falsified
+another one, so they have been removed rather than hedged, and the passages below inherit
+this statement instead of repeating it.
 
 **BEHAVIOUR, and it is the next thing to know, because the natural guess is wrong.**
 Two different events stop a container that has not finished, and **neither of them reliably
@@ -1017,9 +1020,13 @@ are set out below; a third way to be stopped, fencing, is section 7.1.
 **BEHAVIOUR, the local half of the deadline.** The agent watches the clock itself, in the
 same loop that waits for your container, and when it notices the deadline has passed it
 asks docker to stop the container: SIGTERM, then a SIGKILL from docker when the stop
-timeout the agent asked for runs out (`agent/runner.py:2302-2324` calling
-`agent/executors/docker_exec.py:405-415`, the SDK default, which the caller does not
-override). Nothing has to arrive from anywhere for that to happen, so it fires even when the
+timeout runs out. That timeout is **30 seconds**, and it is the agent's own constant rather
+than anything docker chose — the agent's stop helper defaults to it and both callers pass
+nothing (`agent/executors/docker_exec.py:405-415`, called from `agent/runner.py:2314` and
+`:2324`). Read it as the **ceiling on the polite phase, not as a grace you are given**:
+everything below is about how much of it you actually get, and the answer is that nothing
+guarantees you any of it. Nothing has to arrive from anywhere for the stop itself to
+happen, so it fires even when the
 orchestrator is unreachable. *When* it notices is a different question, and the answer is
 the one at the top of this section: the check happens between slices of a poll, and each
 slice asks the docker daemon about your container and waits for the daemon's answer
@@ -1105,7 +1112,10 @@ terminal report tests the lease and never the deadline (`runners/reports.py:396-
 job with a budget under five minutes that spends longer than its whole budget getting ready
 — a slow image pull is the realistic way — and then fails there, before its first
 heartbeat, sends a terminal report that **is accepted**: the run finishes as failed instead
-of parking, and collection is armed (`runners/reports.py:433`). Note what that arithmetic
+of parking, and collection is armed (`runners/reports.py:433`). That holds only while the
+claim's own lease is still alive. Preparation that drags past the lease itself, rather than
+merely past a smaller budget, is refused like any other expired-lease report
+(`runners/reports.py:396-403`) and parks like the ordinary case. Note what the arithmetic
 requires: on a **default** registration the budget is 900 seconds, which is longer than the
 lease, so this cannot arise at all — it needs a node whose `timeout_seconds` was
 deliberately set low. This one is read from the source rather than executed, and it is not a
@@ -1141,10 +1151,9 @@ five-minute lease has not been shortened and the report is accepted; the agent s
 container first and reports afterwards (`agent/runner.py:2741-2746`), and the collection
 that report arms reads any valid marker for this attempt that is already in your staging
 area. **Do not assume there is nothing there because the container had only just been
-started.** Your container begins running *inside* the call that starts it, before that call
-returns — the start is detached, so the daemon runs it as soon as it is created
-(`agent/executors/docker_exec.py:223`, `:250`) — and it goes on running through everything
-the agent does afterwards. A short job can finish, and write its marker, in that stretch. A
+started.** The single call the agent makes both creates your container and starts it, so it
+returns a handle to something that is **already running** (`agent/executors/docker_exec.py:223`),
+and it goes on running through everything the agent does afterwards. A short job can finish, and write its marker, in that stretch. A
 container the agent **picked back up** rather than started is the same situation with more
 of it visible: a forced agent shutdown deliberately leaves your container running for the
 next agent to adopt (section 7.1), and that container may be minutes into its work and may
@@ -1415,8 +1424,10 @@ this attempt had already recorded**, if one was in the staging area when the kil
 and nothing else: collection reads that marker, checks that its `execution_id`, `attempt` and
 `generation` name this attempt and not a superseded one, and then copies and verifies every
 object it inventories, keeping what verifies (`pipelines/external_finalize.py:1459-1482`,
-`:1523-1581`). On the three fences whose report is accepted, that collection happens
-immediately.
+`:1523-1581`). Where the agent's report is not merely permitted but **accepted** — the
+distinction the table above insists on — that collection is armed there and then, and runs
+when the platform gets to it: the report stamps the attempt as due and queues the work
+after its transaction commits (`runners/reports.py:428-436`).
 
 **BEHAVIOUR, and it is worse than the previous paragraph sounds.** On the fences that
 report nothing, **nothing is ever collected**. There is no watchdog

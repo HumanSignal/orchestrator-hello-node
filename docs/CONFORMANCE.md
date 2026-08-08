@@ -391,7 +391,8 @@ node's own behaviour on a stop, and nothing more. It is not a model of what the 
 then does with the result, on any of the three stop paths. An **operator pressing
 Cancel** usually arrives as a SIGKILL your process never sees, and even on the narrow
 path where it arrives as a SIGTERM, nothing the node writes is collected. The **runtime
-deadline** does begin as a SIGTERM, but the grace is cut short by the platform's own
+deadline** normally begins as a SIGTERM — normally, not always — but whatever interval
+follows it is cut short by the platform's own
 next heartbeat, the upload credentials expired at the deadline, and the terminal report
 that would have made a marker count is refused
 ([PROTOCOL.md](PROTOCOL.md#7-cancellation)). So label this test for what it proves —
