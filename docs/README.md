@@ -120,7 +120,7 @@ reports it.
 | `result.json` as metrics | Yes, `ResultDoc` with `metrics` and `summary` | not applicable | **No. Nothing ever reads it.** Run metrics come from the marker inventory |
 | `logs.ndjsonl` written by your step | Invited by the contract | not applicable | Published only if you also list it in the marker's `objects` |
 | Progress reporting | Yes, one stdout line per sample | not applicable | **Yes**, shown live in the run view |
-| Cancellation with exit code 20 | Yes | not applicable | **Only sometimes.** A `cancelled` marker is read and salvaged when your own report is what ends the job. When an **operator** cancels, nothing you wrote is collected at all — see [PROTOCOL.md](PROTOCOL.md#7-cancellation) |
+| Cancellation with exit code 20 | Yes | not applicable | **Only sometimes.** A `cancelled` marker is read and salvaged when your own report is what ends the job. When an **operator** cancels a step that is still running, nothing you wrote is collected — see [PROTOCOL.md](PROTOCOL.md#7-cancellation) |
 | Automatic retry of a failed attempt | Exit code 1 means "retry me" | not applicable | **No.** Nothing re-attempts an external job automatically. An operator retries by hand |
 
 ---
@@ -182,6 +182,16 @@ Dockerfiles that fix the container user.
    report is refused, the job's record is left in a live state, and the field that arms
    collection is never stamped. The platform's own test file for deadlines was also run at
    this commit and passes. This is what [PROTOCOL.md](PROTOCOL.md#7-cancellation) rests on.
+
+**Which path those runs actually covered, because it is narrower than the section they
+support.** Every one of them exercised a job whose **container was already running** when
+its deadline passed. Nothing was exercised about a job still being prepared when its budget
+runs out, about any of the six fences, or about collection — and the first two of those do
+not behave like the path that was run. Where section 7 states an outcome that the runs did
+not cover, it says so in the sentence itself and cites the source it was read from instead.
+That distinction is the correction this round exists for: an execution proves the path it
+took, and writing its result up as a universal is the same class of mistake as writing up a
+guess.
 
 That is all. **No real container, no deployed orchestrator, no object storage and no
 collection run were exercised** — the runs in item 5 used stand-ins for the docker daemon

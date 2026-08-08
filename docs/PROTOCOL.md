@@ -80,8 +80,10 @@ variables the deployment declared and the agent's operator allowed
 | `LSPO_STAGING_PREFIX` | the true storage address of your staging area | **information only, see below** |
 
 **BEHAVIOUR.** The only credentials variable the agent sets is `LSPO_CREDENTIALS_FILE`
-(`agent/runner.py:2295`). There is no variable called `LSPO_CREDENTIALS`; the agent has
-never set one.
+(`agent/runner.py:2295`). There is no variable called `LSPO_CREDENTIALS`. The agent does
+not set one, and no commit in the orchestrator's history ever added one to the agent — that
+second half is a search of the repository's history rather than a reading of one commit,
+and it is stated separately for that reason.
 
 **RECOMMENDATION, with no working alternative.** Read your credentials path from
 `LSPO_CREDENTIALS_FILE`. A node that reads `LSPO_CREDENTIALS` works only because its own
@@ -407,10 +409,11 @@ revision, and both write the same one: **900 seconds** (the setup command,
 `noderegistry/management/commands/external_demo_setup.py:38`, and the Settings screen's
 registration API, `noderegistry/serializers.py:26`). So unless somebody deliberately
 raised it, **your container is stopped fifteen minutes after the job was claimed**. The
-agent classifies that stop as a failure rather than a cancellation — but on this path its
-report is refused, so the run does not become a failed run either: it stays parked at
-"Waiting for runner" until an operator cancels it, and nothing your container produced is
-collected (section 7).
+agent classifies that stop as a failure rather than a cancellation — but for a container
+that was running when the deadline passed, its report is refused, so the run does not
+become a failed run either: it stays parked at "Waiting for runner" until an operator
+cancels it, and nothing your container produced is collected (section 7, which also names
+the one job that ends differently).
 
 **BEHAVIOUR, and it is why section 4.3 reads the way it does.** The credential envelope's
 own lifetime is also 900 seconds, and it is additionally clamped so that it can never
@@ -564,9 +567,12 @@ limit for your container is **2 GiB** (`LSPO_AGENT_MEMORY`, default `2g`).
 
 Those two numbers are the whole warning. An object the platform explicitly permits, held
 in memory once as input bytes and once as an upload body, is 2 GiB of resident memory
-against a 2 GiB limit. The kernel kills the container, and **an OOM kill writes no
-marker**, so the run dies with a bare exit code and no account of itself. Nothing in the
-orchestrator's limits is exceeded on the way there.
+against a 2 GiB limit. The kernel kills the container, and **an OOM kill gives your process
+no chance to write a marker**, so unless one was already there the run dies with a bare
+exit code and no account of itself. (The container's exit code is still reported, so this
+ending arms collection like any other self-reported failure and a marker you had already
+written would be read. Under the write-the-marker-last discipline there is none.) Nothing
+in the orchestrator's limits is exceeded on the way there.
 
 **RECOMMENDATION.** Stream in both directions. Read inputs to a temporary file or in
 chunks, hash while you stream, and upload from a file handle rather than from a `bytes`
@@ -968,6 +974,15 @@ when the orchestrator is unreachable. This was **verified by running the agent**
 fake daemon: the container was politely stopped rather than killed, with a 30 second
 timeout, and the run was then classified `failed`.
 
+**BEHAVIOUR, and it is the boundary of that watch, which everything said about the deadline
+below inherits.** The loop holding that clock check is entered only after the agent has
+finished getting the job ready. Writing your credentials file, fetching the job
+description, pulling your image and creating the container all happen first, and nothing in
+that stretch consults the deadline at all (`agent/runner.py:2093-2094`: preparation, and
+then the wait). So what follows is an account of a job whose **container was already
+running** when the deadline passed. A job still being prepared when its budget runs out ends
+differently, and that case is set out below, once the ordinary one has been described.
+
 **BEHAVIOUR.** A container stopped for its deadline is classified `failed`, not
 `cancelled`, and that question is asked before your exit code is looked at
 (`agent/runner.py:2332-2333`), so nothing your process exits with can turn it into a
@@ -1019,16 +1034,47 @@ in a live state, and the field that arms collection was never stamped.
 **BEHAVIOUR, and it is what an operator sees.** Nothing else finishes the job either. The
 sweep that rescues interrupted collections only looks at attempts that were already armed,
 and there is no lease or runtime watchdog at all (`runners/reports.py:156-160`). So a run
-stopped by its deadline stays parked at **"Waiting for runner"** until somebody cancels it
-— and cancelling collects nothing either.
+whose container was stopped by its deadline stays parked at **"Waiting for runner"** until
+somebody cancels it — and cancelling collects nothing either. That is the outcome to plan
+for; it is what a step whose container overruns its budget actually gets.
 
-**BEHAVIOUR, and it is worth one plain sentence, because the shape of this section invites
-you to hunt for the exception.** **No stop imposed from outside preserves a marker today**
-— not an operator's cancellation, not the runtime deadline, not a fence. Both the
-cancellation gap and the deadline gap are recorded as platform defects to be fixed. Until
-they are, the only endings that deliver anything are the ones where your process finishes
-and reports on its own: success, a failure you exit with, or a cancellation you declare
-yourself by exiting 20 without being asked.
+**BEHAVIOUR, the exception, and it is a race rather than a way out.** "Parked" describes a
+container that was running when the deadline passed. It is not what happens to every job
+that outlives its budget, because three separate things have to be in place before the
+refusal above can bite, and each of them arrives only after preparation. The deadline is
+watched only once the agent is waiting on your container (above). The lease handed out when
+the job was claimed runs **300 seconds** from the claim and is **not** shortened to a
+smaller runtime budget — only a heartbeat does that, and the heartbeat thread is started by
+the last line of preparation (`runners/claim.py:713` with `runners/jobs.py:44-46`;
+`runners/reports.py:186`; `agent/runner.py:2170-2174`). And the endpoint that accepts a
+terminal report tests the lease and never the deadline (`runners/reports.py:396-403`). So a
+job with a budget under five minutes that spends longer than its whole budget getting ready
+— a slow image pull is the realistic way — and then fails there, before its first
+heartbeat, sends a terminal report that **is accepted**: the run finishes as failed instead
+of parking, and collection is armed (`runners/reports.py:433`). Nothing is collected even
+so, because no container ran and no marker exists. Note what that arithmetic requires: on a
+**default** registration the budget is 900 seconds, which is longer than the lease, so this
+cannot arise at all — it needs a node whose `timeout_seconds` was deliberately set low.
+This one is read from the source rather than executed, and it is not a behaviour to build
+on. It is here because "a deadline never reports and always parks" would be a false
+description of the platform, and because it is why the paragraph above says "a container
+that was running" rather than "a job that ran out of time".
+
+**BEHAVIOUR, and it is worth stating plainly, because the shape of this section invites you
+to hunt for the exception.** The endings that reliably deliver something are the ones where
+your process finishes and reports on its own: success, a failure you exit with, or a
+cancellation you declare yourself by exiting 20 without being asked. Of the stops imposed
+from outside, an operator's cancellation delivers nothing and the runtime deadline delivers
+nothing; both gaps are recorded as platform defects to be fixed. A **fence** is the one
+that is not categorical: three of the six leave the agent able to report, and where that
+report is also *accepted* — the agent's heartbeat thread dying is the clearest case,
+because the job itself is still live and its lease still valid — collection is armed and
+reads whatever valid marker was already sitting in your staging area (section 7.1). That is
+a real path rather than a loophole: it delivers only what you had already written **and**
+inventoried at the instant the kill landed, and if you follow this document's strongest
+recommendation and write the marker last there is nothing there to read. So design as
+though no externally imposed stop delivers anything; just do not write down that it is
+impossible for one to.
 
 **BEHAVIOUR, and this one is measured rather than assumed.** Your program almost certainly
 runs as **PID 1** inside its container: the agent overrides neither the entrypoint nor the
@@ -1047,8 +1093,9 @@ image, after which it exited at once.
 
 **BEHAVIOUR.** The platform's classification is authoritative and it asks "was
 cancellation requested?" **before** it looks at your exit code
-(`agent/runner.py:2326-2340`). So a cancelled run stays cancelled whatever you exit with,
-and exit code 20 is **not required** for that. The order of questions is: was this job
+(`agent/runner.py:2326-2340`). So once the three questions ahead of it have been answered
+no, a cancelled run stays cancelled whatever you exit with, and exit code 20 is **not
+required** for that. The order of questions is: was this job
 fenced, was the agent forced to exit without waiting, did the runtime deadline pass, was
 cancellation requested or was the exit code 20, was the exit code 0, did the container
 vanish, and only then the exit code's own class. (The second of those is a special case: on
@@ -1063,10 +1110,13 @@ job — to a terminal state, and finishes the execution as cancelled
 (`pipelines/cancellation.py:87-119`, `:299-350`). All three land together, so there is no
 moment at which the flag is visible and the job is still live.
 
-**BEHAVIOUR.** The only channel that reaches a process on somebody else's machine is the
-answer to the agent's **heartbeat**, which carries a `cancel` flag
+**BEHAVIOUR.** The only channel that can ask a process on somebody else's machine to stop
+**politely** is the answer to the agent's **heartbeat**, which carries a `cancel` flag
 (`runners/reports.py:210-217`); on seeing it the agent asks docker for the same polite stop
-the deadline uses (`agent/runner.py:2500`, `:2528-2536`). But a heartbeat is answered at
+the deadline uses (`agent/runner.py:2500`, `:2528-2536`). There is a second channel by
+which the agent learns a job is gone — it periodically re-reads the list of work assigned
+to it — but that one only ever kills; it is the "second, slower route" described below. A
+heartbeat is answered at
 all only if it can first renew the job's lease, and a lease cannot be renewed on a launch
 that has gone terminal — such a heartbeat is refused with `lease_lost`
 (`runners/reports.py:188`, `:294-316`).
@@ -1104,8 +1154,9 @@ request, in this shape:
 4. Re-read your credentials, write a `cancelled` marker **last**, and exit 20.
 
 **BEHAVIOUR, and it is what that handler is actually worth — which is not a guarantee about
-your output.** On **neither** externally imposed stop is what you write collected: not on an
-operator's cancellation (see the next statement), and not on the deadline (see above). What
+your output.** On neither of the two stops this section is about is what you write
+collected: not on an operator's cancellation (see the next statement), and not on a
+deadline that stopped a running container (see above). What
 the handler buys is real but smaller: your process exits cleanly instead of being killed
 part-way through a write; it stops burning a customer's machine on work nobody will accept;
 it stops adding objects to a staging area the platform has already given up on; you keep
@@ -1113,8 +1164,10 @@ your node correct the day these two gaps are fixed, at which point the marker yo
 write becomes the thing that recovers the run. Build it for those reasons. Do not build a
 partial-output recovery story on top of either stop.
 
-**BEHAVIOUR, and it is the second surprise in this section.** An operator cancellation
-**never collects your marker or your objects**, on either branch of the race above.
+**BEHAVIOUR, and it is the second surprise in this section.** Cancelling a step whose
+container is still running **collects neither your marker nor your objects**, on either
+branch of the race above. (Cancelling one whose container has already finished and reported
+is a different thing, and it is the exception set out at the end of this run of statements.)
 Collection is armed by the agent's terminal report, and only when that report is the thing
 that ends the launch (`runners/reports.py:428-436`). After a cancellation the launch is
 already terminal, so a report arriving afterwards is answered "already finished" and arms
@@ -1132,7 +1185,8 @@ has that marker read by nobody. Its objects stay in a staging area that expires.
 **BEHAVIOUR.** What an operator cancellation does keep is your **log**. The lines your
 container streamed are written to durable storage and onto the execution before the live
 buffer is dropped (`pipelines/external_finalize.py:2488-2537`, called from
-`pipelines/cancellation.py:180-189`). That is the whole of what survives a cancellation.
+`pipelines/cancellation.py:180-189`). For a container that was still running when Cancel
+was pressed, that is the whole of what survives.
 
 **BEHAVIOUR, the one exception, and it is not about a running node.** If the cancellation
 arrives while collection is **already under way** — your container has exited and reported,
@@ -1230,9 +1284,11 @@ and wrote a marker on the way out (section 5) — it simply has nothing to read 
 SIGKILL that arrived first. What is never true is that a fence gives your process a chance
 to react.
 
-**RECOMMENDATION.** Do not design a node whose entire output appears in its last minute.
-Nothing you can write survives a SIGKILL, so the only defence is to have less at risk when
-it lands: finish and upload work in units, keep runs comfortably inside their budget, and
+**RECOMMENDATION.** Do not design a node whose entire output appears in its last minute. A
+SIGKILL ends your writing where it stands — what you had already finished and inventoried
+may still be collected, on the fences that report, but nothing you would have written after
+it ever is. The only defence is therefore to have less at risk when the kill lands: finish
+and upload work in units, keep runs comfortably inside their budget, and
 emit progress (section 3.4) so that an operator watching a long step can see it is alive
 rather than cancelling it on suspicion.
 

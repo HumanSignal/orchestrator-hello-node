@@ -78,11 +78,14 @@ See [OPERATIONS.md](OPERATIONS.md#registering-a-node).
 **RECOMMENDATION.** Credential expiry, stopping cleanly, and inventory-on-failure. They are
 the three things a first version always omits and the three things that decide whether a
 real run survives. Not one of them is checked by anything. The skeleton below has all three.
-Be clear-eyed about what the second one buys today: **no stop imposed from outside — an
-operator's Cancel, the runtime deadline, or a fence — currently preserves anything your
-node writes on the way out** ([PROTOCOL.md](PROTOCOL.md#7-cancellation)). Handle the stop
-for a clean exit and for the day those gaps are fixed, and put your recovery hopes on the
-third item, the inventory you write when your own code decides the run is over.
+Be clear-eyed about what the second one buys today: **nothing your node writes on the way
+out of an externally imposed stop is reliably preserved.** An operator's Cancel delivers
+nothing and the runtime deadline delivers nothing; a **fence** delivers only what you had
+already written *and* inventoried at the instant of the kill, which under the
+write-the-marker-last discipline is nothing
+([PROTOCOL.md](PROTOCOL.md#7-cancellation)). Handle the stop for a clean exit and for the
+day those gaps are fixed, and put your recovery hopes on the third item, the inventory you
+write when your own code decides the run is over.
 
 ---
 
@@ -177,8 +180,8 @@ def upload(creds, relpath, source_path, size, digest):
 
     RECOMMENDATION. Stream. A single object may legally be 1 GiB while the
     container's default memory limit is 2 GiB, so holding one in memory twice
-    (as bytes and as a request body) is an OOM kill, and an OOM kill writes no
-    marker at all.
+    (as bytes and as a request body) is an OOM kill, and an OOM kill leaves no
+    chance to write a marker at all.
     """
     for attempt in (1, 2):
         envelope = creds.get()
@@ -317,7 +320,7 @@ the obvious alternative fails on a real run, later, saying something unrelated:
 | `force=True` before the marker | The marker is written last, which on a long run is the moment the original envelope is most likely to be dead. |
 | Bootstrap in its own `try` | Before credentials exist there is nowhere to write a marker. That failure has to be reported on stderr and by exit code alone. |
 | Signal handler sets a flag only | Doing work, and especially network work, inside a signal handler is how the cancellation path itself crashes. |
-| Streaming everywhere | 1 GiB permitted per object against 2 GiB of container memory. An OOM kill writes no marker. |
+| Streaming everywhere | 1 GiB permitted per object against 2 GiB of container memory. An OOM kill leaves the process no chance to write a marker. |
 | Inputs fetched one at a time, and deleted | Nothing bounds the size, the total or the count of your inputs, and the container has no disk quota. Keeping them all is how a node fills the customer's disk. |
 | Comparing envelopes with `==`, not `is` | Each read parses a new object, so an identity test is always "changed" and the retry guard never fires. |
 | Exit code passed into the marker | So the marker and the process cannot tell two different stories about one run. |
@@ -339,7 +342,7 @@ Until then, do not copy these parts of it. Line numbers are for this repository'
 | `node.py:260-261` | bootstrap runs outside the `try` | A failure there escapes `main`, prints a traceback and reports nothing. |
 | `node.py:99`, `:142`, `:156` | holds whole objects in memory, twice | Collides with the 1 GiB per-object allowance against a 2 GiB memory limit. |
 | `node.py:192`, `:271` | the inventory is local to `process()`; the failure path writes `objects: []` | Everything already uploaded is unrecoverable, because salvage publishes only what the marker inventories. |
-| whole file | no signal handling | A stop request is ignored. On the **runtime deadline** the file carries on through its batch after the platform has asked it to stop, and is then killed — writing, if it gets that far, a `succeeded` marker for a run the platform had already given up on. Nothing it writes on that path is collected in any case ([PROTOCOL.md](PROTOCOL.md#7-cancellation)), so what the missing handler really costs is a clean exit and the work the container goes on doing for nobody. |
+| whole file | no signal handling | A stop request is ignored. On the **runtime deadline** the file carries on through its batch after the platform has asked it to stop, and is then killed — writing, if it gets that far, a `succeeded` marker for a run the platform had already given up on. Nothing it writes after the platform asked it to stop is collected on that path ([PROTOCOL.md](PROTOCOL.md#7-cancellation)), so what the missing handler really costs is a clean exit and the work the container goes on doing for nobody. |
 | `node.py:236` vs `:274` | marker claims exit code 10 on every failure; the process returns 1 for anything that is not its own `StepError` | Two contradictory accounts of the same run. |
 | `node.py:140-141`, `:269` | an HTTP error's text, presigned URL included, reaches stderr and the marker | Container log lines are shipped unredacted. |
 | `node.py:161-169` | reads the job description with no size bound and no version check | Proceeds on a malformed or future-version document. |
@@ -451,17 +454,19 @@ apart either treats advice as law or treats law as advice. Both are expensive.
       stopped path writes a marker and exits 20. Without a handler your process, as PID 1,
       discards the signal entirely.
 * [ ] **BEHAVIOUR to know while you write that handler, because it decides what it is
-      worth.** **Neither externally imposed stop preserves what you write.** An **operator
-      pressing Cancel** usually does not reach your process at all — it normally arrives as
-      a SIGKILL — and on the rare occasion it arrives as a SIGTERM, nothing you write is
-      collected. The **runtime deadline** does begin as a SIGTERM, but its 30 second grace
-      is cut short by the platform's own next heartbeat (zero to 20 seconds, ten on
-      average), your upload credentials expired at the deadline, and the terminal report
-      that would have made a marker count is refused — so nothing is collected there
-      either, and the run is left parked rather than failed
-      ([PROTOCOL.md](PROTOCOL.md#7-cancellation)). Write the handler for a clean exit and
-      for the day those two gaps are fixed. Do not build a partial-output recovery story on
-      top of either stop.
+      worth.** **Neither of the two stops named here preserves what you write.** An
+      **operator pressing Cancel** usually does not reach your process at all — it normally
+      arrives as a SIGKILL — and on the rare occasion it arrives as a SIGTERM, nothing you
+      write is collected. The **runtime deadline** does begin as a SIGTERM, but its 30
+      second grace is cut short by the platform's own next heartbeat (zero to 20 seconds,
+      ten on average), your upload credentials expired at the deadline, and the terminal
+      report that would have made a marker count is refused — so nothing is collected there
+      either, and a container stopped that way leaves its run parked rather than failed
+      ([PROTOCOL.md](PROTOCOL.md#7-cancellation)). The third externally imposed stop, a
+      fence, is the last item in this section; it is the only one that can deliver
+      anything, and only a marker you had already finished writing. Write the handler for a clean exit
+      and for the day these gaps are fixed. Do not build a partial-output recovery story on
+      top of any of them.
 * [ ] **RECOMMENDATION.** Every network timeout is comfortably inside a handful of seconds,
       not merely inside the 30 seconds the grace advertises.
 * [ ] **RECOMMENDATION.** Exit 1 for conditions a retry might survive, exit 10 for
