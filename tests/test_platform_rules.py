@@ -202,6 +202,69 @@ def test_a_bind_mounted_file_never_sees_a_rotation(image, workdir):
         container.remove()
 
 
+# ------------------------------------------------- who may read the credentials file
+
+
+@subject_is_platform
+def test_a_0700_credentials_directory_is_unreadable_to_any_other_user(image, workdir):
+    """The undocumented constraint a customer's Dockerfile has to satisfy.
+
+    Setup:    a credentials directory with the modes the agent really uses — 0700 on the
+              directory, 0600 on the file — owned by the user running these tests.
+    Action:   read it from inside the node's image twice: once as the image's own user,
+              once as the directory's owner.
+    Validate: the first is refused with a permission error; the second succeeds.
+
+    In production the two happen to line up: the agent runs as uid 10001
+    (``Dockerfile.agent``) and this node's image also runs as uid 10001 (its own
+    ``Dockerfile``), so the workload can read a directory only its owner can open. That
+    is a coincidence, not a design. A customer image that picks any other non-root user —
+    the ordinary thing to do — gets ``PermissionError`` on its own credentials file, and
+    nothing in the contract documentation warns them. Running as root avoids it, which is
+    precisely the wrong thing to encourage.
+
+    This test does not fail today. It is here so the constraint is written down and
+    executable: if the agent ever changes those modes, or this image changes its uid, one
+    of these two assertions changes with it.
+    """
+    import os
+
+    assert contract.CREDENTIALS_DIR_MODE == 0o700 and contract.CREDENTIALS_FILE_MODE == 0o600
+
+    creds_dir = workdir / 'perms'
+    creds_dir.mkdir(parents=True, exist_ok=True)
+    (creds_dir / 'creds.json').write_text('{"schema_version": 1}')
+    os.chmod(creds_dir, contract.CREDENTIALS_DIR_MODE)
+    os.chmod(creds_dir / 'creds.json', contract.CREDENTIALS_FILE_MODE)
+
+    as_image_user = _read_creds_as(image, creds_dir, user=None)
+    assert 'PermissionError' in as_image_user, (
+        f'a 0700 directory owned by uid {os.getuid()} was readable by the image\'s own user: {as_image_user}'
+    )
+
+    as_owner = _read_creds_as(image, creds_dir, user=str(os.getuid()))
+    assert '"schema_version": 1' in as_owner, as_owner
+
+
+def _read_creds_as(image: str, creds_dir, user: str | None) -> str:
+    import os
+
+    container = docker.start(
+        image,
+        name=f'lspo-conformance-perms-{os.getpid()}-{user or "image"}',
+        env={},
+        creds_dir=creds_dir,
+        user=user,
+        entrypoint='python',
+        command=('-c', 'print(open("/lspo/creds/creds.json").read())'),
+    )
+    try:
+        container.wait(timeout=60)
+        return container.collect().output
+    finally:
+        container.remove()
+
+
 # -------------------------------------------------------------- document ceilings
 
 

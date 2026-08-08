@@ -88,6 +88,18 @@ LEGACY_CREDENTIALS_ENV = 'LSPO_CREDENTIALS'
 #: The opt-in progress line prefix. The trailing space is part of it.
 PROGRESS_PREFIX = '@lspo:progress '
 
+#: The uid the orchestrator's agent runs as inside its own container, and therefore the
+#: OWNER of every credentials directory it writes. The directory is 0700 and the file
+#: 0600, so a workload image running as any other non-root user cannot read its own
+#: credentials. Written down here because it is a real constraint on a customer's
+#: Dockerfile that nothing in the contract documents states — see
+#: ``tests/test_platform_rules.py`` and CONFORMANCE-BASELINE.md.
+AGENT_UID = 10001
+
+#: The mode the agent gives a job's credentials directory and file.
+CREDENTIALS_DIR_MODE = 0o700
+CREDENTIALS_FILE_MODE = 0o600
+
 SHA256_PATTERN = re.compile(r'[0-9a-f]{64}')
 
 

@@ -18,14 +18,14 @@ to move that test into the `conforms_today` group.
 |---|---|---|
 | `expected_red_until_fixed` | 23 | fail |
 | `conforms_today` | 16 | pass |
-| `subject_is_platform` | 49 | pass |
+| `subject_is_platform` | 50 | pass |
 | `harness_self_test` | 9 | pass |
 
 ---
 
 ## First, the thing that surprised me
 
-**The node works today only by coincidence, and there are two coincidences holding it up.**
+**The node works today only by coincidence, and there are three coincidences holding it up.**
 
 The orchestrator's agent injects nine variables, and the one naming the credentials file
 is `LSPO_CREDENTIALS_FILE`. This node reads `LSPO_CREDENTIALS`, which the agent never
@@ -44,6 +44,31 @@ without that `ENV` line, breaks the node completely. That is why the harness tes
 a real defect rather than a latent one, and why one test in the group is a *regression
 guard*: whoever makes the node read the new variable must keep honouring the old one,
 because images in the field bake it.
+
+### A third coincidence, on the platform's side
+
+The agent writes each job's credentials directory **0700** and the file **0600**, owned by
+its own user, and in S3 mode it deliberately does not override the workload image's user
+(`agent/runner.py` sets `run_as` only in local demo mode). So a workload can read its own
+credentials only if it runs as the same uid as the agent, or as root.
+
+It works today because both are uid 10001 — the agent's `Dockerfile.agent` creates user
+`lspo` with `--uid 10001`, and this node's `Dockerfile` creates user `step` with
+`--uid 10001`. Nothing connects those two numbers; they are the same by accident.
+
+Measured, using this repository's image and a 0700 directory owned by a different user:
+
+```
+PermissionError: [Errno 13] Permission denied: '/lspo/creds/creds.json'
+```
+
+The same directory read from a container forced to the owner's uid returns the file
+normally. A customer who writes their own Dockerfile — which is exactly what this
+repository tells them to do — and picks any other non-root user gets that
+`PermissionError` on their own credentials, with nothing in the contract documentation
+warning them, and the only obvious workaround being to run as root. This is a platform
+finding, not a node defect, and it is written down as an executable rule in
+`tests/test_platform_rules.py`.
 
 The Dockerfile's own comment is also wrong about the mechanism: *"The agent mounts the
 credentials file and sets LSPO_CREDENTIALS to its path."* The agent mounts the **directory**
@@ -254,12 +279,11 @@ the twelve above cannot quietly break them:
   harness exercises only the S3 branch. Covering it means bind-mounting the staging
   directory read-write and running the container as the harness's own uid, which is what
   the agent does in demo mode; it is a straightforward extension, not a blocked one.
-* **The agent's real credential-file permissions.** `agent/creds.py` writes the directory
-  0700 and the file 0600 as the agent's own user, while this image runs as uid 10001. The
-  harness deliberately uses 0755/0644 so that a permission problem cannot be mistaken for
-  a node defect. Whether the real pairing works depends on which user the agent process
-  runs as, and it is worth checking on a real deployment — it is a platform question, not
-  a node one.
+* **The agent's real credential-file permissions, end to end.** The interaction is
+  measured and written down above and in `tests/test_platform_rules.py`, but with a
+  synthetic directory rather than one a running agent produced. The harness itself
+  deliberately uses 0755/0644 for every other test, so that a permission problem can never
+  be mistaken for a node defect.
 * **The environment allowlist end-to-end.** The agent refuses a manifest that names a
   variable outside `LSPO_AGENT_ALLOWED_ENV` *before the container starts*, so no
   black-box test of the node can observe it. The rule is written down and executable
