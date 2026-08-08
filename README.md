@@ -239,3 +239,26 @@ daemon's normal privileges, so run only code you trust. One input port and one o
 port; single-file inputs. If the machine running the work disappears mid-job, the job
 stays parked until an operator cancels it (the watchdog that reclaims it automatically is
 a later slice).
+
+---
+
+## Conformance harness
+
+`conformance/` holds a black-box test rig for this node: it builds the image from this
+repository's own `Dockerfile`, runs it against a fake presigned-storage endpoint, and
+judges it from the outside only — the environment it was given, the objects it uploaded,
+**the order it uploaded them in**, and the exit code it died with.
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest                            # known gaps run as expected failures; this is CI
+python -m pytest --red-for-real             # the true result
+python -m pytest --collect-only -q --print-labels   # what every test claims, and on whose authority
+```
+
+**Read `CONFORMANCE-BASELINE.md` before copying this repository as a template.** Twenty-one
+tests are red today and they are the parts of `node.py` you should not copy verbatim yet —
+but read the label on each one before treating it as a rule. Ten are contract violations
+with the rule quoted; three are compatibility policy this repository chose for itself; and
+eight are things a *reference* implementation ought to demonstrate that the contract
+happily permits a real node to skip.

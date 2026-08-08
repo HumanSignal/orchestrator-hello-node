@@ -1,0 +1,4 @@
+# Everything the conformance harness needs. Deliberately tiny: the harness talks to
+# docker through the CLI and to the node through HTTP, so it needs no SDK for either.
+pytest==8.3.4
+requests==2.32.3
