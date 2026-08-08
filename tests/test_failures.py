@@ -69,11 +69,15 @@ def _marker_if_the_step_wrote_one(job):
 
 
 @conforms_today
-@traces_to(
-    'external/contract.py: "The process exit code is the ONLY signal available when a job dies before it '
-    'can write a marker, so the numbers carry meaning", with EXIT_PERMANENT = 10 and classify_exit: '
-    '"Unknown codes classify as transient … a step that means "do not retry me" must say so with '
-    'EXIT_PERMANENT."'
+@reference_quality(
+    'What the NUMBERS mean is contract — external/contract.py sets EXIT_PERMANENT = 10 and says a step '
+    'that means "do not retry me" must say so with it. What is not contract is that THIS job is a '
+    'permanent failure at all: nothing anywhere obliges a step to verify its inputs against their pins, '
+    'so an implementation that simply copied the bytes it was served and exited 0 would break no rule '
+    'and would fail this test. The premise is the reference node\'s own behaviour, and the label has to '
+    'follow the weaker of the two halves. It is still worth asserting: a step that checks its pins and '
+    'then reports the mismatch as transient asks the orchestrator to re-run a job that cannot ever '
+    'succeed, and unrecognised codes classify as transient, so getting this wrong is the default.'
 )
 def test_a_permanent_failure_exits_ten(make_job):
     """The code a step returns for a failure it knows will not go away.
@@ -85,6 +89,12 @@ def test_a_permanent_failure_exits_ten(make_job):
     Only the exit code. Whether a marker was written, and what it says, is a separate
     question with a separate authority, and this test used to answer both at once under
     the citation for one of them.
+
+    **This is reference quality, not conformance, and the reason is the setup line.** The
+    exit numbers and their meanings really are the contract's; the claim that a mismatched
+    pin is a permanent failure is not, because nothing requires a step to look at the pin.
+    A test carrying a contract label may not rest on a premise the contract never states,
+    however sound the rest of it is.
     """
     job = make_job(inputs=[InputSpec(relpath='bad.csv', data=b'pinned', served=b'pinnEd')])
     result = job.run()
@@ -236,10 +246,18 @@ def test_what_a_failed_run_already_produced_is_still_salvageable(make_job):
               so a step that works through them in order fails after it has already
               copied the first one.
     Action:   run.
-    Validate: **if** anything landed, and **if** the step wrote a marker, that marker's
-              inventory names what landed — so collection can salvage and publish it.
+    Validate: **if** the run failed, **if** anything landed, and **if** the step wrote a
+              marker, that marker's inventory names what landed — so collection can
+              salvage and publish it.
 
-    Both conditions matter, and the first is not a formality. A step that verifies every
+    **The first condition is what keeps the label honest.** The rule quoted above governs
+    salvage, and salvage is the path taken for a step that FAILED or was cancelled; a run
+    that succeeds is verified and published by an entirely different one. Nothing obliges a
+    step to verify its pins, so a conformant implementation may well complete this job —
+    and this test used to assert that the run had failed, which made a contract-labelled
+    test rest on behaviour the contract never asks for. It skips instead.
+
+    The other two conditions matter too, and neither is a formality. A step that verifies every
     input BEFORE it produces anything fails this job having written nothing, and there is
     then no object an inventory could be omitting: the rule has nothing to constrain, so
     this skips. Requiring something to have landed would be requiring this node to keep
@@ -263,7 +281,13 @@ def test_what_a_failed_run_already_produced_is_still_salvageable(make_job):
         ]
     )
     result = job.run()
-    assert result.exit_code != 0, 'the run was supposed to fail'
+    if result.exit_code == 0:
+        pytest.skip(
+            'the step completed this job rather than failing it. Nothing obliges a step to verify its '
+            'inputs against their pins, so that is a legal answer — and the rule this test restates '
+            'governs what a FAILED or cancelled step leaves behind. A successful attempt is verified and '
+            'published by a different path entirely, so there is no salvage here to be incomplete'
+        )
 
     landed = [key for key in job.endpoint.keys_in_order() if key.startswith('outputs/')]
     if not landed:

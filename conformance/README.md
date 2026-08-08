@@ -59,6 +59,24 @@ When the rule is about a difference — *"adding a field is not a breaking chang
 the job both ways and compare. Asserting that the second run succeeds smuggles in a
 requirement nobody wrote.
 
+**And the same care is owed in the other direction, where the mistake is a FALSE PASS.**
+Asserting less than the prohibition is the more dangerous error, because the harness goes
+green over exactly the behaviour it exists to forbid. Two shapes produced one each:
+
+* **an oracle that inspects only part of what the rule bounds.** A ceiling on a document
+  bounds every write of it, so reading back what the store *serves* — the most recent
+  write — lets a step publish an oversized document and then overwrite it with a small one.
+  Ask what the rule bounds, then look at all of it.
+* **a "not applicable" branch that is not conditioned on what makes it inapplicable.** A
+  missing marker is permitted after a failure or a cancellation and forbidden after a
+  success, so skipping on *any* missing marker hands the next author an escape route:
+  delete the document the test objects to, keep exiting 0, and the proof goes quiet. Every
+  `pytest.skip` must name the condition that makes the rule silent, and check it.
+
+The general form: write down the exact sentence, then ask whether an implementation could
+satisfy the assertion while breaking the sentence. If it could, the assertion is not the
+sentence yet.
+
 If a test you expected to fail passes, that is not a test to adjust — it is either a bug
 in the harness or a mistake in the analysis, and which one it is matters.
 

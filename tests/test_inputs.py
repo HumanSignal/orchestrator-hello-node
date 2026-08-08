@@ -253,7 +253,12 @@ def test_an_envelope_entry_with_no_hash_pin_is_refused(make_job):
     'external/contract.py CompletionMarker._check_inventory_is_unique refuses a marker that inventories '
     'one relpath twice — "one file, one entry (two entries could otherwise carry two different hashes '
     'for the same path)" — and pipelines/external_finalize.py raises ExternalCollectionError for a '
-    'marker it cannot parse: "The step wrote an invalid completion marker". Nothing is published.'
+    'marker it cannot parse: "The step wrote an invalid completion marker". Nothing is published. '
+    'Deleting the offending marker is not a way out, and the same sources say so: agent/runner.py '
+    '_classify reports a job as succeeded on "exit_code == 0", and pipelines/external_finalize.py '
+    '_read_and_check_marker then refuses the run outright — "A missing marker after a reported success '
+    'is a real failure, not a retry" — because "Nothing can be published: the marker is the inventory '
+    'of what the step produced."'
 )
 def test_the_marker_stays_parseable_when_two_ports_carry_the_same_name(make_job):
     """The step must not write a document the collector refuses.
@@ -263,11 +268,18 @@ def test_the_marker_stays_parseable_when_two_ports_carry_the_same_name(make_job)
     Action:   run.
     Validate: if the step wrote a marker, it parses against the contract.
 
-    **The outcome of the run is deliberately not asserted.** The rule cited above forbids
-    exactly one thing: publishing a document the collector cannot parse. Noticing the
-    collision and refusing the job is a perfectly conformant answer — with a valid failure
-    marker or with none at all — and an earlier version of this test required exit 0,
-    which would have turned that answer red. The fix belongs to whoever writes it.
+    **The outcome of the run is not asserted, but it decides what silence means.** The rule
+    cited above forbids exactly one thing: publishing a document the collector cannot parse.
+    Noticing the collision and refusing the job is a perfectly conformant answer — with a
+    valid failure marker or with none at all — and an earlier version of this test required
+    exit 0, which would have turned that answer red. The fix belongs to whoever writes it.
+
+    So a missing marker is "nothing to check" ONLY after a failure or a cancellation. After
+    exit 0 it is the opposite: the agent reports the job as succeeded, and the collector
+    treats a success with no marker as a hard failure of the whole run. An earlier version
+    of this test skipped on any missing marker whatsoever, which handed the fix an escape
+    route — delete the invalid document, keep exiting 0, and the regression proof goes
+    quietly green over a run that publishes nothing and fails at collection.
 
     The step derives its output path from the input's ``relpath`` alone and ignores the
     ``port`` the envelope carries beside it (``runners/credentials.py`` puts one there:
@@ -283,12 +295,19 @@ def test_the_marker_stays_parseable_when_two_ports_carry_the_same_name(make_job)
             InputSpec(relpath='data.csv', data=b'from the right port\n', port='right'),
         ]
     )
-    job.run()
+    result = job.run()
 
     if contract.MARKER_FILENAME not in job.endpoint.keys_in_order():
+        assert result.exit_code != 0, (
+            'the step exited 0 and wrote no completion marker. That is not the permitted silence: the '
+            'agent reports exit 0 as a success, and the collector refuses a reported success with no '
+            'marker — "Nothing can be published: the marker is the inventory of what the step produced". '
+            'The whole run fails at collection, having done all of the work'
+        )
         pytest.skip(
-            'the step wrote no marker at all, which the contract permits — a marker that does not exist '
-            'is not a marker the collector refuses'
+            f'the step ended the run with exit {result.exit_code} and wrote no marker at all, which the '
+            f'contract permits of a failed or cancelled step — a marker that does not exist is not a '
+            f'marker the collector refuses'
         )
     job.marker()  # raises ContractViolation if the collector would refuse this document
 
@@ -312,6 +331,13 @@ def test_neither_input_survives_at_the_others_expense(make_job):
     A step that notices the collision and refuses the job destroys nothing, and that is
     one of the fixes this test promises not to pre-empt — so a failed run skips here
     rather than counting as bytes lost.
+
+    **The two bodies must be AMONG what landed, not the whole of it.** The expectation is
+    that neither input was lost; it is not that these are the only two objects a step may
+    produce. This used to compare the set of output bodies for equality, which quietly
+    forbade an auxiliary output — an index, a manifest of what went where, a report — and
+    would have turned a correct fix red for writing one. Nothing in the contract, and
+    nothing in this test's own reasoning, says a step may not write more than it was given.
     """
     job = make_job(
         inputs=[
@@ -327,8 +353,10 @@ def test_neither_input_survives_at_the_others_expense(make_job):
             f'colliding names, so nothing was silently overwritten — which is the other legal answer'
         )
     bodies = {job.endpoint.body_of(key) for key in set(job.endpoint.keys_in_order()) if key.startswith('outputs/')}
-    assert bodies == {b'from the left port\n', b'from the right port\n'}, (
-        f'one input overwrote the other; the store holds {bodies}'
+    expected = {b'from the left port\n', b'from the right port\n'}
+    assert expected <= bodies, (
+        f'one input overwrote the other: {sorted(expected - bodies)} is in no output object. The store '
+        f'holds {bodies}'
     )
 
 

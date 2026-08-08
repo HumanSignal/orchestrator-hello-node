@@ -3,14 +3,18 @@
 Measured, not reasoned about. Every line below is the observed behaviour of the image
 built from this repository's own `Dockerfile`, run as a container against the harness in
 `conformance/`, on Linux with Docker 28.4, with the citations checked against orchestrator
-commit `e4c25192`.
+commit `6b2ff82c`.
+
+(`origin/master` moved again between rounds — `e4c25192` → `6b2ff82c` — but all twelve
+files this harness is allowed to cite are **byte-identical** across that move, so the three
+drift mirrors described further down were re-checked and needed no change.)
 
 ```
 LSPO_ORCHESTRATOR_SRC=… LSPO_ORCHESTRATOR_REF=origin/master python -m pytest --red-for-real -q
-→ 20 failed, 109 passed in 148s
+→ 20 failed, 109 passed in 149s      (and nothing skipped — measured with -rs)
 
 python -m pytest -q                     # CI mode, no orchestrator sources present
-→ 108 passed, 1 skipped, 20 xfailed in 149s
+→ 108 passed, 1 skipped, 20 xfailed in 148s
 ```
 
 The 20 failures are exactly the 20 tests marked `expected_red_until_fixed`. Nothing else
@@ -26,13 +30,11 @@ verbatim citation check, which needs a checkout of the orchestrator; with
 | `subject_is_platform` | 67 | pass |
 | `harness_self_test` | 21 | pass |
 
-**Re-measured from zero, again.** These are not an edit of the previous run's numbers. Six
-assertions were rewritten this round; the fake store gained a behaviour it did not have (it
-can now say when it has finished); and three platform rules that had drifted past this
-harness's re-implementation were mirrored, which is where the eight extra
-`subject_is_platform` cases come from. **The same twenty tests are red, for the same
-reasons.** No label moved, no claim was withdrawn, and the contract-defect count is
-unchanged at six.
+**Re-measured from zero, again.** These are not an edit of the previous run's numbers. Four
+assertions were sharpened this round and nothing was added: no new test, no new harness
+capability, no new claim. **The same twenty tests are red, for the same reasons**, and the
+contract-defect count is unchanged at six. One test changed its basis label, so the suite's
+`basis_contract` total moves from 83 to 82 and `basis_reference_quality` from 23 to 24.
 
 **Several tests can now SKIP, and a skip is a finding of a different kind.** Where a rule
 constrains something optional — a marker, a `result.json`, an object that may or may not
@@ -50,7 +52,9 @@ withdrawing five claims outright and relabelling the rest. A third review found 
 remaining ten still over-claimed, and named the cause: the harness kept calling something
 a CONTRACT rule because the rule was *about that area*, not because the rule, read
 literally, made the node's behaviour a violation. Six survived that test and all six still
-stand — the fourth review changed no label and withdrew no claim.
+stand: the fourth review changed no label and withdrew no claim, and the fifth withdrew no
+claim either — it moved ONE test out of `basis_contract`, and that test was never one of the
+six (it passes today, and it is a regression guard rather than a defect).
 
 The test is that one sentence. *Does the quoted rule, read literally, make the observed
 behaviour a violation?* Not "is there a rule nearby". Not "would a good node do this". If
@@ -59,7 +63,9 @@ not resting on it. Where the answer was arguable, the test was demoted.
 
 What the fourth review found was the same habit one level down, inside tests whose LABELS
 were right: a test that names the prohibited outcome correctly and then also insists on one
-particular way of avoiding it. That is the subject of the next section.
+particular way of avoiding it. The fifth found the last few places where an assertion and
+the prohibition it names were still not quite the same sentence — including two where the
+gap ran the other way and let the prohibited outcome through. Both are below.
 
 | Basis | Meaning | Expected-red today |
 |---|---|---|
@@ -70,14 +76,34 @@ particular way of avoiding it. That is the subject of the next section.
 **Every one of the twenty is still red and still worth fixing.** What changed is what may
 be written down as a requirement, and the answer is now six things.
 
-### What moved this round: assert the prohibition, never prescribe the remedy
+### What moved this round: an assertion must match the prohibition it names, exactly
+
+Four fixes, all of one kind — an assertion that was slightly wider or slightly narrower
+than the sentence it claimed to be enforcing. **Two of them were false passes**, which for
+a gate is the dangerous direction: the harness would have gone green over a node doing the
+very thing the test exists to forbid. Each was proved closed by building the evading
+behaviour into a throwaway copy of `node.py` and running the old and new assertions against
+it, and none of that touched the real `node.py`, which is unchanged.
+
+| # | What was wrong | Proof it is closed |
+|---|---|---|
+| 1 | **The result-document ceiling looked only at the surviving write.** It read the document back with `body_of`, which returns the LAST accepted upload of a name — deliberately, because that is what an object store serves. But the rule bounds *every* write, so a step could upload an oversized document, overwrite it with a small one, and pass. The oracle is now the size of every accepted upload of that name. | A copy of the node that uploads its real 3,145,907-byte document and then overwrites it with a 59-byte one: the old assertion **passed**; the new one fails, naming both sizes. |
+| 2 | **The collision test accepted exit 0 with no marker.** It discarded the run's outcome and skipped whenever the marker was absent. But absence is permitted only after a failure or a cancellation: the agent reports exit 0 as a success, and the collector refuses a reported success with no marker — the run fails at collection having done all the work. So deleting the offending document while still exiting 0 evaded the test entirely. "Not applicable" is now conditional on the run having actually failed. | A copy of the node that suppresses a marker it knows is unparseable and still exits 0: the old test **skipped** (green); the new one fails on the exit code. |
+| 3 | **Refusing an unverified input cannot carry a contract label**, and it affected two tests. Nothing anywhere obliges a workload to check its inputs against their pins, so "exit 10 because the bytes differ from the pin" rests on this node's own behaviour, not the platform's. `test_a_permanent_failure_exits_ten` is now reference quality — the exit *numbers* are contract, the premise is not. The salvage test keeps its contract-labelled inventory assertion, and "the node did not fail" became another not-applicable condition. | A copy of the node with pin verification removed — conformant, breaking no rule: both tests were **red** before, one of them under a contract label. Now the exit-code test is red under an honest reference-quality label and the salvage test skips. |
+| 4 | **The collision's sibling forbade additional outputs.** It compared the set of output bodies for equality, while its stated expectation is only that neither input was lost. A correct fix that also wrote an index or a report would have gone red. The expected bodies are now a subset of what landed. | A copy of the node that namespaces outputs by port *and* writes an auxiliary index: the old assertion **failed** on the extra object; the new one passes. |
+
+The shape common to all four: a test may assert exactly the outcome it forbids, and must
+not quietly import a second requirement — neither a stronger one that fails a correct fix
+(3 and 4) nor a weaker one that lets the forbidden outcome through by another door (1 and 2).
+
+### What moved in the round before: assert the prohibition, never prescribe the remedy
 
 A contract test says *"this run must not exhibit the prohibited outcome"*, and every other
 outcome passes. The moment it also says "and it must exit 0", or "and this optional
 document must exist", it has stopped describing the contract and started describing one
 particular conforming implementation — so a **correct fix goes red for the wrong reason**.
 That is worse than having no test at all, and it was the single cause of three of the five
-findings this round. The other two were bugs in the harness itself, and they are at the
+findings that round. The other two were bugs in the harness itself, and they are at the
 bottom of this document.
 
 Six assertions were rewritten from *must do X* into *must not do Y*:
@@ -95,6 +121,10 @@ The last one is the shape worth copying. When a rule is about a difference, meas
 difference — an absolute assertion in its place quietly imports a second requirement that
 nobody wrote down.
 
+Four of those six rows were sharpened again in the round after, for the reasons in the
+section above this one: three of them were still not quite the sentence they claimed to
+enforce, and two of those three were passing runs they should have failed.
+
 **Where the line was drawn, because it can be drawn absurdly.** Read literally enough, the
 contract requires a step to produce nothing at all, so *every* test here is inapplicable to
 a node that does nothing — which would leave a suite that proves nothing. The bar used is:
@@ -102,12 +132,22 @@ a node that does nothing — which would leave a suite that proves nothing. The 
 job with colliding filenames, verifying every input before writing anything, failing rather
 than writing an oversized document — yes, all three, and all three are now accommodated. An
 ordinary two-input job completing at all: no fix under discussion changes that, so those
-premises stay assertions. The one place this line is uncomfortable is that several tests
+premises stay assertions. The one place this line was uncomfortable is that several tests
 would fail a node which stopped verifying its input hashes; verifying is not required by
 the contract, but it is this node's own advertised behaviour, asserted in its own right, so
-those tests are entitled to assume it.
+those tests were treated as entitled to assume it.
 
-### What moved in the round before, and why
+**That last sentence was too generous, and the round after this one corrected it.** A test
+may assume the node's own behaviour freely — but not while carrying a CONTRACT label,
+because the label is a claim about the platform's rules and the premise is not one of them.
+So the two tests that turned "the bytes do not match the pin" into a required failure were
+separated: the one whose whole subject is the exit code became reference quality, and the
+one whose subject is a marker's inventory kept its contract label by treating "the step did
+not fail" as another inapplicable condition. The general rule is worth stating plainly: **a
+conjunction is only as strong as its weakest half, and that applies to a test's premise
+exactly as much as to its assertion.**
+
+### What moved two rounds before, and why
 
 **Removed — the harness was modelling something that cannot happen.** One rotation test
 required the step to retry an upload that the store had *accepted* and then refused. To
@@ -204,6 +244,13 @@ store — nothing to inventory, nothing omitted, so the test skips rather than d
 node keep its present order of work. What is required is that a marker which *does* exist
 inventories every object that *does* exist.
 
+A third condition was added in the last round, and it is what keeps the contract label
+honest: **the run must actually have failed.** Salvage is the path the collector takes for a
+step that failed or was cancelled; a successful attempt is verified and published by an
+entirely different one. Since nothing obliges a workload to verify its input pins, a
+perfectly conformant implementation may simply complete this job — and the test used to
+assert that it had failed, which is a demand the contract never makes. It skips instead.
+
 ### 3. A transient store refusal on an upload is reported as permanent
 
 > `external/contract.py`: *"The process exit code is the ONLY signal available when a job
@@ -252,7 +299,14 @@ time. That is the worst possible shape for a failure: everything looked fine fro
 
 The rule forbids exactly one thing — writing a document the collector cannot parse — so
 that is all the test asserts. Refusing the job on the collision is conformant, with a valid
-failure marker or with none at all, and the test says nothing about the exit code.
+failure marker or with none at all, and the test does not require any particular exit code.
+
+It does *read* the exit code, for one purpose: to decide what an absent marker means. After
+a failure or a cancellation, silence is permitted and the test skips. After exit 0 it is not
+— the agent reports that as a success and the collector then refuses the run outright,
+*"Nothing can be published: the marker is the inventory of what the step produced"* — so a
+"fix" that simply stopped writing the offending document while still exiting 0 would trade
+an unpublishable run for an unpublishable run, and the test fails it.
 
 The second consequence — one input's bytes silently overwritten by the other's — is
 tracked separately as reference quality, because *which* output path an object belongs on
@@ -280,6 +334,12 @@ The test forbids the oversized document and nothing else. `external/io.py` expli
 a producer to *"fail loudly at the point of the mistake"*, so ending the run non-zero is a
 conforming fix and the exit code is not asserted; `result.json` is optional, so writing none
 skips. An earlier version required both, which would have failed either correct fix.
+
+**Every accepted upload of that name is measured, not the one that survived.** The rule
+bounds the write, so each write answers for itself. Reading the document back the way an
+object store serves it — the most recent write — would have let a step publish the oversized
+document and then overwrite it with a small one, and a ceiling a producer may step over and
+tidy up after is not a ceiling.
 
 ---
 
@@ -378,7 +438,14 @@ is supposed to teach:
   store really holds — including names with `%`, spaces, non-Latin characters and nested
   directories, which also survive the copy unchanged;
 * a persistent transient fault exits with a code the contract classifies as transient;
-* a permanent failure exits 10, and explains itself in a marker;
+* a permanent failure exits 10, and explains itself in a marker. **Both halves of that line
+  are reference quality, not conformance.** The exit NUMBERS and their meanings are the
+  contract's, but nothing obliges a workload to treat an input that fails its pin as a
+  failure at all — so the premise is this node's own behaviour, and the label follows the
+  weaker half. It is still a regression guard worth keeping: a step that checks its pins
+  and then reports the mismatch as *transient* asks the platform to re-run a job that can
+  never succeed, and unrecognised exit codes classify as transient, so getting this wrong
+  is the default;
 * inputs are verified against their pin — changed bytes, a wrong size and a missing
   `sha256` are all refused, permanently, with the object named. The hash-mismatch message
   is held to the exact words the orchestrator's own test for this file expects;
@@ -424,13 +491,15 @@ Most were formatting artefacts on the harness's side, fixed in the matcher. Thre
   result as source text;
 * one silently dropped an interpolated value out of the middle of a quoted error message.
 
-All 38 citations in the suite match `e4c25192` verbatim. (One `basis_contract` citation was
-withdrawn this round and one added, so the count is unchanged by coincidence. The withdrawn
+All 37 citations in the suite — 84 quoted fragments — match `6b2ff82c` verbatim. (The count
+was 38 a round ago: one more citation was withdrawn when the exit-code test became reference
+quality, and none was added. A round before that one was withdrawn and one added, so the
+count was unchanged by coincidence. The earlier withdrawn
 one quoted a real sentence about credentials expiring and used it to support a claim about
 *when a store authorizes a request* — which that sentence, and no other in the platform,
 says anything about. The check could not have caught that; only a reader can.)
 
-### The check earned itself this round: it caught the platform moving
+### The check earned itself a round ago: it caught the platform moving
 
 Everything it had found before was a formatting artefact on this side or a
 quotation-that-was-really-a-paraphrase. This round it caught what it was built for — the
@@ -533,6 +602,18 @@ begin-after-expiry case becomes worth splitting out as a test of its own.
 * **The 8 MiB marker ceiling.** Reaching it needs roughly forty thousand inventoried
   objects; the run time is not worth the coverage. The 1 MiB result ceiling is tested and
   is the same class of defect.
+* **An oversized document the store REFUSED.** The result-ceiling oracle reads every
+  *accepted* upload, not every attempt. A step that tried to publish an oversized document
+  and was turned away by the store would not be caught. That is deliberate — nothing a
+  reader can ever see was produced, so there is no document in violation — but it is a
+  scoping choice, and it is written down here rather than left to be rediscovered.
+* **A cancellation that ends in exit 0.** The collision test now treats "no marker" as
+  permitted only when the run did not exit 0, because the agent classifies exit 0 as a
+  success. That equivalence holds *in this test*, which never asks for a cancellation. It
+  is not a general rule: `agent/runner.py` `_classify` reports a job as cancelled whenever
+  cancellation was requested, **whatever the exit code**, so the same condition copied into
+  a cancellation test would be wrong there. Anyone reusing this shape must ask whether a
+  cancellation could have been requested.
 * **The local (demo) credential scheme.** `node.py` has a whole branch for
   `scheme: "local"`. This harness exercises only the S3 branch. (The orchestrator's own
   `tests/test_hello_node_example.py` does exercise that branch.)
@@ -567,7 +648,7 @@ begin-after-expiry case becomes worth splitting out as a test of its own.
 
 ## The harness's own bugs, found and fixed
 
-### This round
+### The round before
 
 **The cancellation ledger was read before the interrupted upload had settled.** The test
 that asks whether a stopped step accounts for what it left behind held the *second* upload
@@ -608,7 +689,7 @@ socket; and it is labelled `basis_our_policy`, because **when a store authorizes
 about S3 and no orchestrator source states it**. Reverting the stamp turns that test red, on
 the assertion that the credential was still live when the request arrived.
 
-### The round before
+### Two rounds before
 
 **`docker stop`'s return code was discarded.** A failed stop returns in a fraction of a
 second having done nothing — which reads to a cancellation test as a step that shut down

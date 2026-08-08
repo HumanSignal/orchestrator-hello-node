@@ -190,6 +190,15 @@ def test_the_result_document_stays_under_its_ceiling(make_job, sample_input):
     Validate: **no oversized ``result.json`` reaches the store.** That is the whole
               assertion, and everything else about the run is deliberately left alone.
 
+    **The oracle is EVERY accepted upload of that name, not the one that survived it.**
+    The rule bounds the write, so each write answers for itself, and the store's ledger
+    keeps all of them. Asking instead what is readable at the end — which is what an object
+    store serves, and what ``body_of`` deliberately returns — would let a step transfer a
+    three-megabyte document, overwrite it with a small one, and pass: a ceiling a producer
+    may step over and then tidy up after is not a ceiling. Those bytes really were sent,
+    really were accepted, and anything reading between the two writes really would have
+    found them.
+
     **Two conforming answers, neither of them required here.** Failing loudly rather than
     writing the document is what the rule cited above describes wanting — *"bounding the
     write makes a producer fail loudly at the point of the mistake"* — so the exit code is
@@ -210,16 +219,18 @@ def test_the_result_document_stays_under_its_ceiling(make_job, sample_input):
     job = make_job(inputs=[sample_input], params={'payload': 'x' * BULKY_PARAM_BYTES})
     job.run()
 
-    if contract.RESULT_FILENAME not in job.endpoint.keys_in_order():
+    sizes = [upload.size for upload in job.endpoint.uploads if upload.relpath == contract.RESULT_FILENAME]
+    if not sizes:
         pytest.skip(
             'the step wrote no result.json for this job. Nothing requires one, and a ceiling on a '
             'document constrains the document that gets written — there is nothing here to be over it'
         )
-    raw = job.endpoint.body_of(contract.RESULT_FILENAME)
-    assert len(raw) <= contract.MAX_RESULT_BYTES, (
-        f'the step wrote a {len(raw)}-byte result.json, over the {contract.MAX_RESULT_BYTES}-byte '
-        f'ceiling — the contract\'s own reader is forbidden to read it, and the producer is the side '
-        f'that was supposed to find that out'
+    oversized = [size for size in sizes if size > contract.MAX_RESULT_BYTES]
+    assert not oversized, (
+        f'the step uploaded {len(sizes)} result.json ({sizes} bytes), of which {oversized} are over the '
+        f'{contract.MAX_RESULT_BYTES}-byte ceiling — the contract\'s own reader is forbidden to read '
+        f'them, and the producer is the side that was supposed to find that out. A later, smaller write '
+        f'of the same name does not unsend the ones before it'
     )
 
 
