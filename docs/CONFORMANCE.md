@@ -380,17 +380,21 @@ node as broken. That is exactly why the platform mounts the directory
 **RECOMMENDATION.** Send SIGTERM **during** a transfer, not only between work units. A
 cooperative flag cannot be checked while the process is blocked in a socket read, and that
 is the case a real stop hits. Assert three things: a `cancelled` marker exists, it
-inventories the objects that were already uploaded, and the process exited within the 30
-second grace.
+inventories the objects that were already uploaded, and the process exited **within a few
+seconds** — not merely within the 30 seconds the grace nominally offers, for the reason
+below.
 
-**BEHAVIOUR, and it decides what this test is evidence of.** A local SIGTERM is a faithful
-model of the **runtime deadline**, which is a polite stop every time and whose marker really
-is collected. It is **not** a faithful model of an operator pressing Cancel: that usually
-arrives as a SIGKILL your process never sees, and even on the narrow path where it arrives
-as a SIGTERM, nothing the node writes is collected
-([PROTOCOL.md](PROTOCOL.md#7-cancellation)). So label this test as covering the deadline
-path. A suite that calls it "cancellation" is claiming coverage of a case it does not
-exercise and cannot.
+**BEHAVIOUR, and it decides what this test is evidence of.** A local SIGTERM models your
+node's own behaviour on a stop, and nothing more. It is not a model of what the platform
+then does with the result, on any of the three stop paths. An **operator pressing Cancel**
+usually arrives as a SIGKILL your process never sees, and even on the narrow path where it
+arrives as a SIGTERM, nothing the node writes is collected. The **runtime deadline** does
+begin as a SIGTERM, but the grace is cut short by the platform's own next heartbeat, the
+upload credentials expired at the deadline, and the terminal report that would have made a
+marker count is refused ([PROTOCOL.md](PROTOCOL.md#7-cancellation)). So label this test for
+what it proves — that your node stops cleanly and promptly when asked — and do not let it
+stand as evidence that a stopped run delivers a partial result, because today no stop path
+does.
 
 **BEHAVIOUR to keep in mind while reading the result.** When the agent classifies at all, it
 calls the run cancelled regardless of your exit code, because it asks "was cancellation
@@ -416,9 +420,10 @@ does not, and nothing shorter will reveal the difference.
 
 **BEHAVIOUR, and it is why that test needs a setup step.** A node registered either
 documented way is given a runtime budget of **900 seconds**, and at that moment the agent
-begins stopping your container — SIGTERM, then SIGKILL thirty seconds later
-([PROTOCOL.md](PROTOCOL.md#7-cancellation)). So a job "longer than fifteen minutes" is
-simply stopped, and the run proves nothing about credentials.
+begins stopping your container — a SIGTERM, then a SIGKILL that in practice arrives well
+inside the thirty seconds it advertises ([PROTOCOL.md](PROTOCOL.md#7-cancellation)). So a
+job "longer than fifteen minutes" is simply stopped, the run is left parked rather than
+reported, and it proves nothing about credentials.
 
 **RECOMMENDATION, and nothing in the platform requires it — it is a precondition of the
 test, not a rule about your node.** Set `timeout_seconds` on the pipeline node (for example

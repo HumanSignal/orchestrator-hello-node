@@ -86,6 +86,7 @@ own label.
 | What happens if my credentials expire mid-run | [PROTOCOL.md](PROTOCOL.md#43-credentials-expire-during-your-run) |
 | Which exit code to return | [PROTOCOL.md](PROTOCOL.md#6-exit-codes) |
 | What happens when someone presses Cancel, and why it is usually not a polite stop | [PROTOCOL.md](PROTOCOL.md#7-cancellation) |
+| What happens when my step runs out of time, and why nothing it wrote is collected | [PROTOCOL.md](PROTOCOL.md#7-cancellation) |
 | Why my container was killed with no warning at all | [PROTOCOL.md](PROTOCOL.md#71-fencing-the-stop-with-no-grace-period-at-all) |
 | How my logs reach the run view, and what is lost | [PROTOCOL.md](PROTOCOL.md#33-logging) |
 | How to report progress | [PROTOCOL.md](PROTOCOL.md#34-progress) |
@@ -144,7 +145,7 @@ read were `external/contract.py`, `external/io.py`, `external/versioning.py`,
 `frontend/src/pages/ExternalNodesPage.tsx`, `lspo/settings/base.py`, and the two
 Dockerfiles that fix the container user.
 
-**What was executed rather than read.** Four things, all at the commit above:
+**What was executed rather than read.** Five things, all at the commit above:
 
 1. **The offline example was run, both ways.** The fixture in
    [CONFORMANCE.md](CONFORMANCE.md#level-1-run-it-with-a-hand-written-envelope) was built,
@@ -167,11 +168,29 @@ Dockerfiles that fix the container user.
 4. **The input-count ceiling was measured**, by building manifests of increasing width with
    the real models until the writer's 8 MiB limit refused one
    ([PROTOCOL.md](PROTOCOL.md#23-reading-the-input-objects)).
+5. **The runtime-deadline path was run on both sides**, because the account of it in an
+   earlier draft was wrong in a way no amount of re-reading had caught. The agent's own
+   loop was driven against a stand-in docker daemon and a stand-in orchestrator, and the
+   orchestrator's runner API was driven through its own test client. Four things were
+   observed rather than argued: the deadline reaches the container as a **polite** docker
+   stop with a 30 second timeout, after which the agent classifies the run `failed`; a
+   heartbeat refused with the orchestrator's own "past your deadline" code arrives inside
+   the agent as its ordinary **lost-lease** error, indistinguishable from having lost the
+   job to somebody else; on that answer the agent **kills the container outright and sends
+   no terminal report at all**; and on the orchestrator's side the last heartbeat before
+   the deadline shortens the lease to end exactly at the deadline, after which the terminal
+   report is refused, the job's record is left in a live state, and the field that arms
+   collection is never stamped. The platform's own test file for deadlines was also run at
+   this commit and passes. This is what [PROTOCOL.md](PROTOCOL.md#7-cancellation) rests on.
 
-That is all. **No container, agent, orchestrator run or upload was executed while writing
-this**, so everything about the agent's behaviour, the storage service and collection is
-read from source and reasoned about, not measured. Where a statement rests on a
-measurement somebody made earlier, it says so at the point it is made.
+That is all. **No real container, no deployed orchestrator, no object storage and no
+collection run were exercised** — the runs in item 5 used stand-ins for the docker daemon
+and, on the agent's side, for the orchestrator. So the arithmetic in section 7 about *how
+much* of the thirty second grace survives is read from the shipped intervals and reasoned
+about, not timed; what was observed is which of the two stops happens and whether a report
+is sent. Everything about the storage service and about collection remains read from source.
+Where a statement rests on a measurement somebody made earlier, it says so at the point it
+is made.
 
 **The labelling was checked mechanically, not by eye — and the checker itself had to be
 rewritten first.** The earlier version reported zero while four real gaps sat in the
