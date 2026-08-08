@@ -235,6 +235,19 @@ Everything about the storage service and about collection remains read from sour
 Where a statement rests on a measurement somebody made earlier, it says so at the point it
 is made.
 
+**The boundary of the evidence, and the one investment that would move it.** Everything in
+[section 7 of PROTOCOL.md](PROTOCOL.md#7-cancellation) other than the runtime-deadline path
+— an operator's Cancel, all six fences, what a stopped container's staging area is worth
+afterwards, and the overlap between an abandoned container and the run that has already been
+declared over — is derived from **reading** the source rather than from running it. **No
+forced kill was ever executed, and no collection run was ever executed**, at any point in the
+preparation of these documents. That is not a hedge about wording; it is where the evidence
+stops. The highest-value next investment in this document set is executing one of those two
+paths — an operator cancelling a step whose container is still running and observing what
+survives, or a collection over a staging area a real container wrote — because either one
+would confirm or falsify a paragraph that today rests on reading alone, and the last time a
+stop path was actually run it falsified the draft's account of it.
+
 **The labelling was checked mechanically, not by eye — and the checker itself had to be
 rewritten first.** The earlier version reported zero while four real gaps sat in the
 documents, because it only looked for a label when a paragraph contained a modal verb
@@ -278,6 +291,21 @@ them automatically. Line numbers in particular go stale on any edit to the file 
 into; the surrounding sentence is the claim, and the line number is only where to look.
 When these documents and the orchestrator disagree, the orchestrator is right. If you find
 a disagreement, that is a bug in this document set, and it is worth reporting.
+
+**A standing rule for whoever edits these documents next.** Never write down an **interval**,
+an **ordering** or an **exclusivity** that no check in the platform enforces. Two of the
+three were written wrong here, and each read as a fact rather than as the guess it was:
+intervals, where a grace period was written as though it were guaranteed and the overlap
+between two writers was bounded at about two minutes by a periodic pass that can simply fail
+and be tried again; and ordering, where "write the marker strictly last" was written down as
+a rule when no component ever observes the order a container wrote things in. Exclusivity is
+the third shape, and it is why these documents now tell you to design as though a second
+writer may share your staging area rather than asserting that one cannot. If you cannot
+**name the check** — a specific refusal, with the source it lives in — do not state the
+conclusion at all: describe the mechanism, cite where you read it, and let the reader draw
+the conclusion themselves. A sentence that sounds normative only because a source file sounds
+normative is the specific failure mode; see
+[How to read this](#how-to-read-this-three-kinds-of-statement).
 
 ## A warning about the code in this repository
 

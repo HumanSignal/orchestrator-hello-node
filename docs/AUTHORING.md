@@ -92,12 +92,21 @@ on the third item, the inventory you write when your own code decides the run is
 **BEHAVIOUR, and read it once before you write any of the three.** **No interval on any
 stop path is guaranteed** — not the time before your process is signalled, not the time
 between that signal and the kill behind it, not how long anything you start afterwards has
-to finish in. Every figure in these documents is a typical value or a setting, never a
-limit, and the reasoning is set out in full at the top of section 7 of
+to finish in. The reasoning is set out in full at the top of section 7 of
 [PROTOCOL.md](PROTOCOL.md#7-cancellation). The consequence for the code below is concrete:
 nothing important is scheduled for after the SIGTERM, every network call is given a timeout
 short enough that a stop lands between calls rather than inside one, and the design never
 assumes there is time to do one more thing.
+
+This paragraph is **background**, about these documents rather than about the platform, and
+it matters here because the numbers in them are of three different kinds and are not
+interchangeable. A figure for **how long a stop takes** is a typical value, never a limit —
+that is the statement above. A figure that is a **setting** says how often something is
+attempted, and never how long it takes. Everything else — the values the platform **stamps
+or enforces** — is exact and is meant to be reasoned with: the runtime budget, the moment
+your upload credentials stop working, the lease stamped when your job is claimed, the 1 GiB
+ceiling on a single object, the 8 MiB ceiling on a document. Reading one of those as merely
+typical is how a node ends up with a refused upload and a marker the reader will not accept.
 
 ---
 

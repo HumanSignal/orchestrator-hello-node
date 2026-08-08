@@ -318,9 +318,14 @@ which you cannot change from a node.
   between that signal and the kill, not how soon a fence lands, not how long a container
   that should be gone can keep writing. Every interval is a timer of ours plus a docker
   daemon, an HTTP request that may be retried, and a periodic pass that may fail and be
-  tried again with nothing capping the repeats. Figures do appear in these documents and
-  in the settings table above — read them as settings and as typical values, never as
-  limits. The full statement, and what it means for a node author, is at the top of
+  tried again with nothing capping the repeats. **Stop figures** do appear in these
+  documents and in the settings table above — read those as settings and as typical values,
+  never as limits, since a setting says how often something is attempted and never how long
+  it takes. That reading is for stop durations only. The values the platform **stamps or
+  enforces** are a different kind of number and are exact, and you should size against them
+  exactly: the runtime budget, the moment a job's upload credentials stop working, the lease
+  stamped when a job is claimed, the 1 GiB ceiling on a single object, the 8 MiB ceiling on
+  a document. The full statement, and what it means for a node author, is at the top of
   [PROTOCOL.md](PROTOCOL.md#7-cancellation). For an operator the practical form is: never
   size a maintenance window, a drain or a redeploy on the assumption that a stop completes
   in a known time.
