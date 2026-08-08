@@ -6,8 +6,8 @@ hands them out. It is small on purpose: everything a step can observe about S3 i
 contract is a URL that works, a URL that has stopped working, and a policy that admits
 one prefix and refuses everything else.
 
-**This endpoint is deliberately STRICTER than real S3, in three ways, and the difference
-is the point.**
+**This endpoint is deliberately STRICTER than real S3 in two ways, and MODELS it exactly
+in one where a previous version of this file did not.**
 
 1. *It can see the order objects arrived in.* Real S3 has no notion of "you wrote the
    completion marker before you wrote the object it inventories". Every upload here is
@@ -18,16 +18,28 @@ is the point.**
    publish an inventory whose objects landed after it. This harness is the only place it
    can be caught, which is why it is caught here.
 
-2. *A credential can be invalidated on command, deterministically.* Real credentials expire
-   on a wall clock, so a test for "the step must reload its credentials before every
-   transfer" would either take fifteen minutes or depend on a clock somebody can skew.
-   Here a credential stops working because the test said so, at a point in the traffic the
-   test chose — see :meth:`Endpoint.rotate`.
+2. *The prefix fence and the POST policy are checked here rather than assumed.* Real S3
+   enforces the policy's ``starts-with`` condition and every field the policy was signed
+   with, and answers 403 otherwise. So does this. The difference is that this one records
+   the refusal, so a test can prove the fence was exercised rather than merely never
+   tripped.
 
-3. *The prefix fence is checked here rather than assumed.* Real S3 enforces the policy's
-   ``starts-with`` condition and returns 403. So does this. The difference is that this
-   one records the refusal, so a test can prove the fence was exercised rather than merely
-   never tripped.
+3. *Credentials expire; they are not revoked.* **This is the correction that matters.**
+   Issuing a fresh envelope does NOT invalidate the URLs already handed out: a presigned
+   URL is a signature over a deadline, and nothing an issuer does afterwards can take it
+   back. It stops working when its own ``expires_at`` passes, and not before. An earlier
+   version of this file killed every previous credential the moment a new one was minted,
+   which made a perfectly correct expiry-aware step look broken and would have forced
+   "re-read the credentials file before every single transfer" — a requirement the
+   platform does not make (``agent/creds.py``: the agent refreshes *before* expiry
+   precisely "so the workload never has to handle an expired file").
+
+   Expiry is therefore evaluated **at the moment a request arrives**, exactly as S3
+   authorizes a request when it receives it. A transfer that was authorized does not
+   fail retroactively because it took a long time. For the one case where a test needs a
+   credential to die mid-request — a refusal arriving after the body was accepted — there
+   is an explicit :meth:`Endpoint.expire`, so that case is deterministic rather than a
+   race against a clock.
 
 What it does NOT emulate: AWS signature verification (the "signature" here is an opaque
 token naming a credential generation), request-time skew, multipart *chunked* uploads,
@@ -37,9 +49,11 @@ versioning, or eventual consistency. None of those change what the node must do.
 from __future__ import annotations
 
 import hashlib
+import math
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from email.parser import BytesParser
 from email.policy import HTTP
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -108,6 +122,11 @@ class Request:
     token: str  #: the credential generation the caller presented
     index: int  #: 1-based counter within this kind
     size: int = 0  #: uploaded byte count, for an upload
+    #: When the endpoint received it. Expiry is judged against THIS, not against "now":
+    #: S3 authorizes a request when it arrives, and a transfer that was authorized does
+    #: not become unauthorized because the body took a while.
+    arrived_at: float = 0.0
+    fields: dict = field(default_factory=dict)  #: the POST form fields, for an upload
 
 
 @dataclass
@@ -167,8 +186,16 @@ class Endpoint:
         self._lock = threading.Lock()
         self._counters: dict[str, int] = {}
         self._tokens: list[str] = []
-        self._live: set[str] = set()
-        #: Called with the new token whenever :meth:`rotate` runs — the harness wires
+        #: token → the monotonic instant it stops being accepted (``inf`` = never).
+        self._expiry: dict[str, float] = {}
+        #: token → the wall-clock expiry the envelope will STATE, so a step can act on it.
+        self._stated_expiry: dict[str, datetime | None] = {}
+        #: token → the POST fields issued with it, so an upload can be held to them.
+        self._policies: dict[str, dict[str, str]] = {}
+        #: Credentials a test killed outright (:meth:`expire`) rather than letting run
+        #: out. Kept only so a refusal can say which of the two happened.
+        self._killed: set[str] = set()
+        #: Called with the new token whenever :meth:`refresh` runs — the harness wires
         #: this to the atomic replacement of ``creds.json``.
         self.on_rotate: Callable[[str], None] = lambda token: None
         #: Set the first time each kind of request is seen, so a test can synchronise
@@ -198,34 +225,69 @@ class Endpoint:
 
     # ---------------------------------------------------------------- credentials
 
-    def mint(self) -> str:
-        """Issue a new credential generation and invalidate every earlier one.
+    def mint(self, ttl_s: float | None = None) -> str:
+        """Issue a new credential generation. **Earlier ones keep working until they expire.**
 
-        Generations, not clocks. ``A`` becomes ``B`` because a test said so at a point
-        in the traffic it chose, so "did the step reload its credentials before this
-        transfer?" has a deterministic answer instead of a racy one.
+        That is the whole correction to this endpoint's credential model. Presigning is a
+        signature over a deadline: the issuer cannot take one back, and re-signing does
+        not invalidate what it already handed out. A step holding an envelope that has not
+        expired is entitled to keep using it, and a harness that punished that would be
+        demanding something the platform does not.
+
+        Args:
+            ttl_s: Seconds this generation is good for. ``None`` means it never expires,
+                which is what every test that is not ABOUT expiry wants.
         """
         with self._lock:
             token = f'gen-{len(self._tokens) + 1}'
             self._tokens.append(token)
-            self._live = {token}
+            self._expiry[token] = math.inf if ttl_s is None else time.monotonic() + ttl_s
+            self._stated_expiry[token] = (
+                None if ttl_s is None else datetime.now(timezone.utc) + timedelta(seconds=ttl_s)
+            )
         return token
 
-    def rotate(self) -> str:
-        """Mint the next generation AND publish it — the atomic ``creds.json`` swap."""
-        token = self.mint()
+    def refresh(self, ttl_s: float | None = None) -> str:
+        """Issue a fresh generation AND publish it — the atomic ``creds.json`` swap.
+
+        This is what the agent does before an envelope expires (``agent/creds.py``:
+        "Refresh before expiry, not after"). It replaces the file the container is
+        reading; it does not touch the credential the container may already be holding.
+        """
+        token = self.mint(ttl_s)
         self.on_rotate(token)
         return token
 
+    def expire(self, token: str | None = None) -> None:
+        """Make one generation expire NOW, deterministically.
+
+        For the one situation a wall clock cannot express reliably: the credential dying
+        *during* a request, so the refusal arrives after the store has already taken the
+        body. Defaults to the newest generation.
+        """
+        with self._lock:
+            target = token or (self._tokens[-1] if self._tokens else '')
+            if target:
+                self._expiry[target] = -math.inf
+                self._stated_expiry[target] = datetime.now(timezone.utc) - timedelta(seconds=1)
+                self._killed.add(target)
+
     @property
     def token(self) -> str:
-        """The generation currently accepted."""
+        """The most recently issued generation."""
         with self._lock:
             return self._tokens[-1] if self._tokens else ''
 
-    def is_live(self, token: str) -> bool:
+    def stated_expiry(self, token: str) -> datetime | None:
+        """The wall-clock expiry an envelope for ``token`` should declare."""
         with self._lock:
-            return token in self._live
+            return self._stated_expiry.get(token)
+
+    def is_live(self, token: str, at: float | None = None) -> bool:
+        """Whether ``token`` was still valid at monotonic instant ``at`` (default: now)."""
+        moment = time.monotonic() if at is None else at
+        with self._lock:
+            return token in self._expiry and moment < self._expiry[token]
 
     # ---------------------------------------------------------------------- urls
 
@@ -242,19 +304,26 @@ class Endpoint:
         caller is expected to replace it with the full object key. ``key_prefix`` is
         the fence: this endpoint refuses any key outside it, the way S3's
         ``["starts-with", "$key", prefix]`` condition does.
+
+        **Every other field is remembered and enforced on upload.** A real POST is
+        accepted only if the form carries the policy document and the signature that was
+        computed over it; a step that forwards the URL and drops the rest gets a 403 from
+        S3 and used to get a 204 from here, which would have let a genuinely broken node
+        pass this harness and fail in production.
         """
         self.key_prefix = key_prefix
-        return {
-            'url': f'{self.base_url(host)}/upload',
-            'fields': {
-                'key': key_prefix + '${filename}',
-                'tok': token,
-                'policy': 'ZmFrZS1wb2xpY3k=',
-                'x-amz-algorithm': 'AWS4-HMAC-SHA256',
-                'x-amz-signature': f'signature-for-{token}',
-            },
-            'key_prefix': key_prefix,
+        fields = {
+            'key': key_prefix + '${filename}',
+            'tok': token,
+            'policy': 'ZmFrZS1wb2xpY3k=',
+            'x-amz-algorithm': 'AWS4-HMAC-SHA256',
+            'x-amz-credential': f'AKIACONFORMANCE/20260808/us-east-1/s3/aws4_request/{token}',
+            'x-amz-date': '20260808T000000Z',
+            'x-amz-signature': f'signature-for-{token}',
         }
+        with self._lock:
+            self._policies[token] = dict(fields)
+        return {'url': f'{self.base_url(host)}/upload', 'fields': dict(fields), 'key_prefix': key_prefix}
 
     # --------------------------------------------------------------- observation
 
@@ -263,10 +332,38 @@ class Endpoint:
         return [upload.relpath for upload in self.uploads]
 
     def uploaded(self, relpath: str) -> Upload | None:
-        for upload in self.uploads:
+        """The LAST accepted upload of ``relpath`` — which is what S3 would serve.
+
+        Last, not first. An object store exposes the most recent successful write; a
+        harness that answered with the first one could bless bytes that were replaced, or
+        reject a legitimate re-upload (a step that retried a refused transfer, say) for
+        disagreeing with a version nobody can read any more.
+        """
+        for upload in reversed(self.uploads):
             if upload.relpath == relpath:
                 return upload
         return None
+
+    def last_index(self, relpath: str) -> int | None:
+        """Position of the last accepted upload of ``relpath`` in :meth:`keys_in_order`."""
+        keys = self.keys_in_order()
+        for position in range(len(keys) - 1, -1, -1):
+            if keys[position] == relpath:
+                return position
+        return None
+
+    def names_of(self, kind: str) -> list[str]:
+        """The DISTINCT names requested for one kind, in first-seen order.
+
+        Counting requests answers "how much traffic was there"; counting distinct names
+        answers "how much of the work was actually done". Three retries of one input are
+        three requests and one input, and a test about coverage means the second.
+        """
+        seen: list[str] = []
+        for request in list(self.requests):
+            if request.kind == kind and request.name not in seen:
+                seen.append(request.name)
+        return seen
 
     def body_of(self, relpath: str) -> bytes:
         upload = self.uploaded(relpath)
@@ -281,11 +378,19 @@ class Endpoint:
 
     # ------------------------------------------------------------------ internals
 
-    def _note(self, kind: str, name: str, token: str, size: int = 0) -> Request:
+    def _note(self, kind: str, name: str, token: str, size: int = 0, fields: dict | None = None) -> Request:
         with self._lock:
             self._counters[kind] = self._counters.get(kind, 0) + 1
             index = self._counters[kind]
-        request = Request(kind=kind, name=name, token=token, index=index, size=size)
+        request = Request(
+            kind=kind,
+            name=name,
+            token=token,
+            index=index,
+            size=size,
+            arrived_at=time.monotonic(),
+            fields=dict(fields or {}),
+        )
         self.requests.append(request)
         self.seen.setdefault(kind, threading.Event()).set()
         return request
@@ -299,12 +404,53 @@ class Endpoint:
             hook(self, request)
 
     def _check_token(self, request: Request) -> None:
-        if not self.is_live(request.token):
+        """Refuse a credential that had already expired when this request ARRIVED.
+
+        Judged at arrival, the way S3 authorizes a request when it receives it — so a
+        transfer that was authorized cannot fail retroactively for taking too long, and a
+        credential the test explicitly killed mid-request (:meth:`expire`, which sets the
+        expiry to minus infinity) fails whenever it is re-checked.
+        """
+        if self.is_live(request.token, at=request.arrived_at):
+            return
+        with self._lock:
+            killed = request.token in self._killed
+        when = (
+            'expired while this request was in flight — the body was accepted first'
+            if killed
+            else 'had already expired when the request arrived'
+        )
+        raise Refused(
+            403,
+            'AccessDenied',
+            f'the credential {request.token!r} presented for {request.kind} {request.name!r} {when}; '
+            f'the newest generation is {self.token!r}',
+        )
+
+    def _check_post_fields(self, request: Request) -> None:
+        """Hold an upload to the whole policy it was signed with, not just its prefix.
+
+        Real S3 validates ``policy`` against ``x-amz-signature`` and refuses if either is
+        missing or altered. Checking only the key prefix here would accept a step that
+        forwarded the URL and none of the fields — which S3 answers with 403, and which
+        this harness would have called a pass.
+        """
+        with self._lock:
+            issued = dict(self._policies.get(request.token, {}))
+        if not issued:
+            return  # nothing was ever signed for this credential; the token check owns that
+        wrong = sorted(
+            name
+            for name, value in issued.items()
+            if name != 'key' and request.fields.get(name) != value
+        )
+        if wrong:
             raise Refused(
                 403,
                 'AccessDenied',
-                f'the credential {request.token!r} presented for {request.kind} {request.name!r} has been '
-                f'superseded; the live generation is {self.token!r}',
+                f'the upload of {request.name!r} did not present the presigned POST fields it was signed '
+                f'with — {wrong} are missing or altered. S3 validates the policy and its signature, so a '
+                f'step that forwards the URL and drops the rest of the form is refused there too',
             )
 
     def _record_rejection(self, request: Request, refused: Refused) -> None:
@@ -380,10 +526,11 @@ def _make_handler(endpoint: 'Endpoint'):
             fields, payload = _parse_multipart(self.headers.get('Content-Type', ''), raw)
             key = fields.get('key', '')
             token = fields.get('tok', '')
-            request = endpoint._note('upload', key, token, size=len(payload))
+            request = endpoint._note('upload', key, token, size=len(payload), fields=fields)
             try:
                 endpoint._run(endpoint.hooks.on_request, request)
                 endpoint._check_token(request)
+                endpoint._check_post_fields(request)
                 if not key.startswith(endpoint.key_prefix):
                     raise Refused(
                         403,
@@ -483,12 +630,33 @@ def matching(kind: str, index: int | None = None, name: str | None = None):
     return predicate
 
 
-def rotate_when(predicate):
-    """Replace ``creds.json`` and invalidate every earlier generation."""
+def refresh_when(predicate, *, ttl_s: float | None = None):
+    """Publish a fresh ``creds.json``, the way the agent does before an envelope expires.
+
+    It does NOT invalidate the credential the step may already be holding — nothing can.
+    A step that is still inside its own expiry keeps working, which is exactly what
+    production does and what an earlier version of this harness wrongly punished.
+    """
 
     def hook(endpoint: 'Endpoint', request: Request) -> None:
         if predicate(request):
-            endpoint.rotate()
+            endpoint.refresh(ttl_s)
+
+    return hook
+
+
+def expire_and_refresh_when(predicate, *, ttl_s: float | None = None):
+    """Kill the credential in use RIGHT NOW and publish a fresh one in its place.
+
+    The mid-operation expiry: the store has taken the body and the refusal arrives
+    afterwards. The only correct response from a step is to re-read the credentials file
+    — which by then holds a live envelope — and repeat the transfer.
+    """
+
+    def hook(endpoint: 'Endpoint', request: Request) -> None:
+        if predicate(request):
+            endpoint.expire(request.token)
+            endpoint.refresh(ttl_s)
 
     return hook
 

@@ -1,11 +1,22 @@
 """Rules whose subject is the PLATFORM, not this node.
 
-Nothing here can be made to pass or fail by editing ``node.py``. They are in the suite
-because a node is judged against these rules, and a rule nobody has written down drifts
-until two sides of a contract quietly disagree. Each one is a re-statement of something
-the agent or the collector really does — re-stated rather than imported, so that a
-harness which shares no code with the system it checks can still notice that system
-changing.
+Nothing here can be made to pass or fail by editing ``node.py``.
+
+**Read this before trusting the label.** Most of these tests are RESTATEMENTS: they hold
+this harness's own copy of a platform rule to what the platform's source says. A change
+on the platform's side cannot turn them red by itself — nobody's CI runs this harness
+against the orchestrator — so they are not a tripwire on the platform. What they are is
+threefold, and each is worth the file:
+
+* the rest of the suite leans on these rules, so they have to be written down somewhere
+  rather than assumed inside an assertion;
+* the citation on each one names the source line it restates, so a reader can check the
+  restatement against the original in one step, which is exactly how the "exactly nine
+  environment variables" mistake in this file was found and fixed;
+* two of them are not restatements at all. ``test_a_bind_mounted_file_never_sees_a_rotation``
+  and ``test_a_0700_credentials_directory_is_unreadable_to_any_other_user`` exercise real
+  kernel and docker behaviour with real containers, and would genuinely change if the
+  platform's mount or permission choices did.
 """
 
 from __future__ import annotations
@@ -15,13 +26,18 @@ import json
 import pytest
 
 from conformance import contract, docker, platform_rules
-from conformance.markers import subject_is_platform
+from conformance.markers import reference_quality, subject_is_platform, traces_to
 
 
 # ------------------------------------------------------------------- exit codes
 
 
 @subject_is_platform
+@traces_to(
+    'external/contract.py classify_exit: "Unknown codes classify as transient — a crash, an OOM kill, or '
+    'a signal death is far more often a retryable accident than a deliberate permanent failure, and a '
+    'step that means \'do not retry me\' must say so with EXIT_PERMANENT."'
+)
 @pytest.mark.parametrize(
     ('code', 'expected'),
     [
@@ -40,10 +56,8 @@ def test_unknown_exit_codes_are_treated_as_transient(code, expected):
     """Setup: each exit code a step can return. Action: classify it. Validate: the
     documented class, with everything unrecognised falling to transient.
 
-    The default matters more than the table. A crash, an OOM kill or a signal death is
-    far more often a retryable accident than a considered "never retry me", so a step
-    that means permanent has to say so with 10. The cost of the default is visible in
-    this suite: an OOM-killed step exits 137 and is retried forever.
+    A restatement, and the default matters more than the table. The cost of that default
+    is visible in this suite: an OOM-killed step exits 137 and is retried forever.
     """
     assert contract.classify_exit(code) == expected
 
@@ -52,39 +66,70 @@ def test_unknown_exit_codes_are_treated_as_transient(code, expected):
 
 
 @subject_is_platform
-def test_the_agent_injects_exactly_nine_variables():
-    """Setup: the injected set. Validate: it is the nine the contract names, and the
-    one this node reads is NOT among them."""
-    assert len(contract.INJECTED_ENV) == 9
-    assert 'LSPO_CREDENTIALS_FILE' in contract.INJECTED_ENV
-    assert contract.LEGACY_CREDENTIALS_ENV not in contract.INJECTED_ENV
+@traces_to(
+    'agent/runner.py _workload_env: "env = {name: os.environ[name] for name in manifest.env_names if '
+    'name in os.environ}" followed by "env.update({\'LSPO_JOB_ID\': …, \'LSPO_EXECUTION_ID\': …, …})" — '
+    'the job\'s own ids are applied LAST, over whatever the manifest asked for.'
+)
+def test_the_agent_injects_its_own_variables_plus_what_the_manifest_asked_for():
+    """The environment is nine variables PLUS the manifest's, not nine and nothing else.
+
+    Setup:    a manifest requesting two permitted variables, one of which the agent's
+              machine does not have, and one which collides with an injected name.
+    Action:   build the environment the way the agent does.
+    Validate: the requested-and-present one arrives; the requested-and-absent one is
+              simply missing; the colliding one does NOT shadow the agent's value.
+
+    This file used to assert "the agent injects exactly nine variables", which is wrong
+    and was wrong when it was written: ``env_names`` exists precisely so a step can ask
+    for more. What is fixed is which nine the agent always sets and that they win any
+    collision.
+    """
+    env = platform_rules.workload_env(
+        {'LSPO_EXECUTION_ID': '4242', 'LSPO_JOB_ID': '77'},
+        requested=['ACME_TOKEN', 'NOT_ON_THIS_MACHINE', 'LSPO_EXECUTION_ID'],
+        allowlist=['ACME_*', 'NOT_ON_THIS_MACHINE', 'LSPO_EXECUTION_ID'],
+        machine={'ACME_TOKEN': 'secret', 'LSPO_EXECUTION_ID': 'a lie'},
+    )
+
+    assert env['ACME_TOKEN'] == 'secret'
+    assert 'NOT_ON_THIS_MACHINE' not in env
+    assert env['LSPO_EXECUTION_ID'] == '4242', 'a manifest must not be able to shadow the job\'s own ids'
 
 
 @subject_is_platform
-def test_a_manifest_may_request_env_but_the_agent_decides():
-    """The manifest NAMES variables; the values come from the agent's machine.
+@traces_to(
+    'agent/runner.py _workload_env raises JobFailed for a refused name: "the manifest asks this agent to '
+    'inject environment variable(s) …, which LSPO_AGENT_ALLOWED_ENV does not permit … A silent skip '
+    'would be worse than either alternative: the step would run without a credential it was written to '
+    'need and fail somewhere deep inside, and nobody would learn that the agent had refused it."'
+)
+def test_a_variable_outside_the_allowlist_fails_the_job_rather_than_being_skipped():
+    """The manifest NAMES variables; the agent decides, and says no out loud.
 
-    Setup:    a manifest requesting three variables against an operator allowlist that
-              permits one exactly and one by pattern.
-    Action:   ask which are refused.
-    Validate: only the unlisted one, and it is refused by name rather than skipped.
-
-    A silent skip is the worst of the three options: the step runs without a credential
-    it was written to need, fails somewhere deep inside, and nobody learns that the
-    agent refused it. This is also a rule no node can satisfy on its own — which is why
-    it is here rather than among the node's own tests.
+    Setup:    a manifest requesting three variables against an allowlist that permits one
+              exactly and one by pattern.
+    Action:   build the environment.
+    Validate: it is refused, by name.
     """
-    refused = platform_rules.refused_env(
-        ['ACME_TOKEN', 'CUSTOMER_API_KEY', 'AWS_SECRET_ACCESS_KEY'],
-        allowlist=['ACME_TOKEN', 'CUSTOMER_*'],
-    )
-    assert refused == ['AWS_SECRET_ACCESS_KEY']
+    with pytest.raises(platform_rules.EnvRefused, match='AWS_SECRET_ACCESS_KEY'):
+        platform_rules.workload_env(
+            {},
+            requested=['ACME_TOKEN', 'CUSTOMER_API_KEY', 'AWS_SECRET_ACCESS_KEY'],
+            allowlist=['ACME_TOKEN', 'CUSTOMER_*'],
+            machine={},
+        )
 
 
 # ------------------------------------------------------------------ progress lines
 
 
 @subject_is_platform
+@traces_to(
+    'agent/logbuf.py _absorb_progress: prefix "@lspo:progress " (with the trailing space), '
+    '"fraction = float(payload[\'fraction\'])", "if not 0.0 <= fraction <= 1.0: return False", and '
+    'phase "str(payload.get(\'phase\') or \'\')[:64]".'
+)
 @pytest.mark.parametrize(
     ('line', 'expected'),
     [
@@ -103,6 +148,11 @@ def test_a_well_formed_progress_line_is_consumed(line, expected):
 
 
 @subject_is_platform
+@traces_to(
+    'agent/logbuf.py _absorb_progress: "A malformed progress line is NOT consumed — it goes to the log '
+    'as an ordinary line, where its author can see what they wrote. Silently swallowing it would make a '
+    'typo look like a step that reports no progress at all."'
+)
 @pytest.mark.parametrize(
     'line',
     [
@@ -118,16 +168,15 @@ def test_a_well_formed_progress_line_is_consumed(line, expected):
 )
 def test_a_malformed_progress_line_stays_an_ordinary_log_line(line):
     """Setup: each way to get a progress line slightly wrong. Action: read it.
-    Validate: it is NOT consumed.
-
-    Silently swallowing a typo would make it look identical to a step that reports no
-    progress at all — the author would see neither their line nor a progress bar, and
-    have nothing to debug from.
-    """
+    Validate: it is NOT consumed."""
     assert platform_rules.absorb_progress(line) is None
 
 
 @subject_is_platform
+@traces_to(
+    'agent/logbuf.py LogBuffer.add: "Record one line — or absorb it as a progress sample if that is what '
+    'it is", with take_progress carrying "the most recent progress sample" to the heartbeat.'
+)
 def test_progress_lines_are_removed_from_the_log_and_the_rest_is_kept():
     """Setup: a log with two valid samples and one near-miss. Action: split it.
     Validate: the samples are taken out, the near-miss stays in with everything else."""
@@ -148,6 +197,12 @@ def test_progress_lines_are_removed_from_the_log_and_the_rest_is_kept():
 
 
 @subject_is_platform
+@traces_to(
+    'agent/creds.py: "The file is rewritten in place while the container is reading it… a new file is '
+    'written beside it and os.replaced over it… The container sees the swap because the DIRECTORY is '
+    'mounted, not the file — a bind-mounted file keeps pointing at the replaced inode and would never '
+    'update."'
+)
 def test_a_bind_mounted_file_never_sees_a_rotation(image, workdir):
     """Why the agent mounts the DIRECTORY and never the credentials file itself.
 
@@ -159,11 +214,10 @@ def test_a_bind_mounted_file_never_sees_a_rotation(image, workdir):
     Validate: the file-mount still shows the ORIGINAL content; the directory-mount shows
               the new content.
 
-    ``os.replace`` swaps a directory entry, not an inode. A bind-mounted file pins the
-    inode it was mounted from, so the container holds the old document for the rest of
-    its life and never learns its credentials changed — which would make every
-    rotation test in this suite unfalsifiable, and every long job in production fail on
-    an expiry it could not have avoided.
+    Not a restatement: this runs a real container and observes real kernel behaviour. If
+    it ever stopped holding, every rotation test in this suite would become
+    unfalsifiable, and every long job in production would fail on an expiry it could not
+    have avoided.
     """
     import os
     import tempfile
@@ -206,6 +260,11 @@ def test_a_bind_mounted_file_never_sees_a_rotation(image, workdir):
 
 
 @subject_is_platform
+@traces_to(
+    'agent/creds.py JobCredentials.write: "The directory is created 0700 and the file 0600 — on a shared '
+    'machine the credential must not be readable by other users", with the agent running as its own uid '
+    'and agent/runner.py setting run_as only in local demo mode.'
+)
 def test_a_0700_credentials_directory_is_unreadable_to_any_other_user(image, workdir):
     """The undocumented constraint a customer's Dockerfile has to satisfy.
 
@@ -215,17 +274,13 @@ def test_a_0700_credentials_directory_is_unreadable_to_any_other_user(image, wor
               once as the directory's owner.
     Validate: the first is refused with a permission error; the second succeeds.
 
-    In production the two happen to line up: the agent runs as uid 10001
-    (``Dockerfile.agent``) and this node's image also runs as uid 10001 (its own
-    ``Dockerfile``), so the workload can read a directory only its owner can open. That
-    is a coincidence, not a design. A customer image that picks any other non-root user —
-    the ordinary thing to do — gets ``PermissionError`` on its own credentials file, and
+    Not a restatement either: this measures real containers against a real 0700
+    directory. In production the two happen to line up — the agent runs as uid 10001 and
+    this node's image also runs as uid 10001 — so the workload can read a directory only
+    its owner can open. That is a coincidence, not a design. A customer image that picks
+    any other non-root user gets ``PermissionError`` on its own credentials file, and
     nothing in the contract documentation warns them. Running as root avoids it, which is
     precisely the wrong thing to encourage.
-
-    This test does not fail today. It is here so the constraint is written down and
-    executable: if the agent ever changes those modes, or this image changes its uid, one
-    of these two assertions changes with it.
     """
     import os
 
@@ -269,18 +324,24 @@ def _read_creds_as(image: str, creds_dir, user: str | None) -> str:
 
 
 @subject_is_platform
+@traces_to(
+    'external/contract.py: MAX_MANIFEST_BYTES = 8 * 1024 * 1024, MAX_MARKER_BYTES = 8 * 1024 * 1024, '
+    'MAX_RESULT_BYTES = 1024 * 1024 — "The manifest and the marker share the larger ceiling because both '
+    'legitimately carry inventories … and truncating that would be a correctness bug."'
+)
 def test_the_document_ceilings_are_what_the_contract_says():
-    """Setup: the three ceilings. Validate: 8 MiB, 8 MiB, 1 MiB.
-
-    The manifest and the marker share the larger one because both carry inventories and
-    truncating an inventory would be a correctness bug rather than a safety measure.
-    """
+    """Setup: the three ceilings. Validate: 8 MiB, 8 MiB, 1 MiB."""
     assert contract.MAX_MANIFEST_BYTES == 8 * 1024 * 1024
     assert contract.MAX_MARKER_BYTES == 8 * 1024 * 1024
     assert contract.MAX_RESULT_BYTES == 1024 * 1024
 
 
 @subject_is_platform
+@traces_to(
+    'external/io.py _read_json: "Reads limit + 1 bytes: one byte past the ceiling is enough to know the '
+    'limit was exceeded, without ever holding the whole oversized document in memory", raising '
+    'ContractDocumentTooLarge.'
+)
 def test_an_oversized_marker_is_refused_even_when_it_is_valid_json():
     """Setup: a well-formed marker whose serialisation exceeds 8 MiB.
     Action: validate it. Validate: refused on size, before anything else."""
@@ -299,26 +360,113 @@ def test_an_oversized_marker_is_refused_even_when_it_is_valid_json():
 
 
 @subject_is_platform
+@traces_to(
+    'external/contract.py check_sha256: "Uppercase, truncated, prefixed (sha256:…), whitespace-padded '
+    'and placeholder digests are all refused: these values are compared for equality across two '
+    'independently written implementations, and two spellings of one hash would read as \'the content '
+    'changed\'."'
+)
 @pytest.mark.parametrize(
     'digest',
     ['A' * 64, 'sha256:' + 'a' * 64, 'a' * 63, 'a' * 64 + '\n', '', 'not a hash'],
 )
 def test_a_digest_that_is_not_lowercase_64_hex_is_refused(digest):
-    """Two spellings of one hash read as "the content changed" to the side comparing them.
-
-    Setup: uppercase, prefixed, truncated, newline-padded and empty digests.
-    Action: validate. Validate: each is refused.
-    """
+    """Setup: uppercase, prefixed, truncated, newline-padded and empty digests.
+    Action: validate. Validate: each is refused."""
     with pytest.raises(contract.ContractViolation):
         contract.check_sha256(digest, 'test')
 
 
 @subject_is_platform
+@traces_to(
+    'external/contract.py: "ByteSize = Annotated[int, Field(strict=True, ge=0)] … A byte count: a real '
+    'int (not True, not \'12\'), never negative." Strict mode is what refuses the coercions pydantic '
+    'would otherwise perform happily.'
+)
 @pytest.mark.parametrize('size', [True, '12', 1.0, -1, None])
 def test_a_size_that_is_not_a_real_non_negative_int_is_refused(size):
-    """``True`` is an ``int`` in Python, and ``"12"`` looks like one to a lax parser.
-
-    Setup: each near-miss. Action: validate. Validate: refused.
-    """
+    """Setup: each near-miss. Action: validate. Validate: refused."""
     with pytest.raises(contract.ContractViolation):
         contract.check_size(size, 'test')
+
+
+@subject_is_platform
+@traces_to(
+    'external/versioning.py _parsers_for: "version = data.get(\'schema_version\', 1)" — absent means 1 — '
+    'and "type(...) is not int rather than isinstance: bool subclasses int, and True == 1 would '
+    'otherwise pick the version-1 parser for \'schema_version\': true."'
+)
+@pytest.mark.parametrize(
+    ('document', 'accepted'),
+    [
+        ({}, True),  # unstamped is version 1
+        ({'schema_version': 1}, True),
+        ({'schema_version': True}, False),  # True == 1 in Python; the real gate refuses it
+        ({'schema_version': 1.0}, False),
+        ({'schema_version': '1'}, False),
+        ({'schema_version': 2}, False),  # a version this build has no parser for
+    ],
+)
+def test_the_version_gate_defaults_to_one_and_refuses_anything_that_is_not_an_integer(document, accepted):
+    """Setup: each spelling of a schema version. Action: read it. Validate: accepted or
+    refused exactly as the orchestrator's own version gate would.
+
+    Both halves of this were wrong in this harness's first version — it rejected an
+    unstamped document and accepted ``true`` — which is precisely the kind of drift a
+    re-implemented contract is prone to.
+    """
+    if accepted:
+        assert contract.check_schema_version(document, 'test') == 1
+    else:
+        with pytest.raises(contract.ContractViolation):
+            contract.check_schema_version(document, 'test')
+
+
+@subject_is_platform
+@traces_to(
+    'external/contract.py InputPort._check_prefix_layout: layout=\'prefix\' "requires a non-empty '
+    'prefix_digest", "requires a relpath on every object … the prefix_digest is computed over (relpath, '
+    'size, sha256)", and refuses a digest that "does not match the digest recomputed from its own '
+    'objects — a stated digest that disagrees with the listing beside it is worse than no digest, '
+    'because both sides would trust it."'
+)
+def test_a_prefix_port_must_carry_a_digest_that_matches_its_own_listing():
+    """Setup: a prefix port, then the same port with its digest left off, a relpath
+    removed, and the digest altered. Action: validate each. Validate: only the first is
+    accepted.
+
+    ``external/hashing.py`` fixes the canonical form the digest is computed over, and
+    this harness re-implements it: each entry renders as ``relpath\\nsize\\nsha256\\n``,
+    the blocks are sorted as strings, and the concatenation is hashed.
+    """
+    objects = [
+        {'uri': 's3://b/one', 'relpath': 'a/one.jpg', 'sha256': 'a' * 64, 'size': 10},
+        {'uri': 's3://b/two', 'relpath': 'a/two.jpg', 'sha256': 'b' * 64, 'size': 20},
+    ]
+    digest = contract.prefix_digest((obj['relpath'], obj['size'], obj['sha256']) for obj in objects)
+    good = {'name': 'frames', 'payload_kind': 'tree', 'layout': 'prefix', 'cardinality': 'many',
+            'objects': objects, 'prefix_digest': digest}
+    contract._check_input_port(good)
+
+    for broken in (
+        {**good, 'prefix_digest': None},
+        {**good, 'prefix_digest': 'c' * 64},
+        {**good, 'objects': [{k: v for k, v in objects[0].items() if k != 'relpath'}, objects[1]]},
+    ):
+        with pytest.raises(contract.ContractViolation):
+            contract._check_input_port(broken)
+
+
+@subject_is_platform
+@reference_quality(
+    'Not a platform rule at all, and it is here rather than in the node\'s own tests because no black-box '
+    'test of a container can observe it: agent/runner.py refuses a manifest naming a variable outside '
+    'LSPO_AGENT_ALLOWED_ENV BEFORE the container starts. Written down so the constraint on a node author '
+    'exists somewhere executable.'
+)
+def test_an_allowlist_pattern_matches_the_way_the_agent_matches_it():
+    """Setup: exact names and shell-style patterns. Action: ask which are refused.
+    Validate: pattern matching is case-sensitive and anchored to the whole name."""
+    assert platform_rules.refused_env(['ACME_TOKEN'], ['ACME_*']) == []
+    assert platform_rules.refused_env(['acme_token'], ['ACME_*']) == ['acme_token']
+    assert platform_rules.refused_env(['XACME_TOKEN'], ['ACME_*']) == ['XACME_TOKEN']

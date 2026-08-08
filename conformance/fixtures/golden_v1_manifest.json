@@ -1,0 +1,65 @@
+{
+  "attempt": 3,
+  "credentials_file": "/lspo/creds/creds.json",
+  "deployment_id": 13,
+  "env_names": [
+    "LSPO_EXECUTION_ID",
+    "LSPO_STAGING_PREFIX"
+  ],
+  "execution_id": 90001,
+  "generation": 2,
+  "idempotency_key": "exec-90001-rev-4",
+  "image_digest": "ghcr.io/acme/frame-qc@sha256:deade7cf9d4a7bf30e74b5eb9b2f84a504399a80c6769453da6078969fe71c68",
+  "inputs": [
+    {
+      "cardinality": "one",
+      "layout": "file",
+      "name": "annotations",
+      "objects": [
+        {
+          "relpath": "export.json",
+          "sha256": "62b9586579dbee96c3ea2f9567bbb3cf6e7ebbd691c62a66bbf84bd5cdc17f9b",
+          "size": 1048576,
+          "upstream_execution_id": 89990,
+          "uri": "s3://acme-lspo/prod/pipelines/42/executions/89990/export.json"
+        }
+      ],
+      "payload_kind": "ls_export",
+      "prefix_digest": null
+    },
+    {
+      "cardinality": "many",
+      "layout": "prefix",
+      "name": "frames",
+      "objects": [
+        {
+          "relpath": "frames/000001.jpg",
+          "sha256": "f21b3cadd4ade9be9d61c30884510edf551e1fdb4489cae4c665bea3cd080cdf",
+          "size": 204800,
+          "upstream_execution_id": 89990,
+          "uri": "s3://acme-lspo/prod/pipelines/42/executions/89990/frames/000001.jpg"
+        },
+        {
+          "relpath": "frames/000002.jpg",
+          "sha256": "ccd149c4dcc64421f48f1706a05bf7a057bfbe3d5c8a41cb2acd5c4ff054683f",
+          "size": 198656,
+          "upstream_execution_id": 89990,
+          "uri": "s3://acme-lspo/prod/pipelines/42/executions/89990/frames/000002.jpg"
+        }
+      ],
+      "payload_kind": "frame_tree",
+      "prefix_digest": "b76e2498627546b19ba098ad8b4b880ef49bf5692a14b3dbebc2696689e6b6de"
+    }
+  ],
+  "organization_id": 7,
+  "params": {
+    "batch_name": "Gold01",
+    "strict": true,
+    "threshold": 0.75
+  },
+  "pipeline_id": 42,
+  "revision_id": 4,
+  "schema_version": 1,
+  "staging_prefix": "s3://acme-lspo/prod/pipelines/42/executions/90001/attempts/3/gen-2",
+  "timeout_seconds": 1800
+}

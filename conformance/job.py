@@ -40,6 +40,18 @@ class InputSpec:
     ``data`` is what the job PINS. ``served`` is what the store actually hands over —
     different only when a test is proving that the node checks what it read against
     what was pinned for it.
+
+    **A pin override lands in BOTH documents.** In production the manifest's input
+    objects and the credential envelope's entries are copied from one validated list, so
+    they cannot disagree; a harness that overrode the pin in only one of them would be
+    handing the node a contradictory pair of platform documents and calling the node's
+    reaction a defect. ``sha256`` and ``size`` therefore change what the JOB claims,
+    everywhere it claims it, and ``served`` changes what the store hands back — which is
+    the real-world shape of "the object under that key is not the object we hashed".
+
+    ``drop_sha256`` is the one exception and cannot be otherwise: the manifest's schema
+    requires a digest on every object, so an unpinned input is expressible only in the
+    envelope. The test that uses it says so.
     """
 
     relpath: str
@@ -47,9 +59,9 @@ class InputSpec:
     port: str = 'input'
     served: bytes | None = None
     synthetic_size: int | None = None
-    sha256: str | None = None  #: override the pin
-    size: int | None = None  #: override the pinned size
-    drop_sha256: bool = False
+    sha256: str | None = None  #: override the pin, in the manifest AND the envelope
+    size: int | None = None  #: override the pinned size, in the manifest AND the envelope
+    drop_sha256: bool = False  #: envelope only — the manifest cannot express it
     extra: dict = field(default_factory=dict)
 
     def blob(self) -> Blob:
@@ -60,8 +72,14 @@ class InputSpec:
     def pin(self) -> Blob:
         """What the JOB claims about this object, which may not be what is served."""
         if self.synthetic_size is not None:
-            return Blob.synthetic(self.synthetic_size)
-        return Blob.of(self.data)
+            base = Blob.synthetic(self.synthetic_size)
+        else:
+            base = Blob.of(self.data)
+        return Blob(
+            sha256=self.sha256 if self.sha256 is not None else base.sha256,
+            size=self.size if self.size is not None else base.size,
+            data=None,
+        )
 
     @property
     def store_key(self) -> str:
@@ -87,6 +105,7 @@ class Job:
         manifest_extra: dict | None = None,
         input_extra: dict | None = None,
         max_object_bytes: int = 256 * 1024 * 1024,
+        creds_ttl_s: float | None = None,
     ):
         self.image = image
         self.workdir = workdir
@@ -100,6 +119,11 @@ class Job:
         self.envelope_extra = envelope_extra or {}
         self.manifest_extra = manifest_extra or {}
         self.input_extra = input_extra or {}
+        # How long the FIRST envelope is good for. ``None`` — no expiry — is what every
+        # test that is not about credential lifetime wants: production credentials do
+        # expire, but fifteen minutes is longer than any test here runs, so an unbounded
+        # one models the ordinary case exactly and only the expiry tests shorten it.
+        self.creds_ttl_s = creds_ttl_s
         self.idempotency_key = f'exec-{execution_id}-att-{attempt}'
 
         self.key_prefix = (
@@ -175,8 +199,8 @@ class Job:
             entry = {
                 'port': spec.port,
                 'relpath': spec.relpath,
-                'sha256': spec.sha256 if spec.sha256 is not None else pin.sha256,
-                'size': spec.size if spec.size is not None else pin.size,
+                'sha256': pin.sha256,
+                'size': pin.size,
                 'name': spec.relpath,
                 'get_url': self.endpoint.get_url(host, spec.store_key, token),
             }
@@ -185,11 +209,17 @@ class Job:
             entry.update(self.input_extra)
             entry.update(spec.extra)
             entries.append(entry)
+        # The envelope states the expiry of the credential it carries, which is what
+        # ``runners/credentials.py`` puts there ("'expires_at': budget.signed_until") and
+        # what a step is entitled to act on. When the endpoint issued a credential with no
+        # expiry we still declare the production default, because an envelope with no
+        # stated expiry is a shape the orchestrator never writes.
+        stated = self.endpoint.stated_expiry(token) or (datetime.now(timezone.utc) + timedelta(minutes=15))
         document = {
             'schema_version': 1,
             'scheme': 's3',
             'credentials_file': self.credentials_file,
-            'expires_at': (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat(),
+            'expires_at': stated.isoformat(),
             'manifest_get': self.endpoint.get_url(host, contract.MANIFEST_FILENAME, token),
             'inputs': entries,
             'staging': {
@@ -247,7 +277,7 @@ class Job:
         manifest_bytes = json.dumps(self.manifest(), sort_keys=True, indent=2).encode('utf-8')
         contract.validate_manifest(json.loads(manifest_bytes), raw_bytes=manifest_bytes)
         self.endpoint.blobs[contract.MANIFEST_FILENAME] = Blob.of(manifest_bytes)
-        self._write_creds(self.endpoint.mint())
+        self._write_creds(self.endpoint.mint(self.creds_ttl_s))
         return self
 
     def write_envelope_file(self, filename: str, token: str) -> Path:
@@ -275,7 +305,15 @@ class Job:
         ``omit_env`` drops one of the nine before launch AND strips any value the image
         baked in for it — the only honest way to ask "what does this node do when the
         variable is genuinely absent?".
+
+        A job with a credential TTL gets a FRESH envelope here, immediately before the
+        container starts, so that the whole lifetime belongs to the step instead of being
+        spent on ``docker run`` and an image start. Otherwise a six-second credential
+        could be half gone before the step's first line executes, and a test about
+        expiry would sometimes be a test about how busy the machine was.
         """
+        if self.creds_ttl_s is not None:
+            self._write_creds(self.endpoint.mint(self.creds_ttl_s))
         environment = self.injected_env()
         environment.update(env or {})
         for name in omit_env:
@@ -293,7 +331,14 @@ class Job:
         return self.container
 
     def run(self, *, timeout: float = 180.0, **kwargs) -> docker.RunResult:
-        """Launch and wait. The ordinary case."""
+        """Launch and wait for a real exit. The ordinary case.
+
+        ``Container.wait`` raises :class:`docker.ContainerDidNotExit` rather than
+        returning on a timeout, so a step that hangs is reported as a hang. It used to
+        return ``None`` here and be ignored, and the result then carried docker's
+        ``State.ExitCode`` — which is ``0`` for a container that is still running. Every
+        test that checks only the exit code and the logs would have passed.
+        """
         container = self.start(**kwargs)
         container.wait(timeout=timeout)
         return container.collect()

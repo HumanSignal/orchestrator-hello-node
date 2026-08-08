@@ -1,11 +1,10 @@
-"""The documents a step reads and writes, and the ceilings on them.
+"""The documents a step reads and writes, the ceilings on them, and progress.
 
 Contract documents are control data, not payload, so every read AND every write is
 bounded: the manifest and the marker at 8 MiB (both legitimately carry inventories, and
 a wide batch can pin thousands of objects), ``result.json`` at 1 MiB, because it carries
-only metrics and a summary and anything approaching a megabyte there is payload in the
-wrong place. A producer that ignores the ceiling only finds out when somebody else fails
-to read what it wrote.
+only metrics and a summary. A producer that ignores the ceiling only finds out when
+somebody else fails to read what it wrote.
 
 Compatibility runs the other way: unknown fields are IGNORED, never rejected. A newer
 orchestrator may add keys an older customer image has never heard of, so dropping a field
@@ -18,7 +17,7 @@ import json
 
 from conformance import contract, platform_rules
 from conformance.job import InputSpec
-from conformance.markers import conforms_today, expected_red_until_fixed
+from conformance.markers import conforms_today, expected_red_until_fixed, reference_quality, traces_to
 
 #: Comfortably over the 1 MiB ceiling on result.json, and well under the 8 MiB one on
 #: the manifest that carries it — so the ONLY document in violation is the one the step
@@ -27,10 +26,14 @@ BULKY_PARAM_BYTES = 3 * 1024 * 1024
 
 
 @conforms_today
+@reference_quality(
+    'external/contract.py carries params "verbatim; it is not a filter and performs no redaction", but '
+    'nothing obliges a step to echo them anywhere. This node puts them in its summary, and the value of '
+    'pinning that is the round trip: a step that re-encoded a float, dropped a null or mangled non-ASCII '
+    'on the way through would be teaching that to everyone who copies this file.'
+)
 def test_params_reach_the_step_unchanged(make_job, sample_input):
-    """``params`` are carried verbatim: the contract is not a filter.
-
-    Setup:    parameters with nesting, non-ASCII text, a float, a bool and a null.
+    """Setup:    parameters with nesting, non-ASCII text, a float, a bool and a null.
     Action:   run.
     Validate: what comes back in ``result.json`` is equal to what went in.
     """
@@ -50,6 +53,11 @@ def test_params_reach_the_step_unchanged(make_job, sample_input):
 
 
 @conforms_today
+@traces_to(
+    'external/contract.py: "Every model tolerates unknown fields (extra=\'ignore\'): a newer '
+    'orchestrator may add keys that an older customer image has never heard of, and vice versa. Dropping '
+    'a field is therefore a breaking change; adding one is not."'
+)
 def test_unknown_additive_fields_are_ignored_not_rejected(make_job, sample_input):
     """A newer orchestrator adds keys; an older image must not care.
 
@@ -71,19 +79,34 @@ def test_unknown_additive_fields_are_ignored_not_rejected(make_job, sample_input
 
 
 @conforms_today
+@traces_to(
+    'external/contract.py ResultDoc: schema_version, "metrics for numbers the pipeline may chart, '
+    'summary for anything a human reads", both dicts — and external/versioning.py parses it through the '
+    'same version gate as everything else.'
+)
 def test_the_result_document_has_the_shape_the_contract_declares(make_job, sample_input):
     """Setup: an ordinary run. Action: read ``result.json``. Validate: it parses as a
-    contract result document — version 1, with ``metrics`` and ``summary`` objects."""
+    contract result document — version 1, with ``metrics`` and ``summary`` objects.
+
+    What is in those two objects is entirely the step's business; this asserts the shape
+    and nothing about the contents.
+    """
     job = make_job(inputs=[sample_input])
     result = job.run()
     assert result.exit_code == 0, result.output
 
     raw = job.endpoint.body_of(contract.RESULT_FILENAME)
     document = contract.validate_result(json.loads(raw.decode('utf-8')), raw_bytes=raw)
-    assert document['metrics']['files'] >= 1
+    assert isinstance(document['metrics'], dict) and isinstance(document['summary'], dict)
 
 
 @expected_red_until_fixed
+@traces_to(
+    'external/contract.py: MAX_RESULT_BYTES = 1024 * 1024, and "The result document carries only metrics '
+    'and a summary; anything approaching a megabyte there is payload in the wrong place." external/io.py '
+    'read_result enforces it on the way IN: _read_json reads limit+1 bytes and raises '
+    'ContractDocumentTooLarge — "over its …-byte contract document limit".'
+)
 def test_the_result_document_stays_under_its_ceiling(make_job, sample_input):
     """A step must not write a document the other side is forbidden to read.
 
@@ -93,10 +116,13 @@ def test_the_result_document_stays_under_its_ceiling(make_job, sample_input):
     Validate: the run succeeds and ``result.json`` is at most 1 MiB.
 
     The step copies ``params`` into its summary without looking at their size, so a
-    manifest the orchestrator was happy to write produces a result document the
-    orchestrator will refuse to read. The failure surfaces at collection, on the far
-    side of all the real work, as an unreadable contract document rather than as
-    anything about the parameters that caused it.
+    manifest the orchestrator was happy to write produces a result document the contract's
+    own reader refuses. Worth knowing what this does and does not cost today: nothing in
+    the current collection path calls ``read_result``, so the oversized document is
+    written and never read. It is the sanctioned reader that would refuse it, and the
+    contract that says the ceiling bounds writes as well as reads — so this is a document
+    the step is not allowed to produce, and the day anything reads it is the day it
+    becomes an outage on the far side of all the real work.
     """
     job = make_job(inputs=[sample_input], params={'payload': 'x' * BULKY_PARAM_BYTES})
     result = job.run()
@@ -107,26 +133,34 @@ def test_the_result_document_stays_under_its_ceiling(make_job, sample_input):
 
 
 @expected_red_until_fixed
-def test_the_step_reports_progress(make_job):
+@reference_quality(
+    'Progress is OPT-IN and this harness no longer says otherwise. agent/logbuf.py: "A workload that '
+    'wants the Runs UI to show a progress bar writes a line @lspo:progress {…}. … A step that never '
+    'writes one simply has no progress — the agent does not invent a fraction from elapsed time." A node '
+    'that emits none is fully conformant. It is asserted here because the reference node is where an '
+    'author learns the protocol exists at all: nothing in the contract documents will teach it to '
+    'somebody who only ever reads the example, and a long batch with no progress is indistinguishable '
+    'from a hung one for its whole duration.'
+)
+def test_the_reference_node_demonstrates_the_progress_protocol(make_job):
     """A run with no progress signal is a run nobody can tell apart from a stuck one.
 
     Setup:    four inputs, so there is something to be part-way through.
     Action:   run and read the container's output the way the agent's log buffer does.
-    Validate: at least one well-formed ``@lspo:progress`` line was emitted, and the
-              fractions never go backwards.
+    Validate: at least TWO distinct fractions were emitted and they never go backwards.
 
-    Progress is opt-in and out of band: a step writes
-    ``@lspo:progress {"fraction": 0.4, "phase": "copying"}`` and the agent consumes that
-    line and reports it on the next heartbeat. The agent deliberately does NOT invent a
-    fraction from elapsed time, because a made-up progress bar is a lie a human then
-    plans around — so a step that never writes one has no progress at all, and a long
-    batch looks identical to a hung one for its entire duration.
+    Two, not one: a single constant line at startup satisfies "did it emit progress?"
+    while telling a watcher nothing, and this test exists to make a stuck run
+    distinguishable from a working one.
     """
     job = make_job(inputs=[InputSpec(relpath=f'{n}.csv', data=b'row\n' * 100) for n in range(4)])
     result = job.run()
     assert result.exit_code == 0, result.output
 
     _, samples = platform_rules.split_log(result.lines)
-    assert samples, f'the step reported no progress at all; it said:\n{result.output}'
     fractions = [sample['fraction'] for sample in samples]
+    assert len(set(fractions)) >= 2, (
+        f'the step reported {len(fractions)} progress sample(s) with {len(set(fractions))} distinct '
+        f'fraction(s), so nothing about it moves; it said:\n{result.output}'
+    )
     assert fractions == sorted(fractions), f'progress went backwards: {fractions}'

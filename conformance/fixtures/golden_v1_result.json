@@ -1,0 +1,16 @@
+{
+  "metrics": {
+    "mean_score": 0.94,
+    "rejected": 12,
+    "rows_in": 4821,
+    "rows_out": 4809
+  },
+  "schema_version": 1,
+  "summary": {
+    "batch": "Gold01",
+    "note": "twelve rows rejected for a missing reference slide",
+    "warnings": [
+      "3 designs had no thumbnail"
+    ]
+  }
+}

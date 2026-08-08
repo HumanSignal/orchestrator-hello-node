@@ -251,10 +251,14 @@ judges it from the outside only — the environment it was given, the objects it
 
 ```bash
 pip install -r requirements-dev.txt
-python -m pytest                 # known defects run as expected failures; this is CI
-python -m pytest --red-for-real  # the true result
+python -m pytest                            # known gaps run as expected failures; this is CI
+python -m pytest --red-for-real             # the true result
+python -m pytest --collect-only -q --print-labels   # what every test claims, and on whose authority
 ```
 
-**Read `CONFORMANCE-BASELINE.md` before copying this repository as a template.** Twelve
-known defects are measured and written down there, and they are the parts of `node.py`
-you should not copy verbatim yet.
+**Read `CONFORMANCE-BASELINE.md` before copying this repository as a template.** Twenty-one
+tests are red today and they are the parts of `node.py` you should not copy verbatim yet —
+but read the label on each one before treating it as a rule. Ten are contract violations
+with the rule quoted; three are compatibility policy this repository chose for itself; and
+eight are things a *reference* implementation ought to demonstrate that the contract
+happily permits a real node to skip.

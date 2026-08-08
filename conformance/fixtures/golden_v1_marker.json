@@ -1,0 +1,35 @@
+{
+  "attempt": 3,
+  "error": null,
+  "execution_id": 90001,
+  "exit_code": 0,
+  "generation": 2,
+  "idempotency_key": "exec-90001-rev-4",
+  "objects": [
+    {
+      "relpath": "delivery/Gold01.csv",
+      "sha256": "bcf3b06e1bd95de6a5d45d4b79ef9f5be6b9f91cacc051c773e1c5f3b837a141",
+      "size": 91544
+    },
+    {
+      "relpath": "reports/quality.html",
+      "sha256": "13a3a1cdfa4d988cda3944e55cd7a8c87a7dd8c01260b83dfd7fcdd08323804f",
+      "size": 20480
+    },
+    {
+      "relpath": "logs/stdout.txt",
+      "sha256": "c6175f31ea46d0d990e334b81d7b2a874b0cf8cdfe830be0f65bca005715d65e",
+      "size": 4096
+    }
+  ],
+  "produced_ports": {
+    "delivery": [
+      "delivery/Gold01.csv"
+    ],
+    "report": [
+      "reports/quality.html"
+    ]
+  },
+  "schema_version": 1,
+  "status": "succeeded"
+}

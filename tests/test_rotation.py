@@ -1,137 +1,195 @@
-"""Credentials rotate under a running step, and the step has to notice.
+"""Credentials EXPIRE under a running step, and the step has to notice.
 
-An envelope is short-lived by design — fifteen minutes by default, clamped to whatever
-remains of the job's runtime budget. A job that runs longer than that gets a NEW envelope
-written over the old one while it is running, and the presigned URLs it was holding stop
-working. That is not an edge case: it is the normal life of any step that takes longer
-than a quarter of an hour.
+An envelope is short-lived by design: ``LSPO_RUNNER_CREDS_TTL_S``, fifteen minutes by
+default, clamped to whatever remains of the job's runtime budget
+(``runners/credentials.py``). The agent asks for a new one before the old expires and
+replaces ``creds.json`` in place — a new file beside it, then ``os.replace``, which is
+why the DIRECTORY is what gets mounted. ``agent/creds.py`` states the intent plainly:
 
-So the rule is: **re-read the credentials file immediately before every transfer, and on
-a refusal re-read and try once more.** A step that loads the envelope once at startup and
-keeps it in a variable is a step with a fifteen-minute ceiling on its own runtime.
+    **Refresh before expiry, not after.** A long job outlives its credentials. The agent
+    asks for a new envelope once the remaining validity drops under a margin, so the
+    workload never has to handle an expired file.
 
-These tests model rotation with **generations, not a clock**. The store issues generation
-``A``; at a point in the traffic the test chooses, ``creds.json`` is atomically replaced
-with generation ``B`` and ``A`` stops being accepted. Nothing waits, nothing is skewed,
-and the answer to "did the step reload?" is a fact rather than a race.
+The file is kept fresh. A step that read it once into a variable at startup is not
+holding the file — it is holding a fifteen-minute-old copy of it, and no amount of
+refreshing on the agent's side reaches it.
+
+**What these tests do NOT require, and used to.** Issuing a fresh envelope does not
+revoke the one already in the container's hands: a presigned URL is a signature over a
+deadline and nothing takes it back. So "re-read the credentials file before every
+transfer" is not the rule, an expiry-aware step that re-reads when it needs to is
+correct, and a 403 that the step recovers from is not a failure. The earlier version of
+this file asserted all three of those things and was wrong about all three; see
+``conformance/fakes3.py`` for how the credential model was corrected.
 """
 
 from __future__ import annotations
 
 from conformance import contract
-from conformance.fakes3 import matching, rotate_when
+from conformance.fakes3 import delay_when, expire_and_refresh_when, matching, refresh_when
 from conformance.job import InputSpec
-from conformance.markers import expected_red_until_fixed
+from conformance.markers import expected_red_until_fixed, traces_to
 
-THREE_INPUTS = [
-    InputSpec(relpath='one.csv', data=b'1\n'),
-    InputSpec(relpath='two.csv', data=b'2\n'),
-    InputSpec(relpath='three.csv', data=b'3\n'),
-]
+#: A credential lifetime the harness can wait out. Its clock starts when the CONTAINER
+#: launches (``Job.start`` re-mints for a job with a TTL), not when the job was built, so
+#: the whole budget is available to the step rather than being spent on ``docker run``.
+#: Production numbers are fifteen minutes and hours; the mechanism is identical and only
+#: the arithmetic is not.
+SHORT_TTL_SECONDS = 6.0
 
-
-@expected_red_until_fixed
-def test_credentials_that_rotate_before_the_first_upload_are_picked_up(make_job):
-    """Rotate the moment the last input is read; the uploads must still land.
-
-    Setup:    three pinned inputs. The store is told to replace ``creds.json`` with a
-              new generation the instant the LAST input finishes downloading, and to
-              refuse the previous generation from then on.
-    Action:   run the step. Its reads all succeed; every write happens after the swap.
-    Validate: all five objects are uploaded — three copies, ``result.json`` and the
-              completion marker — and the step exits 0.
-
-    This is the ordinary life of a long job compressed into a second. Today the step
-    reads the envelope once at startup, keeps the upload policy in memory, and the first
-    write after the rotation is refused with 403 — which it reports as a PERMANENT
-    failure, so the orchestrator never even retries it.
-    """
-    job = make_job(inputs=THREE_INPUTS)
-    job.endpoint.hooks.on_responded.append(rotate_when(matching('input', index=len(THREE_INPUTS))))
-
-    result = job.run()
-
-    assert job.endpoint.count_of('input') >= len(THREE_INPUTS), 'the step never read its inputs'
-    assert result.exit_code == 0, f'the step did not survive a credential rotation:\n{result.output}'
-    assert contract.MARKER_FILENAME in job.endpoint.keys_in_order()
-    assert not [r for r in job.endpoint.rejections if r.status == 403], (
-        f'a request was refused with 403 after the rotation: {job.endpoint.rejections}'
-    )
+#: How long the store holds one response open — comfortably past the expiry above, so
+#: that everything the step does afterwards is done with a dead copy of the envelope.
+HELD_OPEN_SECONDS = 12.0
 
 
 @expected_red_until_fixed
-def test_credentials_are_reloaded_before_every_transfer_not_merely_once(make_job):
-    """Rotate twice — once before the writes, once between them.
+@traces_to(
+    'runners/credentials.py: "The envelope expires in LSPO_RUNNER_CREDS_TTL_S (default 15 minutes), '
+    'clamped to whatever remains of the job\'s own runtime budget… A long job calls POST /jobs/<id>/sign '
+    'for a fresh set". agent/creds.py: "Refresh before expiry, not after… so the workload never has to '
+    'handle an expired file", with the fresh envelope published by atomic replacement into the mounted '
+    'directory.'
+)
+def test_a_step_that_outlives_its_envelope_reads_the_fresh_one(make_job, sample_input):
+    """The ordinary life of a long job, compressed into a dozen seconds.
 
-    Setup:    three inputs. ``creds.json`` is replaced when the last input is read, AND
-              again the moment the first upload is accepted.
+    Setup:    an envelope good for six seconds, counted from the container's launch. The
+              store holds the input's response open for twelve, and publishes a fresh
+              ``creds.json`` — with a long life — the moment that response completes. The
+              step's own copy is by then expired; the file on disk is not.
     Action:   run.
-    Validate: every object still lands, in the usual order, and the step exits 0.
+    Validate: the step uploads everything and exits 0, and the objects that land are
+              signed with the FRESH generation — which is only possible if it re-read the
+              file.
 
-    The second rotation is what makes this test different from the one above. A step
-    that reloads its credentials ONCE, after processing, passes that test and fails this
-    one — and "reloads once" is exactly the shape of fix somebody writes when the only
-    evidence is a single 403 on the first upload. Reloading before EVERY transfer is the
-    rule, because the file can be replaced at any moment, including between two writes.
+    Today the step loads the envelope into a local variable in ``main()`` and every later
+    transfer uses that copy, so this is a hard ceiling on its own runtime: past one
+    credential lifetime it cannot upload its outputs, and it cannot upload the failure
+    marker that would explain why either. Fifteen minutes is not an edge case for a batch
+    step; it is Tuesday.
     """
-    job = make_job(inputs=THREE_INPUTS)
-    job.endpoint.hooks.on_responded.append(rotate_when(matching('input', index=len(THREE_INPUTS))))
-    job.endpoint.hooks.on_responded.append(rotate_when(matching('upload', index=1)))
+    job = make_job(inputs=[sample_input], creds_ttl_s=SHORT_TTL_SECONDS)
+    job.endpoint.hooks.on_request.append(delay_when(matching('input', index=1), HELD_OPEN_SECONDS))
+    job.endpoint.hooks.on_responded.append(refresh_when(matching('input', index=1)))
 
-    result = job.run()
+    result = job.run(timeout=120)
 
-    assert result.exit_code == 0, f'the step did not survive the second rotation:\n{result.output}'
-    uploaded = job.endpoint.keys_in_order()
-    assert len(uploaded) == len(THREE_INPUTS) + 2, f'only {uploaded} landed'
-    assert uploaded[-1] == contract.MARKER_FILENAME
-
-
-@expected_red_until_fixed
-def test_credentials_that_rotate_between_two_input_reads_are_picked_up(make_job):
-    """The same rule applies to reads, not only to writes.
-
-    Setup:    three inputs; ``creds.json`` is replaced after the FIRST one is served.
-    Action:   run.
-    Validate: the step reads all three and finishes.
-
-    Reads are where a long job spends most of its time, so a rotation is more likely to
-    land between two of them than anywhere else. A step holding a presigned GET it
-    fetched fifteen minutes ago gets a 403 that has nothing to do with the object.
-    """
-    job = make_job(inputs=THREE_INPUTS)
-    job.endpoint.hooks.on_responded.append(rotate_when(matching('input', index=1)))
-
-    result = job.run()
-
-    assert result.exit_code == 0, f'the step stopped at the first rotated input:\n{result.output}'
-    assert job.endpoint.count_of('input') >= len(THREE_INPUTS), (
-        f'only {job.endpoint.count_of("input")} of {len(THREE_INPUTS)} inputs were fetched'
-    )
-    assert contract.MARKER_FILENAME in job.endpoint.keys_in_order()
-
-
-@expected_red_until_fixed
-def test_a_credential_that_expires_mid_operation_is_retried(make_job, sample_input):
-    """The store accepted the request and THEN the credential died.
-
-    Setup:    one input. On the first upload the store reads the whole body, replaces
-              ``creds.json`` with a new generation, and only then answers 403.
-    Action:   run.
-    Validate: the step re-reads its credentials, repeats the upload, and finishes with
-              every object in place.
-
-    This is the case a "check the expiry before you start" fix does not cover. The
-    envelope was valid when the request left, the bytes were transferred, and the
-    refusal arrives afterwards — which is precisely what an expiring upload policy looks
-    like from inside the container. The only correct response is to reload and repeat,
-    and re-uploading an object that is addressed by its own relpath is safe to repeat.
-    """
-    job = make_job(inputs=[sample_input])
-    job.endpoint.hooks.on_accepted.append(rotate_when(matching('upload', index=1)))
-
-    result = job.run()
-
-    assert result.exit_code == 0, f'the step gave up on a mid-operation expiry:\n{result.output}'
+    _assert_the_step_had_its_whole_credential_lifetime(job)
+    assert result.exit_code == 0, f'the step did not survive its own credential expiry:\n{result.output}'
     uploaded = job.endpoint.keys_in_order()
     assert contract.MARKER_FILENAME in uploaded, f'nothing was completed; only {uploaded} landed'
-    assert 'outputs/data.csv' in uploaded, f'the refused object was never retried; got {uploaded}'
+    assert 'outputs/data.csv' in uploaded, f'the output never landed; got {uploaded}'
+
+    fresh = job.endpoint.token
+    for relpath in ('outputs/data.csv', contract.MARKER_FILENAME):
+        upload = job.endpoint.uploaded(relpath)
+        assert upload.token == fresh, (
+            f'{relpath!r} was uploaded with credential {upload.token!r}, not the live {fresh!r} — '
+            f'the step is still using the envelope it read at startup'
+        )
+
+
+@expected_red_until_fixed
+@traces_to(
+    'runners/credentials.py: the envelope carries "the moment all of that stops working" (expires_at) '
+    'and one presigned POST policy; agent/creds.py replaces creds.json atomically in the mounted '
+    'directory before expiry. A refusal is therefore recoverable in place — the live envelope is already '
+    'on disk — and a step that treats it as terminal throws away work that would have completed.'
+)
+def test_a_transfer_refused_on_an_expired_credential_is_repeated_after_re_reading(make_job, sample_input):
+    """The store took the body and then said no.
+
+    Setup:    one input. On the first upload the store reads the whole body, kills the
+              credential that was used, publishes a fresh ``creds.json``, and only then
+              answers 403.
+    Action:   run.
+    Validate: the step ends up with every object in place and exits 0. A 403 along the
+              way is fine — recovering from one is the whole point.
+
+    This is the case that a "check the expiry before you start" fix does not cover: the
+    envelope was valid when the request left, the bytes were transferred, and the refusal
+    arrives afterwards. The only correct response is to re-read the credentials file —
+    which by then holds a live envelope — and repeat the upload, which is safe because
+    the object is addressed by its own relpath.
+
+    Today the step reports the 403 as a PERMANENT failure, and then cannot write its
+    failure marker either, because that upload is refused for the same reason. The run
+    leaves nothing behind at all.
+    """
+    job = make_job(inputs=[sample_input])
+    job.endpoint.hooks.on_accepted.append(expire_and_refresh_when(matching('upload', index=1)))
+
+    result = job.run()
+
+    assert result.exit_code == 0, f'the step gave up on a mid-transfer expiry:\n{result.output}'
+    uploaded = job.endpoint.keys_in_order()
+    assert contract.MARKER_FILENAME in uploaded, f'nothing was completed; only {uploaded} landed'
+    assert 'outputs/data.csv' in uploaded, f'the refused object was never re-sent; got {uploaded}'
+    assert job.endpoint.uploaded('outputs/data.csv').token == job.endpoint.token, (
+        'the object landed under the dead credential, which this store would not have accepted'
+    )
+
+
+@expected_red_until_fixed
+@traces_to(
+    'runners/credentials.py: every input arrives as its own presigned GET inside ONE envelope, and the '
+    'envelope expires as a whole ("the moment all of that stops working"). agent/creds.py refreshes the '
+    'file before that moment, so a step that re-reads it keeps working through an expiry; one that does '
+    'not stops at whatever it reaches next.'
+)
+def test_the_work_remaining_after_an_expiry_is_still_done(make_job):
+    """An expiry part-way through a batch must cost the batch nothing.
+
+    Setup:    three inputs and a six-second envelope whose clock starts when the
+              container launches. The store holds the FIRST read open past the expiry
+              and publishes a fresh ``creds.json`` when it completes.
+    Action:   run.
+    Validate: all three inputs are fetched and all three copies land — counted as
+              DISTINCT objects, not as requests, so three retries of one input would not
+              satisfy it.
+
+    The single-input test above proves the step can recover; this one proves the recovery
+    is not a one-off. It is also the honest measure of what the defect costs: not "a
+    transfer failed" but "everything after the fifteen-minute mark did not happen".
+    """
+    job = make_job(
+        inputs=[
+            InputSpec(relpath='one.csv', data=b'1\n'),
+            InputSpec(relpath='two.csv', data=b'2\n'),
+            InputSpec(relpath='three.csv', data=b'3\n'),
+        ],
+        creds_ttl_s=SHORT_TTL_SECONDS,
+    )
+    job.endpoint.hooks.on_request.append(delay_when(matching('input', index=1), HELD_OPEN_SECONDS))
+    job.endpoint.hooks.on_responded.append(refresh_when(matching('input', index=1)))
+
+    result = job.run(timeout=120)
+
+    _assert_the_step_had_its_whole_credential_lifetime(job)
+    fetched = job.endpoint.names_of('input')
+    assert fetched == ['input/one.csv', 'input/two.csv', 'input/three.csv'], (
+        f'the step stopped after its envelope expired; it fetched {fetched}'
+    )
+    landed = [key for key in job.endpoint.keys_in_order() if key.startswith('outputs/')]
+    assert sorted(landed) == ['outputs/one.csv', 'outputs/three.csv', 'outputs/two.csv'], (
+        f'only {sorted(landed)} were copied'
+    )
+    assert result.exit_code == 0, f'the step did not survive its own credential expiry:\n{result.output}'
+    assert contract.MARKER_FILENAME in job.endpoint.keys_in_order()
+
+
+def _assert_the_step_had_its_whole_credential_lifetime(job) -> None:
+    """Fail with the right story if the CONTAINER, not the node, ran out of credential.
+
+    The lifetime here is six seconds and it starts when ``docker run`` returns, so the
+    step has to make its first request inside that. It does, comfortably — measured at
+    roughly a quarter of a second — but a badly overloaded machine could break that, and
+    the resulting 403 on ``invocation.json`` would look exactly like a node defect. This
+    says which it was instead of letting the next reader guess.
+    """
+    early = [rejection for rejection in job.endpoint.rejections if rejection.kind == 'manifest']
+    assert not early, (
+        f'the container took longer than the {SHORT_TTL_SECONDS}s credential lifetime to make its first '
+        f'request, so its manifest fetch was refused before the step could do anything: {early}. '
+        f'This run says nothing about the node — re-run it, and raise SHORT_TTL_SECONDS if it recurs'
+    )

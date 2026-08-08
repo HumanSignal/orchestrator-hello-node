@@ -38,6 +38,19 @@ class DockerUnavailable(RuntimeError):
     """No usable docker daemon. The harness refuses to run rather than simulate one."""
 
 
+class ContainerDidNotExit(AssertionError):
+    """The container was still running when the harness stopped waiting for it.
+
+    This is an ``AssertionError`` on purpose: it is a test FAILURE, never a quietly
+    tolerated condition. Docker reports ``State.ExitCode`` as ``0`` for a container that
+    has not exited yet, so a harness that shrugged at a timeout would read a hung
+    container as a step that finished successfully — and every test that inspects only
+    the exit code and the logs would pass vacuously. That is the single most dangerous
+    bug this harness can have, because it turns the whole baseline into fiction in the
+    direction of "the node is fine".
+    """
+
+
 def require_docker() -> None:
     """Fail loudly and early if there is no daemon. A faked container proves nothing."""
     if shutil.which('docker') is None:
@@ -87,9 +100,19 @@ def build_image(context: Path, *, dockerfile: str = 'Dockerfile') -> str:
     return inspect.stdout.strip()
 
 
+#: Docker's own words for "this container has not finished". ``ExitCode`` is meaningless
+#: — and usually ``0`` — while the state is one of these.
+UNFINISHED_STATES = ('created', 'running', 'restarting', 'paused', 'removing')
+
+
 @dataclass
 class RunResult:
-    """Everything the harness is allowed to know about a finished container."""
+    """Everything the harness is allowed to know about a finished container.
+
+    ``exit_code`` is ``None`` when the container had not exited when this was collected.
+    It is never a number in that case: docker would say ``0``, and a zero that means
+    "still working" is indistinguishable from a zero that means "finished cleanly".
+    """
 
     exit_code: int | None
     stdout: str
@@ -97,6 +120,7 @@ class RunResult:
     duration_s: float
     oom_killed: bool = False
     stopped_after_s: float | None = None
+    still_running: bool = False
 
     @property
     def output(self) -> str:
@@ -115,14 +139,27 @@ class Container:
     started_at: float
     _stopped_after: float | None = field(default=None, init=False)
 
-    def wait(self, timeout: float = 180.0) -> int | None:
+    def wait(self, timeout: float = 180.0) -> int:
+        """Block until the container exits and return its exit code.
+
+        Raises:
+            ContainerDidNotExit: It was still running when ``timeout`` ran out. Never
+                returns in that case — see the exception's own docstring for why a
+                tolerated timeout is the most dangerous bug this harness could have.
+        """
         deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
+        while True:
             state = self.inspect()
-            if state['Status'] not in ('created', 'running', 'restarting', 'paused', 'removing'):
+            if state['Status'] not in UNFINISHED_STATES:
                 return state['ExitCode']
+            if time.monotonic() >= deadline:
+                raise ContainerDidNotExit(
+                    f'container {self.name!r} was still {state["Status"]!r} after {timeout:.0f}s. '
+                    f'Docker reports ExitCode {state.get("ExitCode")!r} for a container in that state, '
+                    f'which is why this is an error rather than a result. Its output so far:\n'
+                    f'{"".join(self.logs())[-4000:]}'
+                )
             time.sleep(0.1)
-        return None
 
     def inspect(self) -> dict:
         out = subprocess.run(
@@ -144,15 +181,24 @@ class Container:
         return out.stdout, out.stderr
 
     def collect(self) -> RunResult:
+        """Everything observable about the container, right now.
+
+        A container that has NOT exited yields ``exit_code=None`` and
+        ``still_running=True``. Docker's ``State.ExitCode`` is ``0`` for a running
+        container, so reporting it verbatim would let a hung step be recorded as a
+        successful one — which is what this method used to do.
+        """
         state = self.inspect()
         stdout, stderr = self.logs()
+        running = state.get('Status') in UNFINISHED_STATES
         return RunResult(
-            exit_code=state.get('ExitCode'),
+            exit_code=None if running else state.get('ExitCode'),
             stdout=stdout,
             stderr=stderr,
             duration_s=time.monotonic() - self.started_at,
             oom_killed=bool(state.get('OOMKilled')),
             stopped_after_s=self._stopped_after,
+            still_running=running,
         )
 
     def remove(self) -> None:

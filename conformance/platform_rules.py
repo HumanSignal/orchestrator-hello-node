@@ -15,7 +15,41 @@ from __future__ import annotations
 import fnmatch
 import json
 
-from conformance.contract import PROGRESS_PREFIX
+from conformance.contract import INJECTED_ENV, PROGRESS_PREFIX
+
+
+class EnvRefused(Exception):
+    """The manifest asked for a variable the operator's allowlist does not permit."""
+
+
+def workload_env(fixed: dict[str, str], *, requested: list[str], allowlist: list[str], machine: dict[str, str]):
+    """The environment a workload container really gets, as ``agent/runner.py`` builds it.
+
+    Three properties, and only the third is obvious:
+
+    * a name outside the allowlist **fails the job**, visibly, rather than being skipped;
+    * a permitted name the agent's own machine does not have is simply absent — the
+      manifest names variables, the machine supplies values;
+    * **the job's own nine are applied LAST**, so a manifest that asks for
+      ``LSPO_EXECUTION_ID`` cannot shadow the real one. That ordering is the reason this
+      is modelled as a function rather than asserted as a constant: "nine variables" is
+      not the rule. The rule is "nine, plus whatever the manifest asked for and the
+      operator allowed, with the nine winning any collision".
+    """
+    refused = refused_env(requested, allowlist)
+    if refused:
+        raise EnvRefused(
+            f'the manifest asks this agent to inject environment variable(s) {refused}, which the '
+            f'allowlist does not permit (currently: {", ".join(allowlist) or "nothing"})'
+        )
+    env = {name: machine[name] for name in requested if name in machine}
+    env.update(fixed)
+    return env
+
+
+def fixed_env_names() -> tuple[str, ...]:
+    """The variables the agent sets for every job, whatever the manifest says."""
+    return INJECTED_ENV
 
 
 def refused_env(requested: list[str], allowlist: list[str]) -> list[str]:

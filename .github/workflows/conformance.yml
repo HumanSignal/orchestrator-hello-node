@@ -4,13 +4,18 @@ name: conformance
 # it. The harness needs a real docker daemon; it refuses to run rather than simulate a
 # container, because a harness that fakes the container proves nothing.
 #
-# WHY THIS IS GREEN TODAY. Twenty-three tests are known to fail against node.py as it
+# WHY THIS IS GREEN TODAY. Twenty-one tests are known to fail against node.py as it
 # stands (see CONFORMANCE-BASELINE.md). They carry the marker `expected_red_until_fixed`
 # and run as STRICT expected failures, so today's run is green with them reported as
-# `xfailed`. The moment somebody fixes one of those defects the test PASSES, strict xfail
-# turns the run RED, and the failure says which test to promote out of the expected-red
-# group. That is the signal this workflow exists for: it is not a gate on the node being
-# correct, it is a gate on the record of what is wrong staying accurate.
+# `xfailed`. The moment somebody fixes one of those the test PASSES, strict xfail turns
+# the run RED, and the failure says which test to promote out of the expected-red group.
+# That is the signal this workflow exists for: it is not a gate on the node being correct,
+# it is a gate on the record of what is wrong staying accurate.
+#
+# Ten of the twenty-one are contract violations, three are this repository's own
+# compatibility policy, and eight are reference-quality expectations the contract permits
+# a real node to skip. The per-basis counts are printed below, because that distinction is
+# what stops a documentation slice teaching a preference as a rule.
 
 on:
   push:
@@ -56,3 +61,16 @@ jobs:
             echo -n "$group: "
             python -m pytest --collect-only -q -m "$group" | tail -1
           done
+
+      - name: What the red tests actually claim
+        if: always()
+        # The distinction that keeps this harness honest: only `basis_contract` failures
+        # are conformance violations. The others are worth fixing and must never be
+        # written down as requirements — so they are counted separately, in the log,
+        # every run.
+        run: |
+          for basis in basis_contract basis_our_policy basis_reference_quality; do
+            echo -n "expected-red on $basis: "
+            python -m pytest --collect-only -q -m "expected_red_until_fixed and $basis" | tail -1
+          done
+          python -m pytest --collect-only -q --print-labels 2>/dev/null | grep -E '^expected_red' || true

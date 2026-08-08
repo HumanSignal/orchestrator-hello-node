@@ -1,27 +1,40 @@
 """Being asked to stop, mid-transfer, with thirty seconds to say something useful.
 
 When a run is cancelled — by a person, by a deadline, by the runner losing its lease —
-the agent calls ``docker stop``: SIGTERM, then SIGKILL **thirty seconds later**. Those
-thirty seconds are the step's entire opportunity to leave a record, and the contract is
-explicit about what to leave: a marker with ``status: "cancelled"``, inventorying
-whatever it managed to produce, and exit code 20.
+the agent calls its executor's ``stop``: SIGTERM, then SIGKILL **thirty seconds later**
+(``agent/executors/docker_exec.py``: ``def stop(self, handle, timeout: float = 30.0)``).
 
-Why it matters that a cancelled run still writes one: partial logs and partial outputs
-are exactly what somebody will want to look at afterwards, and the collector's salvage
-path can only publish what a marker names. A step that cannot be stopped converts
-"cancelled after twenty minutes of work" into "cancelled, nothing to see" — or worse,
-into "finished successfully" long after somebody pressed stop.
+**What is NOT at stake, contrary to what this file used to say.** The run is recorded as
+cancelled either way. ``agent/runner.py`` ``_classify`` asks whether cancellation was
+requested BEFORE it looks at the exit code::
+
+    if context.cancel_requested.is_set() or exit_code == EXIT_CANCELLED:
+        return 'cancelled', 'cancelled on request'
+
+so a step that ignores SIGTERM and is SIGKILLed still ends as ``cancelled``, not as a
+retry. Exit code 20 and a marker saying ``exit_code: 20`` are therefore NOT required, and
+the tests here no longer demand them. That was the harness inventing a rule.
+
+**What is genuinely at stake** is three things, none of them invisible:
+
+* **Thirty seconds of a runner slot, per cancelled job.** The grace period is paid in
+  full by a step that cannot be stopped. Cancel a batch of two hundred and that is over
+  an hour and a half of capacity spent on work somebody already said they did not want.
+* **A receipt that contradicts the record.** The step keeps working after the stop
+  request and writes ``status: "succeeded"``. The launch is cancelled; the document
+  inside it says the step finished its work. ``_step_account`` quotes that document into
+  what a human reads about the run.
+* **Work that was explicitly cancelled being done anyway** — every remaining input
+  fetched, copied and paid for after the request to stop.
 
 **A step must install a SIGTERM handler; it cannot rely on the default.** The step is
 PID 1 in its own container, and the kernel does not apply a signal's DEFAULT action to
-PID 1 at all — it delivers the signal only if a handler exists. So a program that
-handles nothing does not "die on SIGTERM": SIGTERM is dropped on the floor, the program
-carries on, and thirty seconds later SIGKILL ends it — which exits 137, a code the
-contract classifies as TRANSIENT, so a deliberately cancelled job is queued for retry.
+PID 1 — it delivers the signal only if a handler exists. So a program that handles
+nothing does not "die on SIGTERM": the signal is dropped on the floor and the program
+carries on.
 
-These tests are the slowest in the suite by design: each holds a transfer open, signals
-the container in the middle of it, and waits. The last one deliberately pays the full
-grace period, because that thirty seconds is the real cost of the defect.
+These tests are the slowest in the suite by design. The last one deliberately pays the
+full grace period, because that thirty seconds IS the finding.
 """
 
 from __future__ import annotations
@@ -31,7 +44,7 @@ import time
 from conformance import contract, docker
 from conformance.fakes3 import delay_when, matching
 from conformance.job import InputSpec
-from conformance.markers import expected_red_until_fixed
+from conformance.markers import expected_red_until_fixed, reference_quality
 
 #: Long enough that the signal lands squarely inside the transfer, short enough that a
 #: correct implementation finishes well inside the grace period.
@@ -47,18 +60,31 @@ THREE_INPUTS = [
     InputSpec(relpath='three.csv', data=b'three\n'),
 ]
 
+_COOPERATIVE_SHUTDOWN = (
+    'Cooperative shutdown is not a contract rule and this harness no longer pretends it is: '
+    'agent/runner.py _classify checks cancel_requested BEFORE the exit code, so a SIGKILLed cancelled '
+    'container is still recorded as cancelled, and external/contract.py makes exit_code and status '
+    '"cancelled" available without requiring them. It is a reference-quality expectation with a measured '
+    'price: the full 30s grace of a runner slot per cancelled job '
+    '(agent/executors/docker_exec.py stop(timeout=30.0)), and a marker claiming "succeeded" inside a '
+    'launch the orchestrator has recorded as cancelled.'
+)
+
 
 @expected_red_until_fixed
-def test_sigterm_during_a_download_leaves_a_cancelled_marker(make_job, sample_input):
+@reference_quality(_COOPERATIVE_SHUTDOWN)
+def test_a_step_stopped_during_a_download_does_not_claim_it_succeeded(make_job, sample_input):
     """Setup:    the store holds the first input's response open for twelve seconds.
-    Action:   wait until the request has arrived, then ``docker stop`` with the agent's
-              own thirty-second grace.
-    Validate: a ``cancelled`` marker is in the store and the step exited 20.
+    Action:   wait until the request has arrived, then stop the container with the
+              agent's own thirty-second grace.
+    Validate: the container stops well inside the grace, and whatever marker it leaves
+              does not say ``succeeded``.
 
     What happens today is not that the step dies without a marker — it is that nothing
     happens at all. SIGTERM is dropped (see the module docstring), the download
     completes, the step copies the file, writes ``result.json``, writes a marker saying
-    ``succeeded`` and exits 0. A run somebody cancelled is recorded as a success.
+    ``succeeded`` and exits 0. The run is recorded as cancelled, and the receipt inside
+    it says the work was finished.
     """
     job = make_job(inputs=[sample_input])
     job.endpoint.hooks.on_request.append(delay_when(matching('input', index=1), HELD_OPEN_SECONDS))
@@ -68,18 +94,21 @@ def test_sigterm_during_a_download_leaves_a_cancelled_marker(make_job, sample_in
     grace_used = container.stop(grace=docker.STOP_GRACE_SECONDS)
     result = container.collect()
 
-    _assert_cancelled_cleanly(job, result, grace_used)
+    _assert_stopped_cleanly(job, result, grace_used)
 
 
 @expected_red_until_fixed
-def test_sigterm_during_an_upload_leaves_a_cancelled_marker(make_job, sample_input):
+@reference_quality(_COOPERATIVE_SHUTDOWN)
+def test_a_step_stopped_during_an_upload_inventories_what_it_left_behind(make_job, sample_input):
     """Setup:    the store holds the FIRST upload open for twelve seconds.
-    Action:   wait until the upload has arrived, then ``docker stop``.
-    Validate: a ``cancelled`` marker, and exit 20.
+    Action:   wait until the upload has arrived, then stop the container.
+    Validate: it stops inside the grace, does not claim success, and the marker it leaves
+              inventories every object that actually landed.
 
-    Cancelling during a write is the harder half: the step has produced something, so
-    the marker it leaves is not merely a status — it is the inventory that decides
-    whether that work is salvaged or abandoned.
+    Cancelling during a write is the harder half: the step has produced something, so the
+    marker it leaves is not merely a status — it is the inventory that decides whether
+    that work is salvaged or abandoned (``_salvage_what_the_step_produced`` publishes
+    exactly what the marker names).
     """
     job = make_job(inputs=[sample_input])
     job.endpoint.hooks.on_request.append(delay_when(matching('upload', index=1), HELD_OPEN_SECONDS))
@@ -89,23 +118,30 @@ def test_sigterm_during_an_upload_leaves_a_cancelled_marker(make_job, sample_inp
     grace_used = container.stop(grace=docker.STOP_GRACE_SECONDS)
     result = container.collect()
 
-    _assert_cancelled_cleanly(job, result, grace_used)
+    _assert_stopped_cleanly(job, result, grace_used)
+    landed = [key for key in job.endpoint.keys_in_order() if key.startswith('outputs/')]
+    inventoried = {obj['relpath'] for obj in job.marker()['objects']}
+    assert set(landed) <= inventoried, (
+        f'{sorted(set(landed) - inventoried)} landed before the step stopped but its marker does not '
+        f'inventory them, so salvage will publish none of them'
+    )
 
 
 @expected_red_until_fixed
+@reference_quality(_COOPERATIVE_SHUTDOWN)
 def test_a_cancelled_step_stops_taking_on_new_work(make_job):
     """Cancellation has to change what the step does next, not just how it ends.
 
     Setup:    three inputs. The store holds the FIRST upload open for twelve seconds, so
               the step is mid-write with two inputs still unread when the signal lands.
     Action:   stop the container.
-    Validate: the second and third inputs are never fetched, and the marker says
-              ``cancelled`` while inventorying the object that did land.
+    Validate: the second and third inputs are never fetched.
 
     This is the test that separates "shuts down cleanly" from "ignores the request and
     happens to finish". Today the step reads and uploads all three inputs after being
     told to stop — the signal changes nothing at all — and the only reason the run ends
-    is that it ran out of work to do.
+    is that it ran out of work to do. Inputs are counted as DISTINCT objects rather than
+    as requests, so a step that retried one of them would not accidentally satisfy this.
     """
     job = make_job(inputs=THREE_INPUTS)
     job.endpoint.hooks.on_request.append(delay_when(matching('upload', index=1), HELD_OPEN_SECONDS))
@@ -115,30 +151,29 @@ def test_a_cancelled_step_stops_taking_on_new_work(make_job):
     container.stop(grace=docker.STOP_GRACE_SECONDS)
     result = container.collect()
 
-    assert job.endpoint.count_of('input') == 1, (
-        f'after being asked to stop, the step went on to fetch '
-        f'{job.endpoint.count_of("input")} of {len(THREE_INPUTS)} inputs; it exited {result.exit_code}'
+    fetched = job.endpoint.names_of('input')
+    assert fetched == ['input/one.csv'], (
+        f'after being asked to stop, the step went on to fetch {fetched} — {len(fetched)} of '
+        f'{len(THREE_INPUTS)} inputs; it exited {result.exit_code}'
     )
-    landed = [key for key in job.endpoint.keys_in_order() if key.startswith('outputs/')]
-    marker = job.marker()
-    assert marker['status'] == 'cancelled', f'the marker says {marker["status"]!r}'
-    assert set(landed) <= {obj['relpath'] for obj in marker['objects']}
 
 
 @expected_red_until_fixed
+@reference_quality(_COOPERATIVE_SHUTDOWN)
 def test_a_step_that_cannot_be_stopped_costs_the_whole_grace_period(make_job, sample_input):
     """The price of ignoring SIGTERM, measured.
 
     Setup:    the store holds the first upload open for longer than the grace period, so
               the step cannot finish its way out of the situation.
-    Action:   stop the container and time how long ``docker stop`` takes.
-    Validate: it returns well inside the thirty seconds, and the exit code is 20.
+    Action:   stop the container and time it.
+    Validate: it returns well inside the thirty seconds.
 
-    Today this test takes the full thirty seconds and then the container is SIGKILLed.
-    Two costs follow, and neither is visible from inside the step: a runner slot is held
-    for half a minute per cancelled job, and the exit code is 137 — which is not one of
-    the five the contract knows, so it classifies as TRANSIENT and the orchestrator
-    schedules a retry of work a human explicitly cancelled.
+    Today this takes the full thirty seconds and then the container is SIGKILLed. The
+    exit code that follows is 137, and this test deliberately does NOT assert anything
+    about it: the run is recorded as cancelled regardless, because the agent asks whether
+    cancellation was requested before it looks at any exit code. What is real is the
+    stopwatch — half a minute of a runner slot, per cancelled job, spent waiting for a
+    process that was never going to answer.
     """
     job = make_job(inputs=[sample_input])
     job.endpoint.hooks.on_request.append(delay_when(matching('upload', index=1), HELD_PAST_THE_GRACE))
@@ -152,24 +187,26 @@ def test_a_step_that_cannot_be_stopped_costs_the_whole_grace_period(make_job, sa
     assert grace_used < docker.STOP_GRACE_SECONDS - 1, (
         f'the step ignored SIGTERM: docker had to wait the full {docker.STOP_GRACE_SECONDS}s grace '
         f'({time.monotonic() - began:.1f}s measured) and then SIGKILL it. It exited {result.exit_code}, '
-        f'which classifies as {contract.classify_exit(result.exit_code)!r}'
+        f'and every cancelled job costs that same half minute of a runner slot'
     )
-    assert result.exit_code == contract.EXIT_CANCELLED
 
 
-def _assert_cancelled_cleanly(job, result, grace_used: float) -> None:
+def _assert_stopped_cleanly(job, result, grace_used: float) -> None:
+    """The two things a stopped step owes: a prompt exit, and no false claim of success.
+
+    Deliberately silent about the exit CODE and about the marker's ``exit_code`` field.
+    Exit 20 is available (``EXIT_CANCELLED``) and is the clearest thing to return, but
+    the platform does not need it: the launch is already known to be cancelled.
+    """
+    assert grace_used < docker.STOP_GRACE_SECONDS - 1, (
+        f'the container had to be SIGKILLed after the full {docker.STOP_GRACE_SECONDS}s grace '
+        f'({grace_used:.1f}s); it exited {result.exit_code}'
+    )
     uploaded = job.endpoint.keys_in_order()
-    assert contract.MARKER_FILENAME in uploaded, (
-        f'the step was stopped and left no marker; the store saw {uploaded or "nothing"}. '
-        f'It exited {result.exit_code}, which classifies as {contract.classify_exit(result.exit_code)!r}'
+    if contract.MARKER_FILENAME not in uploaded:
+        return  # stopped before it could write one: no false claim, nothing to check
+    status = job.marker()['status']
+    assert status != 'succeeded', (
+        f'the step was asked to stop and its marker says {status!r} — the launch is recorded as '
+        f'cancelled, and the receipt inside it claims the work was finished'
     )
-    marker = job.marker()
-    assert marker['status'] == 'cancelled', (
-        f'the step was asked to stop and its marker says {marker["status"]!r} — the request changed nothing'
-    )
-    assert result.exit_code == contract.EXIT_CANCELLED, (
-        f'exit {result.exit_code} classifies as {contract.classify_exit(result.exit_code)!r}, '
-        f'not {contract.CLASS_CANCELLED!r}'
-    )
-    assert marker['exit_code'] == contract.EXIT_CANCELLED
-    assert grace_used < docker.STOP_GRACE_SECONDS - 1, 'the container had to be SIGKILLed'
