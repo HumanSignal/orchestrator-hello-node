@@ -1,14 +1,15 @@
 # PROTOCOL: the contract, in the order one attempt happens
 
-This is the normative document. It follows the life of a single container attempt:
-bootstrap, inputs, work, outputs, the completion marker, and how the attempt ends.
+This preamble is **background**. What follows is the normative document, and it follows the
+life of a single container attempt: bootstrap, inputs, work, outputs, the completion
+marker, and how the attempt ends.
 
 Every statement is labelled **RULE** (the platform refuses or fails the run),
 **BEHAVIOUR** (what the platform does, which you must plan for) or **RECOMMENDATION**
 (what a good node does; the platform permits otherwise). Unlabelled text is background.
 
-Values are literal and were verified against the orchestrator at commit
-`6b2ff82c70f26d0ceaa1a841137f1b3cfb08186b`. Source paths appear after a value as
+Also **background**: values here are literal and were verified against the orchestrator at
+commit `6b2ff82c70f26d0ceaa1a841137f1b3cfb08186b`, and source paths appear after a value as
 provenance.
 
 ---
@@ -656,8 +657,9 @@ the local mode genuinely testable.
 (`lspo/settings/base.py:575`), clamped so that it never outlives the job's own runtime
 deadline (`runners/credentials.py:216-219`).
 
-**A node that reads its credentials once cannot upload its outputs, or its own completion
-marker, after about fifteen minutes.** This is the most common way a working node fails on
+**BEHAVIOUR, and it is the failure this whole section exists for. A node that reads its
+credentials once cannot upload its outputs, or its own completion marker, after about
+fifteen minutes.** This is the most common way a working node fails on
 its first long job — but only on a job that is *allowed* to be long. Section 2.4 has the
 arithmetic: a node registered the default way is given a 900-second runtime budget, the
 same 900 seconds the credentials last, so the two expire together and the container is
@@ -745,8 +747,9 @@ delivered.
 
 ## 5. The completion marker
 
-`__lspo_complete.json`, written into the **root** of your staging prefix. It is the
-terminal receipt for the attempt.
+**BEHAVIOUR.** The marker is `__lspo_complete.json`, read from the **root** of your staging
+prefix — collection joins that prefix to the literal filename and reads whatever is there
+(`external/io.py:221-229`). It is the terminal receipt for the attempt.
 
 ```json
 {
@@ -800,8 +803,9 @@ receipt from a superseded or unrelated run must never be collected as this one".
 **RULE.** Every relpath in `produced_ports` must appear in `objects`
 (`external/contract.py:582-606`). The inventory is what carries the hash and the size.
 
-**RULE.** Within one port a relpath may appear only once. The **same relpath in two
-different ports is legal** and is sometimes what you want.
+**RULE.** Within one port a relpath may appear only once; the parser refuses a repeat
+(`external/contract.py:594-605`). The **same relpath in two different ports is legal** and
+is sometimes what you want.
 
 **RULE.** Relpaths in `objects` are globally unique across the whole inventory
 (`external/contract.py:571-579`). One file, one entry.
@@ -849,8 +853,9 @@ itself states it as an instruction to you — "the step writes it **strictly las
 order for the one node it ships (`tests/test_hello_node_example.py:107-115`). Neither of
 those is a check on *your* node.
 
-**A general lesson, worth more than this one rule.** An instruction written in a source
-file, however emphatic, is not an enforced rule. It is a statement of intent by whoever
+**A general lesson, worth more than this one rule — and it is background, about how to read
+these documents rather than about the platform.** An instruction written in a source file,
+however emphatic, is not an enforced rule. It is a statement of intent by whoever
 wrote that file. The only things that can refuse you are the checks named in this document
 under **RULE**, and when you are deciding what your node must do, "the code says to" and
 "the platform will stop me" are different facts with different consequences. This
@@ -873,6 +878,14 @@ it and collection reads it: your `error` and `exit_code` become the execution's 
 reason, and every object you inventoried is salvaged through the same verified path
 (`external/README.md`, "A failed or cancelled marker is read, not discarded"). It is not
 required, and a failing node that writes nothing loses all of that.
+
+**BEHAVIOUR, and it decides when the recommendation above actually pays.** That marker is
+read on every path where your own terminal report is what ends the job: a failure of your
+own, a container stopped by the **runtime deadline**, and a cancellation your node declared
+itself by exiting 20 without being asked. It is **not** read when an **operator** cancels
+the run, because the platform has already ended the job before your report arrives — see
+section 7. Write the marker anyway; it costs one document and it is what makes the first
+three cases recoverable.
 
 **BEHAVIOUR, and a quiet way to lose everything.** A failed or cancelled marker is held to
 the same identity check and the same document rules. "Best effort" applies to which objects
@@ -924,9 +937,29 @@ have worked.
 
 ## 7. Cancellation
 
-**BEHAVIOUR.** When a run is cancelled, the agent asks docker to stop your container:
-SIGTERM, then SIGKILL after **30 seconds** (`agent/executors/docker_exec.py:405-415`, the
-default timeout, which the caller does not override).
+**BEHAVIOUR, and it is the first thing to know here, because the natural guess is wrong.**
+Two different events stop a container that has not finished, and they do not behave alike.
+The **runtime deadline** is a polite stop every time: SIGTERM, then SIGKILL thirty seconds
+later. An **operator pressing Cancel** usually is not: in the ordinary case your container
+is killed outright, with no signal it can catch and no opportunity to write anything.
+Which of the two a cancellation turns out to be is decided by a race that nothing in your
+node can influence. Both are set out below; a third way to be stopped, fencing, is section
+7.1.
+
+**BEHAVIOUR, the dependable polite stop: the runtime deadline.** When the deadline passes
+the agent asks docker to stop your container — SIGTERM, then SIGKILL after **30 seconds**
+(`agent/runner.py:2317-2324` calling `agent/executors/docker_exec.py:405-415`, the default
+timeout, which the caller does not override). Nothing has to arrive from anywhere for this
+to happen: the agent watches the clock itself, in the same loop that waits for your
+container, so it fires even when the orchestrator is unreachable.
+
+**BEHAVIOUR.** A container stopped for its deadline is classified `failed`, not
+`cancelled`, and that question is asked before your exit code is looked at
+(`agent/runner.py:2332-2333`), so nothing your process exits with can turn it into a
+cancellation. On a default registration the deadline is the fifteen-minute mark; see
+section 2.4. **The marker you manage to write on the way out is read**: its `error` becomes
+the execution's failure reason and its inventoried objects are salvaged (section 8). This
+is the path on which a SIGTERM handler pays for itself in full.
 
 **BEHAVIOUR, and this one is measured rather than assumed.** Your program almost certainly
 runs as **PID 1** inside its container: the agent overrides neither the entrypoint nor the
@@ -936,11 +969,11 @@ key), so an exec-form `ENTRYPOINT` makes your process number 1. This is where an
 system property bites: Linux gives process 1 no default signal dispositions, so SIGTERM is
 discarded unless you installed a handler for it. That is a kernel rule rather than
 something the platform does, so it is stated here as a fact about Linux and not as a
-citation of our code. A node that installs no handler does not die on cancellation. It
-**ignores the request entirely**, finishes the whole batch, and writes a `succeeded`
-marker after a human pressed stop, unless the work outlasts the 30 second grace, at which
-point it is killed outright. This was measured by adding a one-line handler to the example
-image, after which it exited at once.
+citation of our code. A node that installs no handler does not die when it is asked to
+stop. It **ignores the request entirely**, finishes the whole batch, and writes a
+`succeeded` marker after the platform asked it to stop, unless the work outlasts the 30
+second grace, at which point it is killed outright. This was measured by adding a one-line
+handler to the example image, after which it exited at once.
 
 **BEHAVIOUR.** The platform's classification is authoritative and it asks "was
 cancellation requested?" **before** it looks at your exit code
@@ -952,47 +985,109 @@ vanish, and only then the exit code's own class. (The second of those is a speci
 a forced agent exit nothing is reported at all, because the agent leaves your container
 running for its successor to adopt rather than ending the job — see section 7.1.)
 
-**BEHAVIOUR, and it is why your SIGTERM handler earns its keep twice.** The runtime
-deadline is **not** an immediate kill either. When the deadline passes the agent asks
-docker for exactly the same polite stop cancellation uses — SIGTERM, then SIGKILL after the
-same **30 seconds** (`agent/runner.py:2317-2324` calls the same
-`agent/executors/docker_exec.py:405-415`). At the signal level the two are
-**indistinguishable**: your process cannot tell "a human pressed stop" from "your fifteen
-minutes are up", and it does not need to — the right response to both is to stop, write a
-marker, and exit.
+**BEHAVIOUR, and here is why operator cancellation is different from the deadline.** When
+an operator presses Cancel on a step that is running on a runner, the orchestrator does not
+merely ask your container to stop. In **one database transaction** it raises a cancel flag
+the agent can read, moves the **launch** — the platform's record that this agent holds this
+job — to a terminal state, and finishes the execution as cancelled
+(`pipelines/cancellation.py:87-119`, `:299-350`). All three land together, so there is no
+moment at which the flag is visible and the job is still live.
 
-**BEHAVIOUR.** What differs is the label the platform puts on it. A container stopped
-because its runtime deadline passed is classified `failed`, not `cancelled`, and that check
-comes first (`agent/runner.py:2332-2333`), so nothing your process exits with can turn it
-into a cancellation. On a default registration that is the fifteen-minute mark; see section
-2.4. The marker you manage to write on the way out is still read: its `error` becomes the
-execution's failure reason and its inventoried objects are salvaged (section 8).
+**BEHAVIOUR.** The only channel that reaches a process on somebody else's machine is the
+answer to the agent's **heartbeat**, which carries a `cancel` flag
+(`runners/reports.py:210-217`); on seeing it the agent asks docker for the same polite stop
+the deadline uses (`agent/runner.py:2500`, `:2528-2536`). But a heartbeat is answered at
+all only if it can first renew the job's lease, and a lease cannot be renewed on a launch
+that has gone terminal — such a heartbeat is refused with `lease_lost`
+(`runners/reports.py:188`, `:294-316`).
 
-**RECOMMENDATION.** Handle cancellation, in this shape:
+**BEHAVIOUR, and this is the consequence.** The agent's response to `lease_lost` on a
+heartbeat is not a polite stop. It **fences** the job: one SIGKILL, no SIGTERM, no grace
+period, and no terminal report at all (`agent/runner.py:2465-2466`, then `:2553-2589`
+calling `agent/executors/docker_exec.py:417-440` — it is the last row of the table in
+section 7.1).
+
+**BEHAVIOUR, so cancellation is a race, and the odds are against the polite path.** For the
+cooperative stop to happen, a single heartbeat has to straddle the cancelling transaction
+exactly: renew its lease **before** that transaction commits and read the cancel flag
+**after** it, which is possible only because the flag is read after the renewal and outside
+its transaction (`runners/reports.py:188-212`). A heartbeat that begins a moment later is
+refused and fences instead. A heartbeat that finishes a moment earlier is answered `cancel:
+false`, and then the *next* one — up to a full interval later — is the one that gets
+refused. Heartbeats are **20 seconds** apart by default (`agent/config.py:123`) and each is
+a single HTTP request, so that window is a small fraction of the interval. **The ordinary
+outcome of pressing Cancel is that your container is killed outright.**
+
+**BEHAVIOUR.** There is a second, slower route to the same kill. The agent periodically
+re-reads the orchestrator's list of jobs assigned to it and fences everything the list does
+not name (`agent/runner.py:1112-1163`), and a cancelled launch has already dropped off that
+list (`runners/claim.py:804-817`). That fence is also a SIGKILL, though it keeps permission
+to report. It runs on a **120 second** timer by default (`agent/config.py:124`), so it
+normally arrives long after the heartbeat has fenced the job.
+
+**RECOMMENDATION, worth building even though it is not guaranteed to run.** Handle a stop
+request, in this shape:
 
 1. Install a SIGTERM handler that sets a flag. Do not do the work in the handler.
 2. Have your normal control flow check the flag between units of work, and stop.
 3. Keep the inventory of what you already uploaded (see the next point).
 4. Re-read your credentials, write a `cancelled` marker **last**, and exit 20.
 
+**BEHAVIOUR, and it is what that handler is actually worth.** On the **deadline** path
+everything the handler does is collected: the marker is read, its `error` becomes the
+failure reason, its objects are salvaged. On an **operator cancellation** none of it is —
+see the next statement. So write the handler for the deadline, for the narrow cancellation
+window, and so that a stopped container stops rather than churning through work nobody
+wants; not because a cancelled run will deliver its partial output.
+
+**BEHAVIOUR, and it is the second surprise in this section.** An operator cancellation
+**never collects your marker or your objects**, on either branch of the race above.
+Collection is armed by the agent's terminal report, and only when that report is the thing
+that ends the launch (`runners/reports.py:428-436`). After a cancellation the launch is
+already terminal, so a report arriving afterwards is answered "already finished" and arms
+nothing (`runners/reports.py:389-390`, `:482-499`). The periodic sweep that rescues
+interrupted collections does not reach this case either: its scans skip a terminal attempt
+and require a non-terminal execution, and the cancelling transaction makes both terminal at
+once (`pipelines/external_finalize.py:513-540`). The collector's own source says it in as
+many words — "A direct cancellation never reaches collection"
+(`pipelines/external_finalize.py:2488-2497`).
+
+**BEHAVIOUR.** So a node that receives the SIGTERM in the narrow window, stops cleanly,
+writes a valid `cancelled` marker inventorying everything it had uploaded, and exits 20,
+has that marker read by nobody. Its objects stay in a staging area that expires.
+
+**BEHAVIOUR.** What an operator cancellation does keep is your **log**. The lines your
+container streamed are written to durable storage and onto the execution before the live
+buffer is dropped (`pipelines/external_finalize.py:2488-2537`, called from
+`pipelines/cancellation.py:180-189`). That is the whole of what survives a cancellation.
+
+**BEHAVIOUR, the one exception, and it is not about a running node.** If the cancellation
+arrives while collection is **already under way** — your container has exited and reported,
+and the platform is part-way through copying its objects — the collection is deliberately
+allowed to finish, and what it verified is attached to the cancelled execution as
+diagnostics carrying no output port (`pipelines/cancellation.py:313-318`,
+`pipelines/external_finalize.py:1932-1999`). Nothing downstream receives it. Your process is
+long gone by then, so there is nothing here for your node to do.
+
 **RECOMMENDATION.** Reserve part of the 30 second grace for step 4, and make sure your
 network calls cannot swallow it. A cooperative flag cannot be checked while you are
-blocked in a socket read: a 120 second read timeout against a 30 second grace means
-cancellation during a transfer produces neither a marker nor any salvage. Use timeouts and
+blocked in a socket read: a 120 second read timeout against a 30 second grace means a stop
+that lands during a transfer produces neither a marker nor any salvage. Use timeouts and
 chunk sizes well under the grace period.
 
 **RECOMMENDATION, and this one decides whether partial work survives at all.** Accumulate
-your object inventory somewhere the failure and cancellation paths can still see it, not
-in a local variable of the function that does the work. Salvage publishes **only what the
-marker inventories** (`pipelines/external_finalize.py:1523-1581`). A node that uploads
-three objects, fails on the fourth, and then writes a marker with an empty inventory has
-left those three objects in a staging area that expires, and nothing will ever collect
-them.
+your object inventory somewhere the failure and stop paths can still see it, not in a local
+variable of the function that does the work. On every path where salvage happens — your own
+failure, the runtime deadline, a cancellation you declared yourself — it publishes **only
+what the marker inventories** (`pipelines/external_finalize.py:1523-1581`). A node that
+uploads three objects, fails on the fourth, and then writes a marker with an empty
+inventory has left those three objects in a staging area that expires, and nothing will
+ever collect them.
 
 ### 7.1 Fencing: the stop with no grace period at all
 
-Cancellation and the runtime deadline are the polite paths — SIGTERM, then thirty seconds.
-There is a third, and it is not polite.
+**BEHAVIOUR.** The runtime deadline is a polite stop, and cancellation sometimes is. There
+is a third way your container is stopped, and it is never polite.
 
 **BEHAVIOUR.** On the second path your container is **killed outright** — one SIGKILL, no
 SIGTERM first, no thirty seconds, no opportunity to write anything
@@ -1004,9 +1099,18 @@ into one output area.
 **BEHAVIOUR.** There are six triggers, and they do **not** all have the same consequence.
 What separates them is whether the agent still has the standing to say how the job ended:
 some fences take the *work* away while leaving the agent's own credential valid, and on
-those the terminal report still goes out, which is what lets collection run at all.
+those the agent still sends a terminal report, which is what lets collection run at all.
 
-| What happened | Container | Is the outcome reported? |
+**BEHAVIOUR, and read the last column literally.** "Yes" means only that the agent
+**retains permission to attempt a report**. It does not mean the report is accepted, and it
+does not by itself mean anything is collected. The completion endpoint is fenced by lease
+id and session epoch and answers 409 to an agent that has been superseded
+(`runners/reports.py:391-403`), and a report arriving after the launch has already gone
+terminal by some other route is answered "already finished" and arms no collection at all
+(`runners/reports.py:389-390`, `:482-499`). "No" is unambiguous; "Yes" is a permission
+rather than an outcome.
+
+| What happened | Container | May the agent still report? |
 |---|---|---|
 | The orchestrator became unreachable and the job's lease ran out (`agent/runner.py:2538-2551`) | SIGKILL | **No.** There is nobody reachable to tell |
 | The job stopped being listed as assigned to this agent — revoked, or its launch already went terminal elsewhere (`agent/runner.py:1112-1163`) | SIGKILL, delivered a moment later by the sweep that matches containers by name, or by the start path if no container exists yet | **Yes**, deliberately: the report is what frees the job's capacity slot |
@@ -1031,18 +1135,25 @@ this attempt had already recorded**, if one was in the staging area when the kil
 and nothing else: collection reads that marker, checks that its `execution_id`, `attempt` and
 `generation` name this attempt and not a superseded one, and then copies and verifies every
 object it inventories, keeping what verifies (`pipelines/external_finalize.py:1459-1482`,
-`:1523-1581`). On the three fences that still report, that collection happens immediately.
-On the three that do not, nothing happens at all until an operator cancels the execution —
-there is no watchdog today ([OPERATIONS.md](OPERATIONS.md#residual-limits-stated-plainly))
-— and then the same collection runs.
+`:1523-1581`). On the three fences whose report is accepted, that collection happens
+immediately.
 
-**So the summary is narrower than "everything is lost", and for a well-behaved node it
-usually amounts to the same thing.** If you follow the strongest recommendation in this
-document and write your marker last, then when a fence lands mid-run there is no marker,
-and nothing you produced is collected. The salvage path is not dead code — it is what
-recovers the work of a node that failed or was cancelled and wrote a marker on its way out
-(section 5) — it simply has nothing to read after a SIGKILL that arrived first. What is
-never true is that a fence gives your process a chance to react.
+**BEHAVIOUR, and it is worse than the previous paragraph sounds.** On the fences that
+report nothing, **nothing is ever collected**. There is no watchdog
+([OPERATIONS.md](OPERATIONS.md#residual-limits-stated-plainly)), so the execution simply
+stays parked at "Waiting for runner" until an operator cancels it — and cancelling does not
+run collection either (section 7): it writes the log down and finishes the run. Whatever
+your container had already uploaded, and any marker it had already written, are left in a
+staging area that expires.
+
+**BEHAVIOUR, so the summary is narrower than "everything is lost", and for a well-behaved
+node it usually amounts to the same thing.** If you follow the strongest recommendation in
+this document and write your marker last, then when a fence lands mid-run there is no
+marker, and nothing you produced is collected. The salvage path is not dead code — it is
+what recovers the work of a node that failed, or hit its deadline, or stopped itself, and
+wrote a marker on the way out (section 5) — it simply has nothing to read after a SIGKILL
+that arrived first. What is never true is that a fence gives your process a chance to
+react.
 
 **RECOMMENDATION.** Do not design a node whose entire output appears in its last minute.
 Nothing you can write survives a SIGKILL, so the only defence is to have less at risk when
@@ -1073,11 +1184,12 @@ staging is a statement about the past.
 (`pipelines/external_finalize.py:1002-1007`, `:1326-1348`). A partial delivery is worse
 than a failed one, because nothing downstream can tell which it got.
 
-**BEHAVIOUR, on a failed or cancelled run.** The same copy and verify runs per object, and
-whatever verifies is kept while the rest is dropped with a log line
-(`pipelines/external_finalize.py:1523-1581`). Salvaged objects are attached to the
+**BEHAVIOUR, on a failed or cancelled run — when collection runs at all.** The same copy
+and verify runs per object, and whatever verifies is kept while the rest is dropped with a
+log line (`pipelines/external_finalize.py:1523-1581`). Salvaged objects are attached to the
 execution as diagnostics: they carry no output port and are not offered to any downstream
-step.
+step. Section 7 says which endings reach this path: an operator's cancellation does not,
+and neither do three of the six fences.
 
 **BEHAVIOUR.** Each delivered object becomes one downstream artifact whose kind is the
 **output port name** you delivered it through (`pipelines/external_finalize.py:2057`). A

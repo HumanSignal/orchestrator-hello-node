@@ -10,7 +10,7 @@ whatever the container declares it produced.
 **`node.py` is a demonstration of the happy path and it has known defects.** It reads the
 wrong environment variable for its credentials, reads them only once (so a run longer than
 about fifteen minutes can upload nothing at all), buffers whole objects in memory, loses
-the inventory of what it already produced when it fails, and ignores cancellation
+the inventory of what it already produced when it fails, and ignores stop signals
 entirely. Copying it and editing it gives you a node with all of those problems.
 
 The correct shape is in [docs/AUTHORING.md](docs/AUTHORING.md#the-skeleton), and the full

@@ -1,8 +1,7 @@
 # Writing an external node
 
-An **external node** is a pipeline step that runs as **your container, on your machine**.
-
-**BEHAVIOUR, and it is the whole shape of the thing.** The orchestrator never sees your
+**BEHAVIOUR, and it is the whole shape of the thing.** An **external node** is a pipeline
+step that runs as **your container, on your machine**. The orchestrator never sees your
 code. It sees an image digest, writes a job description and short-lived credentials where
 your container can read them, starts the container through an agent process you run, and
 then collects whatever the container says it produced.
@@ -16,9 +15,10 @@ provenance, after the value, never instead of it.
 
 ## How to read this: three kinds of statement
 
-Every normative sentence in these documents is labelled. The labels are not decoration.
-Treating a recommendation as a rule produces code that is wrong in a different direction,
-which is exactly as expensive as breaking a rule.
+This whole section is **background**: it is about how to read these documents, and imposes
+nothing on your node. Every normative sentence in them is labelled, and the labels are not
+decoration. Treating a recommendation as a rule produces code that is wrong in a different
+direction, which is exactly as expensive as breaking a rule.
 
 | Label | What it means |
 |---|---|
@@ -85,7 +85,7 @@ own label.
 | Every field of the completion marker | [PROTOCOL.md](PROTOCOL.md#5-the-completion-marker) |
 | What happens if my credentials expire mid-run | [PROTOCOL.md](PROTOCOL.md#43-credentials-expire-during-your-run) |
 | Which exit code to return | [PROTOCOL.md](PROTOCOL.md#6-exit-codes) |
-| What happens when someone presses Cancel | [PROTOCOL.md](PROTOCOL.md#7-cancellation) |
+| What happens when someone presses Cancel, and why it is usually not a polite stop | [PROTOCOL.md](PROTOCOL.md#7-cancellation) |
 | Why my container was killed with no warning at all | [PROTOCOL.md](PROTOCOL.md#71-fencing-the-stop-with-no-grace-period-at-all) |
 | How my logs reach the run view, and what is lost | [PROTOCOL.md](PROTOCOL.md#33-logging) |
 | How to report progress | [PROTOCOL.md](PROTOCOL.md#34-progress) |
@@ -119,7 +119,7 @@ reports it.
 | `result.json` as metrics | Yes, `ResultDoc` with `metrics` and `summary` | not applicable | **No. Nothing ever reads it.** Run metrics come from the marker inventory |
 | `logs.ndjsonl` written by your step | Invited by the contract | not applicable | Published only if you also list it in the marker's `objects` |
 | Progress reporting | Yes, one stdout line per sample | not applicable | **Yes**, shown live in the run view |
-| Cancellation with exit code 20 | Yes | not applicable | **Yes**, though the platform does not need your exit code to call a run cancelled |
+| Cancellation with exit code 20 | Yes | not applicable | **Only sometimes.** A `cancelled` marker is read and salvaged when your own report is what ends the job. When an **operator** cancels, nothing you wrote is collected at all — see [PROTOCOL.md](PROTOCOL.md#7-cancellation) |
 | Automatic retry of a failed attempt | Exit code 1 means "retry me" | not applicable | **No.** Nothing re-attempts an external job automatically. An operator retries by hand |
 
 ---
@@ -146,11 +146,14 @@ Dockerfiles that fix the container user.
 
 **What was executed rather than read.** Four things, all at the commit above:
 
-1. **The offline example was run.** The fixture in
+1. **The offline example was run, both ways.** The fixture in
    [CONFORMANCE.md](CONFORMANCE.md#level-1-run-it-with-a-hand-written-envelope) was built,
-   the command was run against this repository's `node.py`, and the output and the three
-   files shown there are what it produced. It was also run *without* the compatibility
-   variable, to confirm the failure that made the second one necessary.
+   and the two commands there were each run against this repository's `node.py`. Run A,
+   which sets the obsolete credentials variable alongside the real one, printed the two
+   lines shown and left the three files shown, exiting 0. Run B, which sets only the
+   variable the platform really sets, failed exactly as shown — an uncaught traceback and
+   exit 1, with the staging directory left empty. Both transcripts in that document are
+   verbatim.
 2. **Every marker refusal was enumerated by exercising the parser**, not written from
    memory. A harness read the parser's own model definition, listed every field it declares
    and every cross-field check it runs, then fed it about ninety mutated markers one at a
@@ -170,12 +173,42 @@ this**, so everything about the agent's behaviour, the storage service and colle
 read from source and reasoned about, not measured. Where a statement rests on a
 measurement somebody made earlier, it says so at the point it is made.
 
-**The labelling was checked mechanically, not by eye.** A script walked all five documents
-and, applying the scoping rule above, reported every paragraph and every table that carries
-no label and sits under none. Each one was then judged individually: label it, or confirm it
-is genuinely background and say so in the text. The finished set reports **zero** unlabelled
-normative statements and **zero** unlabelled tables, and every table is governed by a label
-in its own introducing sentence rather than by a distant one.
+**The labelling was checked mechanically, not by eye — and the checker itself had to be
+rewritten first.** The earlier version reported zero while four real gaps sat in the
+documents, because it only looked for a label when a paragraph contained a modal verb
+("must", "never", "should"). That exempted every imperative ("Build in this order") and
+every plain statement of fact about the platform ("Your node receives a list of input
+objects on a single port"), which are the two commonest shapes a normative sentence takes
+here. The replacement runs three checks over all five documents:
+
+* **coverage** — every paragraph, list and table must either open with a label or sit under
+  one, with a heading resetting the scope. The only escape is saying, in the text, that the
+  block or its section is background. Nothing is exempted for lacking a modal verb;
+* **the label must open the block**, so that prose merely mentioning the word
+  "RECOMMENDATION" no longer opens a scope over everything after it;
+* **the label must be the right one.** A **RULE** has to name a check — a source citation or
+  an explicit refusal — somewhere in the statement it governs. What the platform *accepts*
+  is BEHAVIOUR, not RULE, and what your *test* has to do is a RECOMMENDATION. Both were
+  being written as rules.
+
+A fourth report is advisory: a paragraph that inherits a label from the one before it while
+opening with its own bold lede, which is how a stale label came to govern a run of
+checklist section headings.
+
+**What it still cannot see, stated plainly.** A label carries until the next label or the
+next heading, so a paragraph that directly continues a labelled statement is legitimately
+covered — and a label deleted from such a paragraph produces a document that still passes.
+Narrowing the carry to lists and tables was tried and rejected: it flagged 56 blocks, nearly
+all of them genuine continuations, and a check nobody reads is not a check.
+
+**The checker was itself mutation-tested**, because a labelling checker that cannot fail is
+the same defect it exists to find. Five defects were injected into the corrected documents,
+which otherwise score zero on every count: four were caught, and the fifth is the residual
+named above. Run against the documents *before* this round's corrections, it reproduces all
+four of the gaps that round found by hand.
+
+The finished set reports **zero** uncovered blocks, **zero** mislabelled ones and **zero**
+inherited ledes.
 
 There is no generated reference bundle yet, so there is no `REFERENCE.md`. The tables in
 [PROTOCOL.md](PROTOCOL.md) are hand-verified against the commit above and nothing checks
@@ -186,7 +219,8 @@ a disagreement, that is a bug in this document set, and it is worth reporting.
 
 ## A warning about the code in this repository
 
-`node.py` at the repository root is a **demonstration, not a model of correctness**. It
-has several known defects, listed in [AUTHORING.md](AUTHORING.md#known-gaps-in-nodepy),
-and it is being repaired separately. Where these documents show a shape and `node.py`
-differs, these documents are the correct one.
+This section is **background**, about one file in this repository. `node.py` at the
+repository root is a **demonstration, not a model of correctness**. It has several known
+defects, listed in [AUTHORING.md](AUTHORING.md#known-gaps-in-nodepy), and it is being
+repaired separately. Where these documents show a shape and `node.py` differs, these
+documents are the correct one.

@@ -1,24 +1,30 @@
 # CONFORMANCE: testing a node, and what a test can prove
 
-Three levels, each cheap and each proving something the one before it does not. Then a
-section on what none of them proves, which matters more than it sounds: a suite that
-claims more than it establishes teaches wrong code onward.
+This preamble is **background** — it is about this document. Three levels follow, each
+cheap and each proving something the one before it does not, and then a section on what
+none of them proves, which matters more than it sounds: a suite that claims more than it
+establishes teaches wrong code onward.
 
 Labels as elsewhere — **RULE**, **BEHAVIOUR**, **RECOMMENDATION** — and each one governs
 the statement it opens, including any list or table that continues it, until the next
-label or the next heading. The paragraph you are reading now carries none, and that is the
-convention working: it describes this document rather than the platform. See
+label or the next heading. The paragraph you are reading now is **background**, and that is
+the convention working: it describes this document rather than the platform. Two other
+kinds of paragraph here are background for the same reason and carry no label: the ones
+headed *What ... proves* / *What it does not prove* and the ones saying how a list here was
+produced or how complete it is, which are about the method and the evidence rather than
+about the platform; and the captions that introduce a fixture or a command. See
 [README.md](README.md#how-to-read-this-three-kinds-of-statement).
 
 ---
 
 ## Level 1: run it with a hand-written envelope
 
-No orchestrator, no network, no docker. Build the fixture, write the two documents by
-hand, and run your program. Everything below is literal: copy it, run it, and it works.
+**RECOMMENDATION, for this whole section.** No orchestrator, no network, no docker: build
+the fixture, write the two documents by hand, and run your program. Everything below is
+literal — copy it and run it.
 
-First the input file. It is twelve bytes, and the hash below is its real sha256 — check it
-yourself with the last line.
+First the input file — this paragraph is **background** about the fixture. It is twelve
+bytes, and the hash below is its real sha256; check it yourself with the last line.
 
 ```bash
 mkdir -p /tmp/job/in /tmp/job/out/attempts/1/gen-1
@@ -70,7 +76,13 @@ sha256sum /tmp/job/in/rows.csv # -> b9485148546419a0f6a85e8d708c923557c15d7f3c7d
 }
 ```
 
-Then, from the root of this repository:
+**RECOMMENDATION, and it is the whole point of splitting this in two.** Then two separate
+runs, from the root of this repository. **They are not variants of one command and neither
+substitutes for the other**: the first shows a complete program working end to end, and the
+second is the one that actually tests whether your node reads its credentials from the
+right place. Run both.
+
+#### Run A — the whole cycle, against this repository's node
 
 ```bash
 LSPO_CREDENTIALS_FILE=/tmp/job/creds.json LSPO_CREDENTIALS=/tmp/job/creds.json \
@@ -82,25 +94,22 @@ python3 node.py
 ```
 
 **BEHAVIOUR, with one RECOMMENDATION inside it: why two credentials variables, when the
-platform only sets one.** The agent sets
-`LSPO_CREDENTIALS_FILE` and nothing else ([PROTOCOL.md](PROTOCOL.md#11-environment-variables)),
-and that is the one your node should read. The `node.py` in this repository still reads
-`LSPO_CREDENTIALS` — a known defect, listed in
-[AUTHORING.md](AUTHORING.md#known-gaps-in-nodepy) — so a command that set only the correct
-name would fail here with `StepError: LSPO_CREDENTIALS is not set` before reading either
-fixture. It was run that way while these documents were written, and it did exactly that,
-exiting 1. Setting both is what makes the line above literally runnable against the file
-that is actually in this repository; **your own node should read `LSPO_CREDENTIALS_FILE`
-and nothing else**, and then it needs only the first of the two.
+platform only sets one.** The agent sets `LSPO_CREDENTIALS_FILE` and nothing else
+([PROTOCOL.md](PROTOCOL.md#11-environment-variables)), and that is the one your node should
+read. The `node.py` in this repository still reads `LSPO_CREDENTIALS` — a known defect,
+listed in [AUTHORING.md](AUTHORING.md#known-gaps-in-nodepy) — so this run sets the obsolete
+name purely as a **compatibility shim**, to get a complete read-work-write-marker cycle out
+of the file that is really here. **Your own node should read `LSPO_CREDENTIALS_FILE` and
+nothing else**, and then it needs only the first of the two.
 
-This is what the command above prints, verbatim:
+This is what run A prints, verbatim:
 
 ```
 INFO execution 1 attempt 1
 INFO done — 1 file(s), 12 bytes
 ```
 
-and it leaves exactly three files behind:
+it exits 0, and it leaves exactly three files behind:
 
 ```
 /tmp/job/out/attempts/1/gen-1/outputs/rows.csv
@@ -108,8 +117,59 @@ and it leaves exactly three files behind:
 /tmp/job/out/attempts/1/gen-1/__lspo_complete.json
 ```
 
-`timeout_seconds` is 900 here because that is what a registered node really gets; see
-[PROTOCOL.md](PROTOCOL.md#24-how-long-you-actually-get). Nothing in this offline run
+**What run A proves, and it is less than it looks.** That a program in the right shape can
+complete the cycle against these two fixtures. It proves **nothing whatever** about which
+environment variable a node reads, because it sets both of them — a node that reads only
+the obsolete name passes it just as happily as a correct one. A green run here is
+compatibility evidence, not conformance evidence, and it is split out for exactly that
+reason: a check that cannot fail for the thing it is named after is worse than no check,
+because it reports success.
+
+#### Run B — the check that the credentials variable is right
+
+Delete the staging directory, recreate it empty, then run with **only** the real name:
+
+```bash
+rm -rf /tmp/job/out/attempts/1/gen-1 && mkdir -p /tmp/job/out/attempts/1/gen-1
+
+env -u LSPO_CREDENTIALS \
+LSPO_CREDENTIALS_FILE=/tmp/job/creds.json \
+LSPO_EXECUTION_ID=1 LSPO_ATTEMPT=1 LSPO_GENERATION=1 \
+LSPO_IDEMPOTENCY_KEY=execution-1-attempt-1 LSPO_CONTRACT_VERSION=1 \
+LSPO_STAGING_PREFIX=file:///tmp/job/out/attempts/1/gen-1 \
+LSPO_INVOCATION_URI=file:///tmp/job/invocation.json \
+python3 node.py
+```
+
+**RECOMMENDATION.** This is the run to put in your own suite. A correct node produces the
+same output and the same three files as run A. Assert the exit code, the three filenames,
+and that the staging directory is otherwise empty.
+
+**BEHAVIOUR of this repository's example, and it is a known defect rather than a surprise.**
+`node.py` **fails run B**, and that is the correct result for the file as it stands. This is
+verbatim what it does:
+
+```
+Traceback (most recent call last):
+  File ".../node.py", line 297, in <module>
+    sys.exit(main())
+             ~~~~^^
+  File ".../node.py", line 260, in main
+    envelope = load_envelope()
+  File ".../node.py", line 176, in load_envelope
+    raise StepError('LSPO_CREDENTIALS is not set; the agent did not mount a credentials file')
+StepError: LSPO_CREDENTIALS is not set; the agent did not mount a credentials file
+```
+
+It exits **1** and leaves the staging directory **empty** — no outputs, no `result.json`, no
+marker. Two of the defects listed in [AUTHORING.md](AUTHORING.md#known-gaps-in-nodepy) are
+visible in those nine lines at once: the wrong variable name, and a bootstrap outside the
+`try` that turns a configuration mistake into an uncaught traceback instead of one short
+line on stderr. Do not treat this failure as a broken fixture; treat it as the check doing
+its job on a node that has the defect.
+
+`timeout_seconds` is 900 in the fixture because that is what a registered node really gets;
+see [PROTOCOL.md](PROTOCOL.md#24-how-long-you-actually-get). Nothing in either offline run
 enforces it — it is there so the number your code reads offline is the number it will read
 in production.
 
@@ -120,10 +180,12 @@ trailing slashes before comparing. This is the first thing that rejects a hand-m
 manifest, and it is not arbitrary: that suffix is the fence keeping a superseded runner
 out of the live attempt's area (`external/contract.py:476-492`).
 
-Everything above was executed while these documents were written, at the commit named in
-[README.md](README.md#provenance). The fixture was built, the command was run, and the
-three files listed above are what it produced. The manifest and the credentials envelope
-shown here, the marker `node.py` wrote, and the marker shown in
+Everything above is **background** about this document: it was all executed while these
+documents were written, at the commit named in [README.md](README.md#provenance). The
+fixture was built, **both** runs were performed, and the output shown for each — the two
+log lines and three files for run A, the traceback and empty directory for run B — is what
+they produced. The manifest and the credentials envelope shown here, the marker `node.py`
+wrote, and the marker shown in
 [PROTOCOL.md](PROTOCOL.md#5-the-completion-marker) were all parsed with the orchestrator's
 own `InvocationManifest` and `CompletionMarker`, and every refusal listed below was
 exercised against them one at a time. The input file's twelve bytes and its hash were
@@ -134,9 +196,10 @@ upload was exercised while writing this document set, so every statement about t
 behaviour, the storage service and collection is read from the source and reasoned about
 rather than measured.
 
-**What level 1 proves.** Your program reads its credentials from the right variable,
-parses both documents, verifies input pins, writes objects, and writes a marker with a
-consistent inventory. This is most of the contract.
+**What level 1 proves.** From run B: that your program finds its credentials through the
+one variable the platform sets. From either run: that it parses both documents, verifies
+input pins, writes objects, and writes a marker with a consistent inventory. Together that
+is most of the contract.
 
 **What it does not prove.** Anything to do with expiry, cancellation, object-store
 refusals, or the collection side.
@@ -157,7 +220,10 @@ Every field and every check came back with at least one exercised refusal, and n
 the model was left without one. See [README.md](README.md#provenance) for the commit and
 for what "exercised" means here.
 
-**RULE. Your checker should refuse a marker for any of these.**
+**RULE, for every item in the list that follows.** Each one is a refusal the marker parser
+really makes (`external/contract.py:519-636`), so a marker breaking any of them fails your
+run. **RECOMMENDATION**, separately and for the whole list: reproduce them in your own
+checker, since you do not have that parser.
 
 *The document as a whole*
 
@@ -219,8 +285,11 @@ for what "exercised" means here.
 * a relpath in `produced_ports` that is absent from `objects`;
 * a relpath repeated **within one port**.
 
-**RULE, and these your checker must NOT refuse**, because the platform accepts them and a
-stricter checker would send you rewriting correct code:
+**BEHAVIOUR, for the whole list below: the platform ACCEPTS every one of these.** That is a
+different kind of fact from the list above — those name a check that refuses you, these name
+the absence of one — and it is why this list does not carry the RULE label even though it
+sits beside one. **RECOMMENDATION**, for the same list: do not let your own checker refuse
+them, because a checker stricter than the platform sends you rewriting correct code.
 
 * a negative `exit_code`, and an absent or `null` one;
 * an object whose `size` is 0;
@@ -250,9 +319,9 @@ disagreement is a defect in this list and is worth reporting.
 
 ## Level 2: a fake object-store endpoint
 
-Run your node against a small HTTP server that stands in for the storage service: it
-serves the inputs and the job description on presigned-looking GET URLs, and accepts form
-POSTs to a fake upload endpoint.
+**RECOMMENDATION, for this whole section.** Run your node against a small HTTP server that
+stands in for the storage service: it serves the inputs and the job description on
+presigned-looking GET URLs, and accepts form POSTs to a fake upload endpoint.
 
 **RECOMMENDATION.** Have the fake refuse a POST whose `key` does not start with the
 declared `key_prefix`, and one whose body exceeds the per-object ceiling. Those are the
@@ -264,8 +333,8 @@ production and passes against a permissive fake.
 **RECOMMENDATION.** Model **generations plus a fake clock**, not wall-clock time. A
 time-based test is either slow or flaky.
 
-**And do not confuse rotation with revocation, or the test fails a correct node.**
-Installing a new envelope revokes nothing: a presigned URL from envelope A stays valid
+**RECOMMENDATION, and do not confuse rotation with revocation, or the test fails a correct
+node.** Installing a new envelope revokes nothing: a presigned URL from envelope A stays valid
 until **its own** `expires_at`, whatever happens to the file it arrived in
 ([PROTOCOL.md](PROTOCOL.md#43-credentials-expire-during-your-run)). A fake that starts
 refusing A's signatures the moment B is written is modelling a platform we do not have,
@@ -300,30 +369,39 @@ does — an HTTP error, not a Python exception of your own invention — and ass
 node recognises it. A node that treats "expired" as an unknown transport error will retry
 blindly instead of re-reading its credentials.
 
-**A property of the test harness, not of your node.** Mount the **directory**, not the
-file, if you run this inside docker. A bind-mounted file keeps pointing at the replaced
+**RECOMMENDATION, and it is a property of the test harness rather than of your node.** Mount
+the **directory**, not the file, if you run this inside docker. A bind-mounted file keeps pointing at the replaced
 inode and will never appear to change, so a harness that mounts the file will report every
 node as broken. That is exactly why the platform mounts the directory
 (`agent/creds.py:10-16`).
 
-### Testing cancellation
+### Testing the stop path
 
 **RECOMMENDATION.** Send SIGTERM **during** a transfer, not only between work units. A
 cooperative flag cannot be checked while the process is blocked in a socket read, and that
-is the case a real cancellation hits. Assert three things: a `cancelled` marker exists, it
+is the case a real stop hits. Assert three things: a `cancelled` marker exists, it
 inventories the objects that were already uploaded, and the process exited within the 30
 second grace.
 
-**BEHAVIOUR to keep in mind while reading the result.** The platform will call the run
-cancelled regardless of your exit code, because it asks "was cancellation requested?"
-before it looks at the code. So a test that only asserts "the run is cancelled" passes
-even for a node that ignores SIGTERM completely. Assert the marker and the timing.
+**BEHAVIOUR, and it decides what this test is evidence of.** A local SIGTERM is a faithful
+model of the **runtime deadline**, which is a polite stop every time and whose marker really
+is collected. It is **not** a faithful model of an operator pressing Cancel: that usually
+arrives as a SIGKILL your process never sees, and even on the narrow path where it arrives
+as a SIGTERM, nothing the node writes is collected
+([PROTOCOL.md](PROTOCOL.md#7-cancellation)). So label this test as covering the deadline
+path. A suite that calls it "cancellation" is claiming coverage of a case it does not
+exercise and cannot.
+
+**BEHAVIOUR to keep in mind while reading the result.** When the agent classifies at all, it
+calls the run cancelled regardless of your exit code, because it asks "was cancellation
+requested?" before it looks at the code. So a test that only asserts "the run is cancelled"
+passes even for a node that ignores SIGTERM completely. Assert the marker and the timing.
 
 ---
 
 ## Level 3: the real thing
 
-Register the node, start an agent, run the pipeline. See
+**RECOMMENDATION.** Register the node, start an agent, run the pipeline. See
 [OPERATIONS.md](OPERATIONS.md#registering-a-node).
 
 **What only level 3 proves.** That your image's uid can read its credentials; that the
@@ -336,12 +414,14 @@ work takes longer than fifteen minutes before you trust the node in production. 
 the single threshold that separates a node which reloads its credentials from one which
 does not, and nothing shorter will reveal the difference.
 
-**RULE for the test, not for your node: you must raise the budget first, or the test
-cannot run.** A node registered either documented way is given a runtime budget of **900
-seconds**, and at that moment the agent begins stopping your container — SIGTERM, then
-SIGKILL thirty seconds later, the same polite stop cancellation uses
+**BEHAVIOUR, and it is why that test needs a setup step.** A node registered either
+documented way is given a runtime budget of **900 seconds**, and at that moment the agent
+begins stopping your container — SIGTERM, then SIGKILL thirty seconds later
 ([PROTOCOL.md](PROTOCOL.md#7-cancellation)). So a job "longer than fifteen minutes" is
-simply stopped and proves nothing. Set `timeout_seconds` on the pipeline node (for example
+simply stopped, and the run proves nothing about credentials.
+
+**RECOMMENDATION, and nothing in the platform requires it — it is a precondition of the
+test, not a rule about your node.** Set `timeout_seconds` on the pipeline node (for example
 5400) before you try it; that takes effect immediately, without publishing a new revision.
 See [PROTOCOL.md](PROTOCOL.md#24-how-long-you-actually-get) for how the number is resolved
 and [OPERATIONS.md](OPERATIONS.md#pointing-a-pipeline-node-at-your-deployment) for where to
@@ -383,11 +463,14 @@ Without those labels, an implementer cannot tell a real defect from a gap in the
 and a green run proves nothing in particular.
 
 **RECOMMENDATION — anything a check validates against itself.** Ask of every check: what
-independent thing does this compare against? Four real examples from this project's own history. Byte
-accounting measured with the encoder its own test hand-picked. A guard test that set only
-the obsolete environment variable it existed to catch, so it encoded the bug. A proposal
-to diff generated documentation against its own generator. A drift guard comparing a
-snapshot with a version file sitting beside it. All four are green forever and prove
+independent thing does this compare against? Five real examples from this project's own
+history. Byte accounting measured with the encoder its own test hand-picked. A guard test
+that set only the obsolete environment variable it existed to catch, so it encoded the bug.
+A proposal to diff generated documentation against its own generator. A drift guard
+comparing a snapshot with a version file sitting beside it. And the fifth is on this page:
+the offline example above used to be **one** command that set both credentials variables
+while claiming to prove the node read the right one, so a node reading only the obsolete
+name passed the check that existed to catch it. All five are green forever and prove
 nothing.
 
 **RECOMMENDATION.** Distrust a conformance claim you cannot trace to a specific check in
@@ -400,8 +483,9 @@ organised to avoid, and it is why every statement here carries a label.
 
 ## If a `conformance/` directory exists in this repository
 
-Read its own README first. It will say which of the three subjects above each test has,
-and whether its fake endpoint is stricter or laxer than the storage service. A test in
-that suite that fails your node is a reason to read the check, not automatically a reason
-to change your node: check it against [PROTOCOL.md](PROTOCOL.md), and if the two disagree,
-one of them is wrong and it is worth finding out which.
+This section is **background**, about a directory that may or may not exist beside these
+documents. Read its own README first. It will say which of the three subjects above each
+test has, and whether its fake endpoint is stricter or laxer than the storage service. A
+test in that suite that fails your node is a reason to read the check, not automatically a
+reason to change your node: check it against [PROTOCOL.md](PROTOCOL.md), and if the two
+disagree, one of them is wrong and it is worth finding out which.

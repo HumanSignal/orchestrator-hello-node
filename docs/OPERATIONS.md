@@ -1,9 +1,10 @@
 # OPERATIONS: registering, running, and the limits of this release
 
-An appendix. Nothing here changes how you write a node; all of it changes whether the node
-you wrote ever runs.
+**Background**, about this document: it is an appendix. Nothing here changes how you write
+a node; all of it changes whether the node you wrote ever runs.
 
-Labels as elsewhere: **RULE**, **BEHAVIOUR**, **RECOMMENDATION**.
+Labels as elsewhere — **RULE**, **BEHAVIOUR**, **RECOMMENDATION** — and this line is
+**background** about them.
 
 ---
 
@@ -26,17 +27,21 @@ position is that this is the customer's trusted code rather than hostile code.
 **BEHAVIOUR.** Two equivalent paths; both go through the same service layer, so they cannot
 drift.
 
-**From the web interface.** Settings, then the **External Nodes** tab, then **Connect
-node**. It creates the same three database rows the command below does — a **pool**, a
-**deployment** and a **revision** — and shows the pool's registration token exactly once,
-together with the `docker run` line for an agent.
+### From the web interface
+
+**BEHAVIOUR.** Settings, then the **External Nodes** tab, then **Connect node**. It creates
+the same three database rows the command below does — a **pool**, a **deployment** and a
+**revision** — and shows the pool's registration token exactly once, together with the
+`docker run` line for an agent.
 
 It does **not** create the agent. Nothing does: an agent comes into existence when
 somebody runs that `docker run` line on a machine, and it enrols itself using the
 registration token. Until then the deployment is registered and has nowhere to run, which
 the screen shows as "no agent yet".
 
-**From a shell on the orchestrator.**
+### From a shell on the orchestrator
+
+**BEHAVIOUR.** The same three rows, from the command line:
 
 ```bash
 python manage.py external_demo_setup --image '<registry>/my-node@sha256:...'
@@ -109,9 +114,10 @@ missing-image error rather than anything that names the real cause.
 
 ## Starting the agent
 
-The **agent** is our process, running on your machine. It is the only thing that talks to
-the orchestrator: it enrols once, polls for work, starts your container, streams its logs
-back and reports the result. It listens on no port; every connection is outbound.
+**BEHAVIOUR.** The **agent** is our process, running on your machine. It is the only thing
+that talks to the orchestrator: it enrols once, polls for work, starts your container,
+streams its logs back and reports the result. It listens on no port; every connection is
+outbound.
 
 The setup command prints this line already filled in. It looks like:
 
@@ -295,9 +301,9 @@ nothing and the job stays queued for someone else.
 
 ## Residual limits, stated plainly
 
-Each of these is a real gap at the commit these documents were verified against. None is a
-rumour. All of them are **BEHAVIOUR** — things the platform does, or does not do, which
-you cannot change from a node.
+**BEHAVIOUR, for every bullet below.** Each is a real gap at the commit these documents were
+verified against, and none is a rumour: they are things the platform does, or does not do,
+which you cannot change from a node.
 
 * **No watchdog.** Nothing reclaims a job that nobody ever claims, or one whose agent
   disappears after claiming it. The queue deadline only makes the claim scan skip the row.
@@ -328,16 +334,25 @@ you cannot change from a node.
 * **Logs are tail-only, and so is the durable copy.** The last 1000 entries, live and in
   the file written when the execution reaches a terminal state — the file is built from
   the same buffer. There is no complete record of a chatty container's output anywhere.
-* **A fenced container is killed outright.** Cancellation gives your process SIGTERM and 30
-  seconds, and so does the runtime deadline; the fencing path gives it a SIGKILL and nothing
-  else. It therefore writes no further marker, and what is collected afterwards is only what
-  a valid marker for that attempt had already recorded — under the recommended
-  write-the-marker-last discipline, nothing. There are six fencing triggers and they differ
-  in whether the outcome is even reported; the table in
+* **A fenced container is killed outright.** The runtime deadline gives your process
+  SIGTERM and 30 seconds; the fencing path gives it a SIGKILL and nothing else. It therefore
+  writes no further marker, and what is collected afterwards is only what a valid marker for
+  that attempt had already recorded — under the recommended write-the-marker-last
+  discipline, nothing. There are six fencing triggers and they differ in whether the agent
+  may even report the outcome; the table in
   [PROTOCOL.md](PROTOCOL.md#71-fencing-the-stop-with-no-grace-period-at-all) gives each one
   with its own consequence. Note that an ordinary agent shutdown is **not** one of them: it
   waits for your job, and a forced shutdown leaves your container running for the next agent
   to adopt.
+* **Pressing Cancel is usually a kill, not a polite stop, and it collects nothing.**
+  Cancelling a step that is running on a runner ends the job on the orchestrator's side in
+  one transaction, which means the agent's next heartbeat is refused and the agent responds
+  by SIGKILLing the container. Only a heartbeat already in flight can come back carrying the
+  cancellation and produce a SIGTERM instead. Either way **no marker is read and nothing the
+  step produced is collected** — the log is written down, the run is finished, and whatever
+  was in the staging area expires there. Full derivation in
+  [PROTOCOL.md](PROTOCOL.md#7-cancellation). The practical consequence for an operator: use
+  Cancel to stop work, never to harvest a partial result.
 * **One input port, single files only.** The contract models multiple ports and folder
   inputs; the orchestrator emits neither.
 * **`result.json` is never read.** Metrics come from what was published.
@@ -347,18 +362,20 @@ you cannot change from a node.
 
 ## Troubleshooting
 
-The **Kind** column says what sort of thing went wrong, because the answer changes what
-you do about it. **RULE** means a specific check refused you and the fix is not optional.
+**The table below is labelled row by row, in its Kind column**, rather than by one label
+governing the whole of it; this paragraph and the next are **background** explaining how to
+read that column. **RULE** means a specific check refused you and the fix is not optional.
 **BEHAVIOUR** means the platform did something by design and your node has to accommodate
 it. **Unchecked** means nothing in the platform looks at this at all — it is a coupling or
 a convention that fails as some unrelated-looking symptom, and no amount of correct
 behaviour elsewhere will produce a warning about it.
 
 **The Kind column labels the CAUSE, not the cure**, and the two are not always the same
-kind of thing. Where the Kind is RULE, the first clause of "What to do" is what that check
-demands. Everything else in that column — including advice attached to a RULE row — is a
-**RECOMMENDATION**: it is what a well-built node does, nothing verifies it, and the platform
-permits the alternative. The two rows where that distinction bites are marked inline.
+kind of thing — still **background** about how to read the table. Where the Kind is RULE,
+the first clause of "What to do" is what that check demands. Everything else in that column
+— including advice attached to a RULE row — is a **RECOMMENDATION**: it is what a
+well-built node does, nothing verifies it, and the platform permits the alternative. The
+two rows where that distinction bites are marked inline.
 
 | Symptom | Likely cause | Kind | What to do |
 |---|---|---|---|
@@ -368,13 +385,14 @@ permits the alternative. The two rows where that distinction bites are marked in
 | Container dies at once with a missing credentials file | the agent's state is in a docker volume rather than a host path, so the credentials directory the daemon mounted was an empty one it created | Unchecked — the docker daemon creates an empty directory rather than failing | mount a real host directory at the same path inside and outside, with the workdir a child of it |
 | Container dies with permission denied on its credentials | uid mismatch between your image and the agent process | Unchecked — nothing compares the two uids or warns | rebuild with the agent's uid, usually 10001 |
 | Node fails with "`LSPO_CREDENTIALS` is not set" | your code reads the wrong variable name | Unchecked — the platform sets `LSPO_CREDENTIALS_FILE` and cannot police how you read it | read `LSPO_CREDENTIALS_FILE` |
-| Run fails with "no completion marker" | your container exited 0 without writing `__lspo_complete.json` | RULE — a marker is required on a successful run | write one before exiting 0. (*RECOMMENDATION, not part of the rule*: write one on the failure and cancellation paths too, so your `error` and your part-finished inventory survive) |
+| Run fails with "no completion marker" | your container exited 0 without writing `__lspo_complete.json` | RULE — a marker is required on a successful run | write one before exiting 0. (*RECOMMENDATION, not part of the rule*: write one on the failure and deadline paths too, so your `error` and your part-finished inventory survive — an operator's cancellation collects neither) |
 | Run fails naming a hash or size mismatch | the object changed after you hashed it, or the marker was written before the upload finished | RULE — every published object is re-read and held to the marker | hash the bytes you actually wrote. (*RECOMMENDATION, not part of the rule*: write the marker last — nothing observes write order, so this failure is the only symptom you will ever see of getting it wrong) |
 | Uploads start failing partway through a long run | the credentials envelope expired, roughly fifteen minutes in | BEHAVIOUR — only visible once somebody raises the node's `timeout_seconds` past 900 | re-read the credentials file at or near `expires_at` |
 | Upload refused with a policy error | the object key does not start with `staging.post.key_prefix`, or the object is over 1 GiB | RULE — enforced by the storage service, so the refusal is an HTTP error | prefix the key explicitly; split the object |
-| The run is stopped at almost exactly fifteen minutes, reported as failed | the runtime budget the revision declared (900 seconds by default) ran out | BEHAVIOUR — SIGTERM then SIGKILL 30 seconds later, the same stop cancellation uses, but classified `failed` | set `timeout_seconds` on the pipeline node, or publish a revision declaring more. A SIGTERM handler also gets you a marker and a real failure reason out of this case |
-| The container is killed with no warning and nothing is collected | the job was fenced. Six triggers, listed in [PROTOCOL.md](PROTOCOL.md#71-fencing-the-stop-with-no-grace-period-at-all); the common two are an orchestrator unreachable for about six minutes, and a job revoked while it ran | BEHAVIOUR — a SIGKILL with no grace period, so no further marker can be written. Three of the six still report the outcome; three are silent and leave the execution parked until an operator cancels it | check the agent's connectivity and the agent's own log for the fence reason; nothing in the node can prevent this |
-| A cancelled run keeps going, then dies | no SIGTERM handler, so PID 1 discarded the signal and the 30 second grace ran out | BEHAVIOUR (a property of Linux, not of the platform) | install a handler that sets a flag |
+| The run is stopped at almost exactly fifteen minutes, reported as failed | the runtime budget the revision declared (900 seconds by default) ran out | BEHAVIOUR — SIGTERM then SIGKILL 30 seconds later, classified `failed`. This is the one stop that is reliably polite | set `timeout_seconds` on the pipeline node, or publish a revision declaring more. A SIGTERM handler also gets you a marker and a real failure reason out of this case, and here the marker really is collected |
+| The container is killed with no warning and nothing is collected | the job was fenced. Six triggers, listed in [PROTOCOL.md](PROTOCOL.md#71-fencing-the-stop-with-no-grace-period-at-all); the common two are an orchestrator unreachable for about six minutes, and a job revoked while it ran. **An operator pressing Cancel produces this same symptom**, and is the commonest cause of it | BEHAVIOUR — a SIGKILL with no grace period, so no further marker can be written. Three of the six leave the agent able to report; on the other three the execution stays parked until an operator cancels it, and cancelling collects nothing either | check the agent's connectivity and the agent's own log for the fence reason; nothing in the node can prevent this |
+| A stopped run keeps going, then dies | no SIGTERM handler, so PID 1 discarded the signal and the 30 second grace ran out | BEHAVIOUR (a property of Linux, not of the platform) | install a handler that sets a flag |
+| A cancelled run's partial output never appears anywhere | nothing was collected, because an operator's cancellation never reads the marker | BEHAVIOUR — by design, on both branches of the cancellation race ([PROTOCOL.md](PROTOCOL.md#7-cancellation)) | nothing to fix in the node. If partial output matters, let the step finish or fail on its own rather than cancelling it |
 | Logs stop partway through | you exceeded the shipping rate, or a single line exceeded 64 KiB and its tail was discarded | BEHAVIOUR — the excess is dropped silently | fewer, shorter lines |
 | Logs never appear at all | a logging library that defaults to WARNING and to stderr only, or a buffered stdout | Unchecked | configure the logger explicitly and set `PYTHONUNBUFFERED=1` |
 | Log lines arrive mangled, with stray `[31m` in them | you printed ANSI colour; the escape byte is stripped as a control character and the rest survives | BEHAVIOUR | print plain text |

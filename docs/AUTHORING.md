@@ -1,33 +1,40 @@
 # AUTHORING: how to build one
 
-[PROTOCOL.md](PROTOCOL.md) says what is true. This document says what to do about it, in
-what order, and it ends with a checklist.
+**Background**, about this document. [PROTOCOL.md](PROTOCOL.md) says what is true; this one
+says what to do about it, in what order, and it ends with a checklist.
 
-Labels are the same three: **RULE** (the platform refuses or fails the run), **BEHAVIOUR**
-(what the platform does), **RECOMMENDATION** (what a good node does; the platform permits
-otherwise).
+Labels are the same three, and this paragraph is **background** about them: **RULE** (the
+platform refuses or fails the run), **BEHAVIOUR** (what the platform does),
+**RECOMMENDATION** (what a good node does; the platform permits otherwise).
 
 ---
 
 ## The recipe
 
-Build in this order. Each step is testable without the one after it.
+**RECOMMENDATION.** Build in this order. Each step is testable without the one after it,
+which is what keeps a mistake in step 3 from being discovered in step 5.
 
 ### 1. Decide what your node consumes and produces
 
-Your node receives a list of input objects on a single port named `input`, and returns
-objects grouped into output ports you name yourself. Decide those port names now; they
-become the artifact kinds downstream steps ask for.
+**BEHAVIOUR.** Your node receives a list of input objects on a single port named `input`,
+and returns objects grouped into output ports you name yourself. Those port names become
+the artifact kinds downstream steps ask for
+([PROTOCOL.md](PROTOCOL.md#41-where-your-output-goes)).
+
+**RECOMMENDATION.** Decide them now rather than later: renaming a port after a pipeline is
+wired means editing every downstream step that selects on it.
 
 **RECOMMENDATION.** Use one port for the real output, and a separate port such as `report`
 for diagnostics. Everything under a port is offered to every downstream step wired to it.
 
 ### 2. Write the program against a hand-written envelope, with no orchestrator involved
 
-Write a `creds.json` by hand in the `local` shape and run your program against it. See
+**RECOMMENDATION.** Write a `creds.json` by hand in the `local` shape and run your program
+against it. See
 [CONFORMANCE.md](CONFORMANCE.md#level-1-run-it-with-a-hand-written-envelope) for the exact
-file. You can get the whole read, work, write, marker cycle correct here, offline, before
-anything else exists.
+file, and run the second of the two commands there — the one that sets only
+`LSPO_CREDENTIALS_FILE` — because that is the one that tests anything. You can get the
+whole read, work, write, marker cycle correct here, offline, before anything else exists.
 
 ### 3. Build the image
 
@@ -68,18 +75,21 @@ See [OPERATIONS.md](OPERATIONS.md#registering-a-node).
 
 ### 5. Handle the hard parts
 
-**RECOMMENDATION.** Credential expiry, cancellation, and inventory-on-failure. They are the
-three things a first version always omits and the three things that decide whether a real
-run survives. Not one of them is checked by anything. The skeleton below has all three.
+**RECOMMENDATION.** Credential expiry, stopping cleanly, and inventory-on-failure. They are
+the three things a first version always omits and the three things that decide whether a
+real run survives. Not one of them is checked by anything. The skeleton below has all three.
+Note which stop the second one is really for: the **runtime deadline**, not an operator's
+Cancel ([PROTOCOL.md](PROTOCOL.md#7-cancellation)).
 
 ---
 
 ## The skeleton
 
-This is the **correct shape**, in Python for concreteness. It is not the file in this
-repository: see [Known gaps in `node.py`](#known-gaps-in-nodepy) below. None of it is
-Python-specific, and none of it imports anything from the orchestrator. The labels inside
-the code comments carry their usual meaning.
+This paragraph is **background** about the listing that follows. It is the **correct
+shape**, in Python for concreteness, and it is not the file in this repository: see
+[Known gaps in `node.py`](#known-gaps-in-nodepy) below. None of it is Python-specific, and
+none of it imports anything from the orchestrator. The labels inside the code comments
+carry their usual meaning.
 
 ```python
 #!/usr/bin/env python3
@@ -326,13 +336,13 @@ Until then, do not copy these parts of it. Line numbers are for this repository'
 | `node.py:260-261` | bootstrap runs outside the `try` | A failure there escapes `main`, prints a traceback and reports nothing. |
 | `node.py:99`, `:142`, `:156` | holds whole objects in memory, twice | Collides with the 1 GiB per-object allowance against a 2 GiB memory limit. |
 | `node.py:192`, `:271` | the inventory is local to `process()`; the failure path writes `objects: []` | Everything already uploaded is unrecoverable, because salvage publishes only what the marker inventories. |
-| whole file | no signal handling | A cancelled run is ignored: it finishes the batch and writes a `succeeded` marker after a human pressed stop, or is killed after 30 seconds. |
+| whole file | no signal handling | A stop request is ignored: on the **runtime deadline** the file finishes its batch and writes a `succeeded` marker after the platform asked it to stop, or is killed 30 seconds later — and it loses the failure reason and the salvage that a marker would have bought on that path. |
 | `node.py:236` vs `:274` | marker claims exit code 10 on every failure; the process returns 1 for anything that is not its own `StepError` | Two contradictory accounts of the same run. |
 | `node.py:140-141`, `:269` | an HTTP error's text, presigned URL included, reaches stderr and the marker | Container log lines are shipped unredacted. |
 | `node.py:161-169` | reads the job description with no size bound and no version check | Proceeds on a malformed or future-version document. |
 | `node.py:172-178` | never validates the envelope | Same class of problem, different document. |
 | `node.py:198-201` | derives output names from input names | Two inputs sharing a basename produce one relpath twice, which the marker parser refuses. |
-| `node.py:140`, `:156` | 120 second and 300 second timeouts | Both are longer than the 30 second cancellation grace, so cancellation during a transfer yields neither marker nor salvage. |
+| `node.py:140`, `:156` | 120 second and 300 second timeouts | Both are longer than the 30 second grace that follows a SIGTERM, so a stop landing during a transfer yields neither marker nor salvage. |
 
 One thing on that list which is **not** a defect: `node.py:219` and `:238` claim
 `result.json` under the `output` port. That is legal, and the orchestrator's own test of
@@ -344,16 +354,16 @@ is a poor idea, so use a separate port, but it is a **RECOMMENDATION** and never
 
 ## The checklist
 
-Run through this before you register a revision.
+**RECOMMENDATION.** Run through this before you register a revision.
 
-**Every item is labelled, and the labels are the point of the list.** A **RULE** is a
-specific check in the platform: fail it and your job is refused or your run fails, every
-time. A **RECOMMENDATION** is something no check will ever catch — which does not make it
-optional in practice, only invisible until a real run goes wrong. An unlabelled checklist
-mixes the two, and a reader who cannot tell them apart either treats advice as law or
-treats law as advice. Both are expensive.
+**Every item is labelled, and the labels are the point of the list.** This paragraph is
+**background** about that. A **RULE** is a specific check in the platform: fail it and your
+job is refused or your run fails, every time. A **RECOMMENDATION** is something no check
+will ever catch — which does not make it optional in practice, only invisible until a real
+run goes wrong. An unlabelled checklist mixes the two, and a reader who cannot tell them
+apart either treats advice as law or treats law as advice. Both are expensive.
 
-**Bootstrap**
+#### Bootstrap
 
 * [ ] **RECOMMENDATION.** Reads the credentials path from `LSPO_CREDENTIALS_FILE`, with no
       fallback that hides a missing variable. Nothing checks how you find the path; there
@@ -365,7 +375,7 @@ treats law as advice. Both are expensive.
 * [ ] **RECOMMENDATION.** Reports a bootstrap failure as one short redacted line on stderr
       plus a transient exit code, with no traceback and no attempt to write a marker.
 
-**Inputs**
+#### Inputs
 
 * [ ] **RECOMMENDATION**, and the most valuable one in this document. Verifies every input
       against its pinned `sha256` and `size`, and refuses an input with no pin. The
@@ -379,7 +389,7 @@ treats law as advice. Both are expensive.
 * [ ] **RECOMMENDATION.** Deletes each input when it is done with it. Nothing bounds input
       size or count and the container has no disk quota.
 
-**Work**
+#### Work
 
 * [ ] **RECOMMENDATION.** Streams rather than buffering whole objects, in both directions.
 * [ ] **RECOMMENDATION.** Writes scratch files to `/tmp` or to staging, never under the
@@ -391,7 +401,7 @@ treats law as advice. Both are expensive.
 * [ ] **RECOMMENDATION.** Says the important things in few lines, knowing that only a tail
       of 1000 entries survives anywhere.
 
-**Outputs**
+#### Outputs
 
 * [ ] **RULE.** Output relpaths are canonical — non-empty, relative, no backslash, no
       control character, no `.` or `..` component, no empty component. The marker parser
@@ -413,7 +423,7 @@ treats law as advice. Both are expensive.
       actually changed (compared by contents, not by object identity), and never blindly
       on an ambiguous POST failure.
 
-**Marker**
+#### Marker
 
 * [ ] **RULE.** On a run that exits 0, a marker exists and its `status` is `"succeeded"`.
 * [ ] **RULE.** `execution_id`, `attempt` and `generation` are copied from this job's
@@ -432,13 +442,19 @@ treats law as advice. Both are expensive.
       writes nothing loses every object it had produced.
 * [ ] **RECOMMENDATION.** `exit_code` in the marker equals the code the process returns.
 
-**Ending**
+#### Ending
 
 * [ ] **RECOMMENDATION.** A SIGTERM handler sets a flag; the work loop checks it; the
-      cancelled path writes a marker and exits 20. Without a handler your process, as
-      PID 1, discards the signal entirely. The same handler is what gets you a marker when
-      the **runtime deadline** passes, because that stop is delivered identically — the two
-      are indistinguishable at the signal level.
+      stopped path writes a marker and exits 20. Without a handler your process, as PID 1,
+      discards the signal entirely.
+* [ ] **BEHAVIOUR to know while you write that handler, because it decides what it is
+      worth.** The **runtime deadline** always arrives as SIGTERM plus a 30 second grace,
+      and the marker you write on the way out really is collected. An **operator pressing
+      Cancel** usually does not reach your process at all — it normally arrives as a
+      SIGKILL — and on the rare occasion it does arrive as SIGTERM, nothing you write is
+      collected anyway. Build the handler for the deadline
+      ([PROTOCOL.md](PROTOCOL.md#7-cancellation)); do not build a partial-output recovery
+      story on top of cancellation.
 * [ ] **RECOMMENDATION.** Every network timeout is comfortably under the 30 second grace
       that follows that SIGTERM, on either path.
 * [ ] **RECOMMENDATION.** Exit 1 for conditions a retry might survive, exit 10 for
@@ -451,7 +467,7 @@ treats law as advice. Both are expensive.
       **not** a fence: it waits for your job, or leaves your container running for the next
       agent. Design so that a run losing its last minute of work is survivable.
 
-**Image**
+#### Image
 
 * [ ] **RULE.** Pinned by digest — `registry/name@sha256:<64 hex>` or a bare
       `sha256:<64 hex>`. A tag is refused at registration.
