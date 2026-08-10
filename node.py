@@ -141,6 +141,9 @@ READ_TIMEOUT_S = 25.0
 UPLOAD_TIMEOUT_S = 10.0
 #: Every streaming copy moves this much at a time.
 CHUNK_BYTES = 1024 * 1024
+#: How much a streaming copy may leave in the kernel's page cache before asking for it
+#: back. See :func:`_release_page_cache` — this is not a performance knob.
+CACHE_DROP_BYTES = 8 * 1024 * 1024
 #: Re-read the envelope this long before it says it expires.
 CREDS_MARGIN_S = 5.0
 
@@ -379,6 +382,29 @@ def _is_int(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+def _release_page_cache(handle, *, sync: bool = False) -> None:
+    """Ask the kernel to drop the pages this file has put in the cache.
+
+    **Streaming is not enough on its own.** The container's memory limit counts the page
+    cache created by its own reads and writes, so a step that never holds more than one
+    block in memory can still be OOM-killed for moving a large object through a temporary
+    file: the program's own footprint stays flat while the kernel's cache for that file
+    grows to the size of the object. This was measured — a 128 MiB input through a 64 MiB
+    container is killed without this call and survives with it.
+
+    Dirty pages cannot be dropped, which is why a write has to be flushed and synced
+    first. Reads need no sync. Both are best-effort: ``posix_fadvise`` is advice, and it
+    does not exist everywhere, so a platform without it simply keeps its cache.
+    """
+    try:
+        if sync:
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.posix_fadvise(handle.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+    except (AttributeError, OSError, ValueError):
+        pass
+
+
 # ------------------------------------------------------------------------- http
 
 
@@ -472,6 +498,7 @@ class _MultipartBody:
         self._tail = memoryview(tail)
         self._source_path = source_path
         self._remaining = file_size
+        self._uncached = 0
         self._handle = None
         self._stage = 0  # 0 head, 1 file, 2 tail, 3 done
         self._head_at = 0
@@ -499,6 +526,12 @@ class _MultipartBody:
                 piece = self._handle.read(min(size, self._remaining))
                 if piece:
                     self._remaining -= len(piece)
+                    self._uncached += len(piece)
+                    if self._uncached >= CACHE_DROP_BYTES:
+                        # Reading the file back fills the page cache just as writing it
+                        # did, and that cache counts against the container's memory limit.
+                        _release_page_cache(self._handle)
+                        self._uncached = 0
                     return piece
                 self._handle.close()
                 self._handle = None
@@ -705,6 +738,7 @@ def fetched_and_verified(creds: Credentials, index: int, scratch: str):
             size = 0
             try:
                 with open(path, 'wb') as target:
+                    uncached = 0
                     for chunk in _stream(source, name):
                         _check_stopped()
                         digest.update(chunk)
@@ -714,6 +748,11 @@ def fetched_and_verified(creds: Credentials, index: int, scratch: str):
                                 f'input {name!r} is larger than the {expected_size} bytes the job '
                                 f'pinned for it — this is not the object this run was built from')
                         target.write(chunk)
+                        uncached += len(chunk)
+                        if uncached >= CACHE_DROP_BYTES:
+                            _release_page_cache(target, sync=True)
+                            uncached = 0
+                    _release_page_cache(target, sync=True)
                 break
             except _Expired:
                 if attempt == 2:
@@ -851,12 +890,18 @@ def process(creds: Credentials, manifest: dict, scratch: str) -> dict:
 
 def _count_lines(path: str) -> int:
     lines = 0
+    uncached = 0
     with open(path, 'rb') as handle:
         while True:
             chunk = handle.read(CHUNK_BYTES)
             if not chunk:
+                _release_page_cache(handle)
                 return lines
             lines += chunk.count(b'\n')
+            uncached += len(chunk)
+            if uncached >= CACHE_DROP_BYTES:
+                _release_page_cache(handle)
+                uncached = 0
 
 
 def _write_result(creds: Credentials, manifest: dict, metrics: dict, scratch: str) -> None:
@@ -1050,6 +1095,7 @@ def _sha256_file(path: str) -> str:
     with open(path, 'rb') as handle:
         for chunk in iter(lambda: handle.read(CHUNK_BYTES), b''):
             digest.update(chunk)
+        _release_page_cache(handle)
     return digest.hexdigest()
 
 

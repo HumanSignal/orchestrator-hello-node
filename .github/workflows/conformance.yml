@@ -4,18 +4,27 @@ name: conformance
 # it. The harness needs a real docker daemon; it refuses to run rather than simulate a
 # container, because a harness that fakes the container proves nothing.
 #
-# WHY THIS IS GREEN TODAY. Twenty tests are known to fail against node.py as it stands
-# (see CONFORMANCE-BASELINE.md). They carry the marker `expected_red_until_fixed` and run
-# as STRICT expected failures, so today's run is green with them reported as `xfailed`.
-# The moment somebody fixes one of those the test PASSES, strict xfail turns the run RED,
-# and the failure says which test to promote out of the expected-red group. That is the
-# signal this workflow exists for: it is not a gate on the node being correct, it is a
-# gate on the record of what is wrong staying accurate.
+# WHY THIS IS GREEN TODAY. Because every test passes. There is no
+# `expected_red_until_fixed` test left: the twenty that used to fail against node.py are
+# fixed, and they now sit in `conforms_today`, where a regression turns the run red at once
+# instead of being absorbed as an expected failure. A failing test in this workflow is
+# therefore simply a failure — something to fix in node.py, not something to write down.
 #
-# Six of the twenty are contract violations, three are this repository's own compatibility
-# policy, and eleven are reference-quality expectations the contract permits a real node to
-# skip. The per-basis counts are printed below, because that distinction is what stops a
-# documentation slice teaching a preference as a rule.
+# The expected-red machinery stays, armed and unused, as the tripwire for the next known
+# gap. A test carrying that marker runs as a STRICT expected failure, so CI is green while
+# the gap is on the books, with the gap visible in the report as `xfailed`; the moment
+# somebody fixes it the test PASSES, strict xfail turns the run RED, and the failure says
+# which test to promote into `conforms_today`. What that prevents is a defect described one
+# way in the documents and behaving another way in the image, with nothing that ever
+# notices. The counts printed below are all zero today, and that zero is the claim being
+# made, not a query that came back empty by accident.
+#
+# Only `basis_contract` failures are conformance violations; the other two bases are this
+# repository's own compatibility policy and reference-quality expectations the contract
+# permits a real node to skip. They are counted separately because that distinction is what
+# stops a documentation slice teaching a preference as a rule, and CONFORMANCE-BASELINE.md
+# records what it was worth while the twenty were real: six were contract violations, three
+# were policy, and eleven were reference quality.
 #
 # NOT CHECKED HERE: that each basis_contract citation quotes its source verbatim. That
 # needs a checkout of the orchestrator, which this repository does not have — run it with
@@ -67,15 +76,19 @@ jobs:
             python -m pytest --collect-only -q -m "$group" | tail -1
           done
 
-      - name: What the red tests actually claim
+      - name: What an expected-red test would claim
         if: always()
         # The distinction that keeps this harness honest: only `basis_contract` failures
         # are conformance violations. The others are worth fixing and must never be
         # written down as requirements — so they are counted separately, in the log,
-        # every run.
+        # every run. All three counts are zero today, and printing the zeros is the point:
+        # it is the standing record that nothing is being excused. The count is extracted
+        # as a number rather than left as pytest's own summary line, because "no tests
+        # collected" reads like a query that broke instead of an answer of none.
         run: |
           for basis in basis_contract basis_our_policy basis_reference_quality; do
-            echo -n "expected-red on $basis: "
-            python -m pytest --collect-only -q -m "expected_red_until_fixed and $basis" | tail -1
+            n=$(python -m pytest --collect-only -q -m "expected_red_until_fixed and $basis" | grep -c '::' || true)
+            echo "expected-red on $basis: $n"
           done
-          python -m pytest --collect-only -q --print-labels 2>/dev/null | grep -E '^expected_red' || true
+          python -m pytest --collect-only -q --print-labels 2>/dev/null | grep -E '^expected_red' \
+            || echo 'expected-red label table: empty — every test declares another group'

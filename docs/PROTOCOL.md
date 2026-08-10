@@ -595,6 +595,21 @@ chunks, hash while you stream, and upload from a file handle rather than from a 
 object. Do this even for a node that "only handles small files": the input size is chosen
 by whoever wires the pipeline, not by you.
 
+**RECOMMENDATION, and streaming alone does not buy it. This one is measured.** The
+container's memory limit counts the **page cache** that its own reads and writes create,
+not only what your process holds. So a node that streams perfectly — never more than one
+block in memory — is still OOM-killed for moving a large object through a temporary file:
+your program's footprint stays flat while the kernel's cache for that file grows to the
+size of the object. Ask for those pages back as you go. On Linux that is
+`posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED)` every few megabytes, after an `fsync` on
+the write side, because dirty pages cannot be dropped; reads need no sync. It is advice
+to the kernel rather than a guarantee, and it costs nothing when it is ignored.
+
+Measured against this repository's own image: a 128 MiB input through a 64 MiB container
+is OOM-killed without that call and survives with it, and with it the same transfer also
+survives a 32 MiB container. The step's own code was identical in both runs — the only
+difference is who was holding the bytes.
+
 ---
 
 ## 4. Outputs

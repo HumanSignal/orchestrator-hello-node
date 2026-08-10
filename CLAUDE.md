@@ -173,11 +173,16 @@ covered by a test, and none of them is enforced by the platform.
    `/lspo/creds/creds.json`. Never bake a credentials path into the image.
 2. **Verify every input** against both the pinned `sha256` and the pinned `size`, and
    refuse one with no pin. The platform verifies what you *wrote*, never what you *read*.
-3. **Stream, in both directions.** A single object may legally be 1 GiB against a 2 GiB
-   container. Holding one in memory twice is an out-of-memory kill, and an OOM kill leaves
-   no chance to write a marker at all. This is why there is **no HTTP library dependency**:
-   `requests` builds a multipart body in memory, so using it would contradict this rule in
-   the file that exists to demonstrate it.
+3. **Stream, in both directions — and release the page cache while you do.** A single
+   object may legally be 1 GiB against a 2 GiB container. Holding one in memory twice is
+   an out-of-memory kill, and an OOM kill leaves no chance to write a marker at all. This
+   is why there is **no HTTP library dependency**: `requests` builds a multipart body in
+   memory, so using it would contradict this rule in the file that exists to demonstrate
+   it. Streaming is necessary and not sufficient: the container's memory limit counts the
+   page cache your own reads and writes create, so a perfectly streaming step is still
+   killed for moving a large object through a temporary file. `posix_fadvise(…,
+   POSIX_FADV_DONTNEED)` every few megabytes is what closes that, and the difference is
+   measured — 128 MiB through a 64 MiB container dies without it.
 4. **Re-read the credentials.** The agent replaces the file underneath a running container,
    atomically and with no signal. A node that reads it once cannot upload anything —
    including its own marker — after about fifteen minutes.
