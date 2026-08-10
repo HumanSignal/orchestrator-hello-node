@@ -461,26 +461,35 @@ def test_a_container_that_disappeared_is_never_read_as_a_result(image):
     assert not answered, f'{answered} answered about a container that is gone instead of raising'
 
 
+#: Any variable this image really bakes will do — the subject here is docker, not the
+#: node. It used to be ``LSPO_CREDENTIALS``, which the Dockerfile baked so that a node
+#: reading the wrong variable name would appear to work; that line is gone, so the test
+#: uses one the image still sets for reasons of its own.
+BAKED_ENV = ('PYTHONUNBUFFERED', '1')
+
+
 @harness_self_test
 @our_policy(
     'Two credential tests rest entirely on this docker mechanism, so it is proven rather than assumed. '
     + _INSTRUMENT
 )
 def test_docker_really_drops_an_environment_variable_the_image_baked_in(image):
-    """Setup:    this image bakes ``ENV LSPO_CREDENTIALS=/lspo/creds/creds.json``.
-    Action:   run it with ``--env LSPO_CREDENTIALS`` and no value, and print the
+    """Setup:    this image bakes ``ENV PYTHONUNBUFFERED=1``.
+    Action:   run it with ``--env PYTHONUNBUFFERED`` and no value, and print the
               environment.
     Validate: the variable is absent — not empty, absent.
 
     ``-e NAME=`` would set it to the empty string, which a step could read as "set but
     blank" and behave differently about. Only the valueless form removes it, and "the
-    variable is genuinely not there" is the case the contract's default path exists for.
+    variable is genuinely not there" is the case the contract's default path exists for —
+    which is what ``omit_env`` relies on, and therefore what this proves.
     """
+    name, value = BAKED_ENV
     baked = _env_in_container(image, name='lspo-conformance-env-baked', unset=())
-    assert baked.get(contract.LEGACY_CREDENTIALS_ENV) == contract.DEFAULT_CREDENTIALS_FILE
+    assert baked.get(name) == value, f'this image no longer bakes {name}; pick another BAKED_ENV'
 
-    stripped = _env_in_container(image, name='lspo-conformance-env-stripped', unset=(contract.LEGACY_CREDENTIALS_ENV,))
-    assert contract.LEGACY_CREDENTIALS_ENV not in stripped, f'it survived as {stripped.get(contract.LEGACY_CREDENTIALS_ENV)!r}'
+    stripped = _env_in_container(image, name='lspo-conformance-env-stripped', unset=(name,))
+    assert name not in stripped, f'it survived as {stripped.get(name)!r}'
 
 
 @harness_self_test

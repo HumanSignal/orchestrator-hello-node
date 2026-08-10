@@ -28,16 +28,19 @@ and a checklist. This page is the two-minute version.
    job description that goes with this file, is in
    [docs/CONFORMANCE.md](docs/CONFORMANCE.md#level-1-run-it-with-a-hand-written-envelope).
 
-   Note the variable name, because the two are not the same one. The platform sets
-   `LSPO_CREDENTIALS_FILE` and that is what your node should read; the `node.py` in this
-   repository still reads `LSPO_CREDENTIALS`, and survives only because the `Dockerfile`
-   hardcodes that name. Outside the image it dies on a traceback, so to run *this* file
-   locally set both names, as
-   [docs/CONFORMANCE.md](docs/CONFORMANCE.md#level-1-run-it-with-a-hand-written-envelope)
-   does — and set only the correct one in your own. Why it matters is the first row of
-   [docs/AUTHORING.md](docs/AUTHORING.md#known-gaps-in-nodepy); the run that measured it is
-   the first contract defect in
-   [CONFORMANCE-BASELINE.md](CONFORMANCE-BASELINE.md#1-it-reads-a-credentials-variable-that-nothing-sets).
+   Note the variable name, because two of them exist and the platform sets only one. It
+   sets `LSPO_CREDENTIALS_FILE`, and its value is the path the orchestrator chose, so that
+   is the name your node should read and the only one you need to set — here and in your
+   own node. `LSPO_CREDENTIALS` is a name older images from this repository baked in
+   themselves; `node.py` honours it only when it is the only one present, so that those
+   images keep working, and the `Dockerfile` no longer bakes it. Reading the name nothing
+   sets is still worth understanding even though this file no longer does it: such a node
+   works for exactly as long as its own image hardcodes the path, then dies on a file that
+   is not there the day the platform mounts the credentials somewhere else. That is the
+   first defect in
+   [CONFORMANCE-BASELINE.md](CONFORMANCE-BASELINE.md#1-it-reads-a-credentials-variable-that-nothing-sets),
+   which measured what it cost; what `node.py` does today is described in
+   [docs/AUTHORING.md](docs/AUTHORING.md#nodepy-and-this-skeleton).
 
 5. **Rebuild, push, take the new digest, register a new revision.** A node's identity is
    its digest; changing the code means registering the new one, which is also what makes

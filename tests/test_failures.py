@@ -30,7 +30,7 @@ import pytest
 from conformance import contract
 from conformance.fakes3 import matching, refuse_when
 from conformance.job import InputSpec
-from conformance.markers import conforms_today, expected_red_until_fixed, reference_quality, traces_to
+from conformance.markers import conforms_today, reference_quality, traces_to
 
 THREE_INPUTS = [
     InputSpec(relpath='one.csv', data=b'one\n'),
@@ -159,7 +159,7 @@ def test_a_transient_read_refusal_is_reported_as_transient(make_job):
     )
 
 
-@expected_red_until_fixed
+@conforms_today
 @traces_to(
     'external/contract.py: EXIT_PERMANENT = 10 and classify_exit — "a step that means "do not retry me" '
     'must say so with EXIT_PERMANENT". Reporting a momentary store refusal that way tells the platform '
@@ -193,7 +193,7 @@ def test_a_transient_upload_refusal_is_not_reported_as_permanent(make_job, sampl
     )
 
 
-@expected_red_until_fixed
+@conforms_today
 @traces_to(
     'external/contract.py CompletionMarker.exit_code: "Process exit code, when the runner observed one." '
     'pipelines/external_finalize.py _step_account renders it verbatim into the run\'s failure reason: '
@@ -233,7 +233,7 @@ def test_a_stated_exit_code_matches_the_one_the_process_returned(make_job):
     )
 
 
-@expected_red_until_fixed
+@conforms_today
 @traces_to(
     'external/contract.py CompletionMarker.objects: "Every object produced, with hash and size". '
     'pipelines/external_finalize.py _salvage_what_the_step_produced iterates "for obj in marker.objects" '
@@ -304,7 +304,7 @@ def test_what_a_failed_run_already_produced_is_still_salvageable(make_job):
     )
 
 
-@expected_red_until_fixed
+@conforms_today
 @reference_quality(
     'The contract INVITES a failure marker rather than requiring one — pipelines/external_finalize.py '
     '_step_account: "A failed or cancelled step is invited by the contract to write a marker carrying '

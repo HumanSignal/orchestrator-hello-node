@@ -27,7 +27,7 @@ import pytest
 
 from conformance import contract, docker
 from conformance.job import InputSpec
-from conformance.markers import conforms_today, expected_red_until_fixed, reference_quality, traces_to
+from conformance.markers import conforms_today, reference_quality, traces_to
 
 #: One eighth of a gigabyte of input against a 64 MiB container. Big enough that no
 #: amount of interpreter overhead explains the difference, small enough to stay quick.
@@ -248,7 +248,7 @@ def test_an_envelope_entry_with_no_hash_pin_is_refused(make_job):
     assert job.marker()['status'] == 'failed'
 
 
-@expected_red_until_fixed
+@conforms_today
 @traces_to(
     'external/contract.py CompletionMarker._check_inventory_is_unique refuses a marker that inventories '
     'one relpath twice — "one file, one entry (two entries could otherwise carry two different hashes '
@@ -312,7 +312,7 @@ def test_the_marker_stays_parseable_when_two_ports_carry_the_same_name(make_job)
     job.marker()  # raises ContractViolation if the collector would refuse this document
 
 
-@expected_red_until_fixed
+@conforms_today
 @reference_quality(
     'Which output path an object belongs on is entirely the step\'s business — the contract constrains '
     'the document, not the layout. But a step that silently loses one of two inputs is not a step anybody '
@@ -360,7 +360,7 @@ def test_neither_input_survives_at_the_others_expense(make_job):
     )
 
 
-@expected_red_until_fixed
+@conforms_today
 @reference_quality(
     'The contract says nothing about memory: the ceiling is the operator\'s (agent/executors/docker_exec.py '
     'passes memory= from the agent\'s config) and the input size is the pipeline\'s. So this is not a '

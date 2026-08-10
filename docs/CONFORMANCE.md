@@ -96,16 +96,22 @@ python3 node.py
 **BEHAVIOUR, with one RECOMMENDATION inside it: why two credentials variables, when the
 platform only sets one.** The agent sets `LSPO_CREDENTIALS_FILE` and nothing else
 ([PROTOCOL.md](PROTOCOL.md#11-environment-variables)), and that is the one your node should
-read. The `node.py` in this repository still reads `LSPO_CREDENTIALS` — a known defect,
-listed in [AUTHORING.md](AUTHORING.md#known-gaps-in-nodepy) — so this run sets the obsolete
-name purely as a **compatibility shim**, to get a complete read-work-write-marker cycle out
-of the file that is really here. **Your own node should read `LSPO_CREDENTIALS_FILE` and
-nothing else**, and then it needs only the first of the two.
+read. This run sets the obsolete `LSPO_CREDENTIALS` beside it deliberately, for one reason:
+it is the arrangement in which a node reading the wrong name still works, which is the
+whole point run A is here to make. The `node.py` in this repository reads
+`LSPO_CREDENTIALS_FILE`, falls back to the obsolete name only when that is the only one
+set — older images of this repository baked it, and some are still in the field — and
+prefers the one the agent sets when the two disagree. **Your own node should read
+`LSPO_CREDENTIALS_FILE` and nothing else**, and then it needs only the first of the two.
 
-This is what run A prints, verbatim:
+This is what run A prints, verbatim. The two `@lspo:progress` lines are the progress
+protocol ([PROTOCOL.md](PROTOCOL.md#34-progress)) — a run that emits none is
+indistinguishable from a stuck one:
 
 ```
 INFO execution 1 attempt 1
+@lspo:progress {"fraction": 0.0, "phase": "copying inputs"}
+@lspo:progress {"fraction": 1.0, "phase": "done"}
 INFO done — 1 file(s), 12 bytes
 ```
 
@@ -145,28 +151,28 @@ python3 node.py
 same output and the same three files as run A. Assert the exit code, the three filenames,
 and that the staging directory is otherwise empty.
 
-**BEHAVIOUR of this repository's example, and it is a known defect rather than a surprise.**
-`node.py` **fails run B**, and that is the correct result for the file as it stands. This is
-verbatim what it does:
+**BEHAVIOUR of this repository's example, with one RECOMMENDATION at the end.** `node.py`
+passes run B: the same four stdout lines and the same three files as run A. It did not
+always. Until it was rewritten it read the obsolete variable and failed here, exiting 1
+with the staging directory empty — no outputs, no `result.json`, no marker — and the
+failure arrived as an uncaught traceback, because the bootstrap sat outside the `try`.
+Both mistakes, and eighteen others, are recorded with what each one cost in
+[CONFORMANCE-BASELINE.md](../CONFORMANCE-BASELINE.md). If your own node fails run B, do
+not treat it as a broken fixture; treat it as the check doing its job.
+
+The second of those two is still worth reproducing, because it is about how a node reports
+a failure it cannot recover from. Point `LSPO_CREDENTIALS_FILE` at a file that is not
+there and run again: before credentials exist there is nowhere to write a marker, so the
+only honest ending is one line on stderr and an exit code, never a stack trace an operator
+has to interpret. This is verbatim what happens now:
 
 ```
-Traceback (most recent call last):
-  File ".../node.py", line 297, in <module>
-    sys.exit(main())
-             ~~~~^^
-  File ".../node.py", line 260, in main
-    envelope = load_envelope()
-  File ".../node.py", line 176, in load_envelope
-    raise StepError('LSPO_CREDENTIALS is not set; the agent did not mount a credentials file')
-StepError: LSPO_CREDENTIALS is not set; the agent did not mount a credentials file
+hello-node: could not start: no credentials file at the path LSPO_CREDENTIALS_FILE names; the agent did not mount one, or this job is no longer its
 ```
 
-It exits **1** and leaves the staging directory **empty** — no outputs, no `result.json`, no
-marker. Two of the defects listed in [AUTHORING.md](AUTHORING.md#known-gaps-in-nodepy) are
-visible in those nine lines at once: the wrong variable name, and a bootstrap outside the
-`try` that turns a configuration mistake into an uncaught traceback instead of one short
-line on stderr. Do not treat this failure as a broken fixture; treat it as the check doing
-its job on a node that has the defect.
+It exits **1** and leaves the staging directory **empty**. Assert that shape in your own
+suite: a bootstrap failure that escapes as a traceback tells the operator nothing about
+what to fix.
 
 `timeout_seconds` is 900 in the fixture because that is what a registered node really gets;
 see [PROTOCOL.md](PROTOCOL.md#24-how-long-you-actually-get). Nothing in either offline run
@@ -182,10 +188,11 @@ out of the live attempt's area (`external/contract.py:476-492`).
 
 Everything above is **background** about this document: it was all executed while these
 documents were written, at the commit named in [README.md](README.md#provenance). The
-fixture was built, **both** runs were performed, and the output shown for each — the two
-log lines and three files for run A, the traceback and empty directory for run B — is what
-they produced. The manifest and the credentials envelope shown here, the marker `node.py`
-wrote, and the marker shown in
+fixture was built, **both** runs were performed, and the output shown for each — the four
+stdout lines and three files, identical for run A and run B, and the one stderr line and
+empty directory from the run whose credentials file was missing — is what they produced.
+The manifest and the credentials envelope shown here, the marker `node.py` wrote, and the
+marker shown in
 [PROTOCOL.md](PROTOCOL.md#5-the-completion-marker) were all parsed with the orchestrator's
 own `InvocationManifest` and `CompletionMarker`, and every refusal listed below was
 exercised against them one at a time. The input file's twelve bytes and its hash were

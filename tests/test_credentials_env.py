@@ -40,7 +40,6 @@ from __future__ import annotations
 from conformance import contract
 from conformance.markers import (
     conforms_today,
-    expected_red_until_fixed,
     our_policy,
     reference_quality,
     traces_to,
@@ -50,7 +49,7 @@ ALTERNATIVE_CREDS = '/lspo/creds/envelope.json'
 STALE_CREDS = '/lspo/creds/stale.json'
 
 
-@expected_red_until_fixed
+@conforms_today
 @traces_to(
     'external/contract.py InvocationManifest: "credentials are delivered out of band as a file at '
     'credentials_file", whose own definition is "In-container path where credentials are mounted" — so '
@@ -80,7 +79,7 @@ def test_the_credentials_file_variable_is_honoured(make_job, sample_input):
     assert contract.MARKER_FILENAME in job.endpoint.keys_in_order()
 
 
-@expected_red_until_fixed
+@conforms_today
 @our_policy(
     'The agent ALWAYS injects LSPO_CREDENTIALS_FILE, so in production a step that requires it is never '
     'actually broken — this is defence, not conformance. What it buys: external/contract.py names '
@@ -131,7 +130,7 @@ def test_the_legacy_variable_on_its_own_is_still_honoured(make_job, sample_input
     assert contract.MARKER_FILENAME in job.endpoint.keys_in_order()
 
 
-@expected_red_until_fixed
+@conforms_today
 @our_policy(
     'A precedence rule between one variable the platform sets and one only we set cannot come from the '
     'platform. Ours is: the name the agent actually sets wins, because it is the only one whose value the '
@@ -156,7 +155,7 @@ def test_when_both_variables_are_set_the_current_one_wins(make_job, sample_input
     assert contract.MARKER_FILENAME in job.endpoint.keys_in_order()
 
 
-@expected_red_until_fixed
+@conforms_today
 @our_policy(
     'Also ours: nothing requires a step to explain its own configuration. It is here because the failure '
     'it prevents costs a day — the step works, the wrong credentials are in use, and the only symptom is '
@@ -224,7 +223,7 @@ def test_an_ordinary_run_prints_no_credential_material(make_job, sample_input):
     assert_no_credential_material(result.output)
 
 
-@expected_red_until_fixed
+@conforms_today
 @reference_quality(
     _NOT_LEAKING_IS_NOT_A_RULE
     + ' The specific trap this one measures is named in agent/redact.py: "requests in particular puts '
@@ -236,20 +235,26 @@ def test_an_ordinary_run_prints_no_credential_material(make_job, sample_input):
 def test_a_refused_request_does_not_print_the_presigned_url(make_job, sample_input):
     """A 403 must be reported without quoting the credential that earned it.
 
-    Setup:    a job pointed at an envelope whose credential has already expired, so every
-              request it makes is refused.
+    Setup:    a job whose CURRENT credentials variable points at an envelope that has
+              already expired, so every request it makes is refused.
     Action:   run and read the log.
     Validate: the failure is reported, and no presigned URL is in it.
 
     The natural way to report a failed fetch — let the exception's text through — is
-    exactly what publishes the credential, because ``requests`` builds that text out of
-    the URL. The platform cannot save the step here: it redacts its own words, not the
+    exactly what publishes the credential, because an HTTP library builds that text out
+    of the URL. The platform cannot save the step here: it redacts its own words, not the
     container's.
+
+    **This setup used to point the LEGACY variable at the stale envelope**, back when the
+    node read that one. Now that it reads the variable the agent actually sets, the same
+    setup hands it a perfectly good envelope and the run succeeds — which would have made
+    this test assert nothing at all. Staleness has to arrive through whichever name the
+    node is supposed to obey, which is the point of the fix rather than an accident of it.
     """
     job = make_job(inputs=[sample_input])
     job.write_envelope_file('stale.json', job.endpoint.mint(ttl_s=-1))
 
-    result = job.run(env={contract.LEGACY_CREDENTIALS_ENV: STALE_CREDS})
+    result = job.run(env={'LSPO_CREDENTIALS_FILE': STALE_CREDS})
 
     assert result.exit_code != 0, 'the run was supposed to fail on an expired credential'
     assert_no_credential_material(result.output)

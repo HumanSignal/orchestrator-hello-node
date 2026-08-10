@@ -1,5 +1,40 @@
 # Conformance baseline — what this node does today
 
+> ## Status: all twenty defects below are FIXED
+>
+> `node.py` was rewritten and the whole suite is green, in both modes:
+>
+> ```
+> python -m pytest -q                  → 128 passed, 1 skipped
+> python -m pytest -q --red-for-real   → 128 passed, 1 skipped
+> ```
+>
+> The two lines are now identical, which is the point: there is no `expected_red_until_fixed`
+> test left, so CI mode and the true result cannot differ. All twenty tests that used to be
+> red were moved into `conforms_today`, where a regression turns the run red immediately
+> rather than being absorbed as an expected failure.
+>
+> **Everything below this box is the measurement that was taken BEFORE the repair, and it is
+> kept deliberately.** It is the evidence for what each defect actually cost, and every one
+> of them is a mistake a first version of a node makes — which makes it the most useful
+> reading in this repository for somebody about to write one. Read it as history, not as a
+> description of the file in this directory.
+>
+> Three changes were needed outside `node.py`, and each is a case of the harness having
+> encoded the defect rather than the rule:
+>
+> * `test_a_refused_request_does_not_print_the_presigned_url` staged its expired credential
+>   through the LEGACY variable. Once the node reads the variable the agent actually sets,
+>   that setup hands it a perfectly good envelope and the run succeeds — so the test would
+>   have asserted nothing. Staleness now arrives through the current variable.
+> * `test_docker_really_drops_an_environment_variable_the_image_baked_in` proved its point
+>   using `LSPO_CREDENTIALS`, which the `Dockerfile` only baked so that a node reading the
+>   wrong variable would appear to work. That line is gone, so the test uses
+>   `PYTHONUNBUFFERED`, which the image still sets for reasons of its own.
+> * `test_several_inputs_are_all_copied` (green throughout) pinned the shape of output
+>   names. It is why the fix for the two-ports-one-filename collision disambiguates only
+>   the names that actually collide, instead of namespacing every output by its port.
+
 Measured, not reasoned about. Every line below is the observed behaviour of the image
 built from this repository's own `Dockerfile`, run as a container against the harness in
 `conformance/`, on Linux with Docker 28.4, with the citations checked against orchestrator

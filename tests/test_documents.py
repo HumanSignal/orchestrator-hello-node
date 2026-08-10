@@ -24,7 +24,6 @@ from conformance import contract, platform_rules
 from conformance.job import InputSpec
 from conformance.markers import (
     conforms_today,
-    expected_red_until_fixed,
     our_policy,
     reference_quality,
     traces_to,
@@ -172,7 +171,7 @@ def test_the_result_document_has_the_shape_the_contract_declares(make_job, sampl
     assert isinstance(document['metrics'], dict) and isinstance(document['summary'], dict)
 
 
-@expected_red_until_fixed
+@conforms_today
 @traces_to(
     'external/contract.py: MAX_RESULT_BYTES = 1024 * 1024, under the heading "Contract documents are '
     'control data, not payload, so every read AND every write is bounded" — "The result document carries '
@@ -234,7 +233,7 @@ def test_the_result_document_stays_under_its_ceiling(make_job, sample_input):
     )
 
 
-@expected_red_until_fixed
+@conforms_today
 @reference_quality(
     'Progress is OPT-IN and this harness no longer says otherwise. agent/logbuf.py: "A workload that '
     'wants the Runs UI to show a progress bar writes a line @lspo:progress {…}. … A step that never '

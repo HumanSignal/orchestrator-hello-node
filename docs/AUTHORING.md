@@ -113,10 +113,12 @@ typical is how a node ends up with a refused upload and a marker the reader will
 ## The skeleton
 
 This paragraph is **background** about the listing that follows. It is the **correct
-shape**, in Python for concreteness, and it is not the file in this repository: see
-[Known gaps in `node.py`](#known-gaps-in-nodepy) below. None of it is Python-specific, and
-none of it imports anything from the orchestrator. The labels inside the code comments
-carry their usual meaning.
+shape**, in Python for concreteness, cut down to the decisions that are easy to get wrong;
+it is not the file in this repository, which implements all of it plus the HTTP work and
+the error handling a listing this size has to leave out (see
+[`node.py` and this skeleton](#nodepy-and-this-skeleton) below). None of it is
+Python-specific, and none of it imports anything from the orchestrator. The labels inside
+the code comments carry their usual meaning.
 
 ```python
 #!/usr/bin/env python3
@@ -348,36 +350,47 @@ the obvious alternative fails on a real run, later, saying something unrelated:
 
 ---
 
-## Known gaps in `node.py`
+## `node.py` and this skeleton
 
 This whole section is **background**, in the sense
 [README.md](README.md#how-to-read-this-three-kinds-of-statement) gives that word: it
-describes one file that happens to sit in this repository, and imposes nothing on your node.
-The `node.py` here is a demonstration of the happy path. It is being repaired separately.
-Until then, do not copy these parts of it. Line numbers are for this repository's copy.
+describes one file that happens to sit in this repository, and imposes nothing on your
+node.
 
-| Where | What it does | Why it is wrong |
-|---|---|---|
-| `node.py:174` | reads `LSPO_CREDENTIALS` | The agent sets `LSPO_CREDENTIALS_FILE`. This works only because `Dockerfile:18` hardcodes the other name. Copy the file without that line and the node dies immediately with a message that names a variable the platform has never heard of. This was run: with only the correct variable set, it exits 1 with `StepError: LSPO_CREDENTIALS is not set`. It is also why the offline example in [CONFORMANCE.md](CONFORMANCE.md#level-1-run-it-with-a-hand-written-envelope) has to set both names. |
-| `node.py:260-261` | reads the envelope once, at the start | After roughly fifteen minutes its upload policy is expired, so it can upload neither its outputs nor its marker. Invisible on a default registration, where the run is stopped at that same fifteen-minute mark anyway; fatal the first time an operator raises the node's `timeout_seconds` ([PROTOCOL.md](PROTOCOL.md#24-how-long-you-actually-get)). |
-| `node.py:260-261` | bootstrap runs outside the `try` | A failure there escapes `main`, prints a traceback and reports nothing. |
-| `node.py:99`, `:142`, `:156` | holds whole objects in memory, twice | Collides with the 1 GiB per-object allowance against a 2 GiB memory limit. |
-| `node.py:192`, `:271` | the inventory is local to `process()`; the failure path writes `objects: []` | Everything already uploaded is unrecoverable, because salvage publishes only what the marker inventories. |
-| whole file | no signal handling | A stop request is ignored. On the **runtime deadline** the file carries on through its batch after the platform has asked it to stop, and is then killed — writing, if it gets that far, a `succeeded` marker for a run the platform had already given up on. Nothing it writes after the platform asked it to stop is collected on that path ([PROTOCOL.md](PROTOCOL.md#7-cancellation)), so what the missing handler really costs is a clean exit and the work the container goes on doing for nobody. |
-| `node.py:236` vs `:274` | marker claims exit code 10 on every failure; the process returns 1 for anything that is not its own `StepError` | Two contradictory accounts of the same run. |
-| `node.py:140-141`, `:269` | an HTTP error's text, presigned URL included, reaches stderr and the marker | Container log lines are shipped unredacted. |
-| `node.py:161-169` | reads the job description with no size bound and no version check | Proceeds on a malformed or future-version document. |
-| `node.py:172-178` | never validates the envelope | Same class of problem, different document. |
-| `node.py:198-201` | derives output names from input names | Two inputs sharing a basename produce one relpath twice, which the marker parser refuses. |
-| `node.py:140`, `:156` | 120 second and 300 second timeouts | Both are far longer than any grace a stop can be relied on to give — no interval on a stop path is bounded ([PROTOCOL.md](PROTOCOL.md#7-cancellation)) — so a stop landing during a transfer never reaches the handler at all and the process is killed mid-write. |
+`node.py` used to be a demonstration of the happy path with a documented list of defects,
+and this section used to be that list. It has been rewritten and now implements
+everything the skeleton above shows: it reads `LSPO_CREDENTIALS_FILE`, re-reads its
+credentials, streams in both directions, keeps its inventory at module scope, handles a
+stop request, writes the marker last on every path with the exit code the process really
+returns, classifies transient and permanent failures apart, and redacts every URL before
+it reaches a log. The whole conformance suite is green against it.
 
-One thing on that list which is **not** a defect: `node.py:219` and `:238` claim
-`result.json` under the `output` port. That is legal, and the orchestrator's own test of
-this example expects exactly `['outputs/rows.csv', 'result.json']` there
-(`tests/test_hello_node_example.py:105`). Sending a metrics file to every downstream step
-is a poor idea, so use a separate port, but it is a **RECOMMENDATION** and never a rule.
+**The defects it used to have are still worth reading**, because each one is a mistake a
+first version makes and the record says what each cost:
+[CONFORMANCE-BASELINE.md](../CONFORMANCE-BASELINE.md) has the measurement, the citation
+and the consequence for all twenty.
 
----
+Two things in `node.py` are still worth pointing at rather than copying blindly:
+
+* **It has no HTTP-library dependency, and that is deliberate.** `requests` builds a
+  multipart upload body in memory, so `files={'file': ...}` holds the whole object — the
+  exact collision between a legal 1 GiB object and a 2 GiB container that
+  [PROTOCOL.md](PROTOCOL.md#35-memory-two-defaults-that-collide) is about. Streaming an
+  upload with it needs a further dependency. The standard library does it in about sixty
+  lines. If you bring your own HTTP client, check what it does with a large body before
+  you trust it.
+* **Its two network timeouts differ on purpose.** Reads get longer than uploads, because a
+  stop landing during a read is noticed as soon as the next block arrives — the handler
+  closes the response underneath it — while a stop landing after an upload's body has been
+  sent cannot be shortened by anything at all: the step is waiting for the store's answer,
+  and only the timeout bounds that wait. Size it well inside whatever grace a stop is
+  given.
+
+One thing that is **not** a defect: `node.py` claims `result.json` under a `report` port
+rather than under `output`. Both are legal. The orchestrator's own test of its example
+expects `result.json` among the `output` port's paths, so if you are matching that example
+exactly, claim it there instead — but sending a metrics file to every downstream step is a
+poor idea, and this is a **RECOMMENDATION**, never a rule.
 
 ## The checklist
 
