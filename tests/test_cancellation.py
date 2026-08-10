@@ -46,7 +46,7 @@ import pytest
 from conformance import contract, docker
 from conformance.fakes3 import delay_when, matching
 from conformance.job import InputSpec
-from conformance.markers import expected_red_until_fixed, reference_quality
+from conformance.markers import conforms_today, reference_quality
 
 #: Long enough that the signal lands squarely inside the transfer, short enough that a
 #: correct implementation finishes well inside the grace period.
@@ -73,7 +73,7 @@ _COOPERATIVE_SHUTDOWN = (
 )
 
 
-@expected_red_until_fixed
+@conforms_today
 @reference_quality(_COOPERATIVE_SHUTDOWN)
 def test_a_step_stopped_during_a_download_does_not_claim_it_succeeded(make_job, sample_input):
     """Setup:    the store holds the first input's response open for twelve seconds.
@@ -99,7 +99,7 @@ def test_a_step_stopped_during_a_download_does_not_claim_it_succeeded(make_job, 
     _assert_stopped_cleanly(job, result, grace_used)
 
 
-@expected_red_until_fixed
+@conforms_today
 @reference_quality(_COOPERATIVE_SHUTDOWN)
 def test_a_step_stopped_during_an_upload_inventories_what_it_left_behind(make_job):
     """Setup:    TWO inputs, with the store holding the SECOND upload open for twelve
@@ -162,7 +162,7 @@ def test_a_step_stopped_during_an_upload_inventories_what_it_left_behind(make_jo
     )
 
 
-@expected_red_until_fixed
+@conforms_today
 @reference_quality(_COOPERATIVE_SHUTDOWN)
 def test_a_cancelled_step_stops_taking_on_new_work(make_job):
     """Cancellation has to change what the step does next, not just how it ends.
@@ -194,7 +194,7 @@ def test_a_cancelled_step_stops_taking_on_new_work(make_job):
     )
 
 
-@expected_red_until_fixed
+@conforms_today
 @reference_quality(_COOPERATIVE_SHUTDOWN)
 def test_a_step_that_cannot_be_stopped_costs_the_whole_grace_period(make_job, sample_input):
     """The price of ignoring SIGTERM, measured.

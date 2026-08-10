@@ -89,7 +89,9 @@ and it is stated separately for that reason.
 `LSPO_CREDENTIALS_FILE`. A node that reads `LSPO_CREDENTIALS` works only because its own
 Dockerfile happens to define that name, and it dies the moment the line is dropped. No
 platform check refuses you here; you simply have nothing to read. (The `node.py` in this
-repository still has this defect; see [AUTHORING.md](AUTHORING.md#known-gaps-in-nodepy).)
+repository had exactly that defect, propped up by a line in its own `Dockerfile` that
+defined the name; both are gone. [CONFORMANCE-BASELINE.md](../CONFORMANCE-BASELINE.md)
+records what the mistake cost when it was measured.)
 
 **BEHAVIOUR.** `LSPO_INVOCATION_URI` and `LSPO_STAGING_PREFIX` are addresses, not access.
 They are usually `s3://...` URIs, and your container holds no AWS identity, so it cannot
@@ -1357,8 +1359,9 @@ long gone by then, so there is nothing here for your node to do.
 **RECOMMENDATION.** Assume a stop reaches you with very little time behind it, and make
 sure your network calls cannot swallow what there is before step 4 gets to run. A
 cooperative flag cannot be checked while you are blocked in a socket
-read, so a read timeout measured in minutes — this repository's `node.py` has one of 120
-seconds — means a stop landing during a transfer never reaches your handler at all, and
+read, so a read timeout measured in minutes — this repository's `node.py` had one of 120
+seconds until it was rewritten, and now reads with 25 seconds and uploads with 10 — means
+a stop landing during a transfer never reaches your handler at all, and
 your process is killed mid-write. There is no grace period to size those timeouts against
 (top of this section), so the only workable design is timeouts and chunk sizes short enough
 that a stop lands *between* calls: seconds, not minutes.

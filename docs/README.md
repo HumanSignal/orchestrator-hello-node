@@ -170,12 +170,13 @@ Dockerfiles that fix the container user.
 
 1. **The offline example was run, both ways.** The fixture in
    [CONFORMANCE.md](CONFORMANCE.md#level-1-run-it-with-a-hand-written-envelope) was built,
-   and the two commands there were each run against this repository's `node.py`. Run A,
-   which sets the obsolete credentials variable alongside the real one, printed the two
-   lines shown and left the three files shown, exiting 0. Run B, which sets only the
-   variable the platform really sets, failed exactly as shown — an uncaught traceback and
-   exit 1, with the staging directory left empty. Both transcripts in that document are
-   verbatim.
+   and the two commands there were each run against this repository's `node.py`. Both
+   complete the cycle — the lines shown, exit 0, exactly the three files shown — and both
+   transcripts in that document are verbatim. That is only true since `node.py` was
+   repaired: the run that sets only the credentials variable the platform really sets used
+   to end in an uncaught traceback and exit 1 with an empty staging directory, because the
+   file read a name nothing sets. What that defect cost, and the nineteen measured beside
+   it, is in [CONFORMANCE-BASELINE.md](../CONFORMANCE-BASELINE.md).
 2. **Every marker refusal was enumerated by exercising the parser**, not written from
    memory. A harness read the parser's own model definition, listed every field it declares
    and every cross-field check it runs, then fed it about ninety mutated markers one at a
@@ -307,10 +308,15 @@ the conclusion themselves. A sentence that sounds normative only because a sourc
 normative is the specific failure mode; see
 [How to read this](#how-to-read-this-three-kinds-of-statement).
 
-## A warning about the code in this repository
+## The code in this repository
 
 This section is **background**, about one file in this repository. `node.py` at the
-repository root is a **demonstration, not a model of correctness**. It has several known
-defects, listed in [AUTHORING.md](AUTHORING.md#known-gaps-in-nodepy), and it is being
-repaired separately. Where these documents show a shape and `node.py` differs, these
-documents are the correct one.
+repository root implements what these documents describe, and the conformance suite in
+`conformance/` is green against it, so it is safe to copy and edit. It was not always: it
+shipped with twenty documented defects, every one of them a mistake a first version of a
+node makes, and [CONFORMANCE-BASELINE.md](../CONFORMANCE-BASELINE.md) keeps the measurement
+of what each one cost — which makes it the most useful thing here to read before writing
+your own. Where `node.py` makes a choice rather than following a rule,
+[AUTHORING.md](AUTHORING.md#nodepy-and-this-skeleton) says which choice and why. These
+documents remain the authority: if the two ever disagree, these documents are the correct
+one and the difference is a bug worth reporting.

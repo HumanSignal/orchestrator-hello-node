@@ -36,7 +36,7 @@ from __future__ import annotations
 from conformance import contract
 from conformance.fakes3 import delay_when, matching, refresh_when
 from conformance.job import InputSpec
-from conformance.markers import expected_red_until_fixed, reference_quality
+from conformance.markers import conforms_today, reference_quality
 
 #: A credential lifetime the harness can wait out. Its clock starts when the CONTAINER
 #: launches (``Job.start`` re-mints for a job with a TTL), not when the job was built, so
@@ -75,7 +75,7 @@ def _refresh_while_the_first_read_is_in_flight(job) -> None:
     job.endpoint.hooks.on_request.append(delay_when(matching('input', index=1), HELD_OPEN_SECONDS))
 
 
-@expected_red_until_fixed
+@conforms_today
 @reference_quality(_OUTLIVING_ONE_ENVELOPE)
 def test_a_step_that_outlives_its_envelope_reads_the_fresh_one(make_job, sample_input):
     """The ordinary life of a long job, compressed into a dozen seconds.
@@ -113,7 +113,7 @@ def test_a_step_that_outlives_its_envelope_reads_the_fresh_one(make_job, sample_
         )
 
 
-@expected_red_until_fixed
+@conforms_today
 @reference_quality(_OUTLIVING_ONE_ENVELOPE)
 def test_the_work_remaining_after_an_expiry_is_still_done(make_job):
     """An expiry part-way through a batch must cost the batch nothing.

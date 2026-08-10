@@ -8,8 +8,8 @@ with. It never imports `node.py`, never patches it, and never mounts anything ov
 
 ```bash
 pip install -r requirements-dev.txt
-python -m pytest                 # CI mode: known gaps run as expected failures
-python -m pytest --red-for-real  # the true result — this is how the baseline was measured
+python -m pytest                 # CI mode: an expected-red test would run as an expected failure
+python -m pytest --red-for-real  # the true result — identical today, because nothing is expected-red
 python -m pytest -m conforms_today
 python -m pytest --collect-only -q --print-labels   # every test's group, basis and citation
 
@@ -22,9 +22,15 @@ than pretending, because a harness that fakes the container proves nothing.
 
 ## The one rule, and the rule about the rule
 
-**A test here must be red against the node as it is today and green only once the node is
-fixed.** That is what makes it evidence rather than decoration. `node.py` is not to be
-touched by anything that adds tests here.
+**A test that claims a defect must be shown red against code that has the defect, and green
+only once that code is fixed.** That is what makes it evidence rather than decoration.
+`node.py` was repaired under exactly that discipline: the twenty tests that measured its
+defects were red first and are green now, and `CONFORMANCE-BASELINE.md` keeps the
+measurement of what each defect cost. Since the node passes everything today, a new claim
+has to earn its red another way — build the offending behaviour into a throwaway copy of
+`node.py` and show the assertion fails against that. It is how the two false passes
+described below were proved closed. The real `node.py` is not to be touched by anything
+that adds tests here.
 
 **And a test may not demand more than the thing it cites.** This harness is the oracle
 for fixing the reference node and for the documentation written from that fix, so an
@@ -87,7 +93,7 @@ exactly one basis.
 
 | Group | Subject | Today |
 |---|---|---|
-| `expected_red_until_fixed` | `node.py` | fails |
+| `expected_red_until_fixed` | `node.py` | empty — the twenty defects it marked are fixed |
 | `conforms_today` | `node.py` | passes — a regression guard |
 | `subject_is_platform` | the agent / collector / contract | no edit to `node.py` can move it |
 | `harness_self_test` | this harness | proves the instrument before its readings are trusted |
@@ -98,9 +104,13 @@ exactly one basis.
 | `basis_reference_quality("…")` | What a reference implementation should demonstrate. The contract permits otherwise; a node that does the opposite is conformant. Never document one of these as a requirement. |
 | `basis_our_policy("…")` | A compatibility or hygiene choice this repository makes, which the platform does not state — keeping the legacy credentials variable working, for instance. |
 
-The expected-red group runs as **strict** xfail. CI is therefore green today, and turns
-red the moment a fix lands while the marker is still on the test — which is the prompt to
-move that test into `conforms_today`.
+The expected-red group runs as **strict** xfail, and no test carries it now: the twenty
+that did were moved into `conforms_today` when the node was repaired, so CI mode and
+`--red-for-real` cannot report different things until a new defect is recorded. Strict is
+the load-bearing word, and it is why the group is kept rather than deleted — a test left
+marked after its fix lands passes unexpectedly and turns the run red, which is the prompt
+to move it across and correct `CONFORMANCE-BASELINE.md`. A defect that quietly went away
+is a fact somebody has to be told.
 
 A caveat about `subject_is_platform`: most of those tests are **restatements** of a rule,
 checked against this harness's own copy of it. Nobody runs this suite against the

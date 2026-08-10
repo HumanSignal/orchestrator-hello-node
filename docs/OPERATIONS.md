@@ -29,15 +29,35 @@ drift.
 
 ### From the web interface
 
-**BEHAVIOUR.** Settings, then the **External Nodes** tab, then **Connect node**. It creates
-the same three database rows the command below does — a **pool**, a **deployment** and a
-**revision** — and shows the pool's registration token exactly once, together with the
+**BEHAVIOUR.** Settings, then the **External Nodes** tab, then **Connect node**. Give the
+node a name, paste the digest, and it creates the same three database rows the command
+below does — a **pool**, a **deployment** and a **revision** — together with the
 `docker run` line for an agent.
+
+**BEHAVIOUR, and it is the ordinary case rather than the exception.** Registering again
+does not duplicate anything: a pool of that name, a deployment of that name and a revision
+already pinning that exact digest are each **matched and reused**. So re-registering a
+rebuilt image is a normal act, not a mess to clean up.
+
+**BEHAVIOUR, and it is the first place somebody following this page gets stuck.** The
+reply shows the pool's registration token **only when that registration minted one**,
+which normally means only when it just created the pool. It is shown once, because only
+its hash is stored. Register a second node into a pool that already has a token and the
+reply comes back **with no token at all**, and a command carrying the literal placeholder
+`PASTE_THE_POOL_TOKEN_HERE` where the secret belongs. Nothing is broken. Either fill in
+the token saved when that pool was created, or rotate the pool's token from the node list
+and use the new one — rotating is safe, and what it does and does not affect is set out
+below.
 
 It does **not** create the agent. Nothing does: an agent comes into existence when
 somebody runs that `docker run` line on a machine, and it enrols itself using the
 registration token. Until then the deployment is registered and has nowhere to run, which
 the screen shows as "no agent yet".
+
+**BEHAVIOUR.** Once an agent has enrolled it appears against the node in the **Runners**
+column of the External Nodes page. **A node that will not run is answered by that column
+first**: no runner online means there is nothing to run it, and no amount of looking at
+the pipeline will show you that.
 
 ### From a shell on the orchestrator
 
@@ -119,7 +139,15 @@ that talks to the orchestrator: it enrols once, polls for work, starts your cont
 streams its logs back and reports the result. It listens on no port; every connection is
 outbound.
 
-The setup command prints this line already filled in. It looks like:
+**BEHAVIOUR.** The agent image is published at **`ghcr.io/humansignal/lspo-agent:latest`**.
+`docker run` pulls it for you; `docker pull ghcr.io/humansignal/lspo-agent:latest` fetches
+it on its own if you would rather do that first. **If the pull is denied there is nothing
+to retry and nothing wrong with the machine**: the package's visibility has not been made
+public yet. Ask the workspace admin to make it public, or to grant that account access.
+
+Both the Connect reply and the setup command print the start line already filled in —
+prefer either of those, because they carry the real pool name and, when that registration
+minted one, the real token. The general form:
 
 ```bash
 mkdir -p "$HOME/lspo-agent" && chmod 1777 "$HOME/lspo-agent"
@@ -132,9 +160,63 @@ docker run -d --name lspo-agent \
   -e LSPO_AGENT_API_URL=https://orchestrator.example.com \
   -e LSPO_AGENT_NAME=$(hostname) \
   -e LSPO_AGENT_POOL=self-hosted \
-  -e LSPO_AGENT_REGISTRATION_TOKEN=<from the pool> \
+  -e LSPO_AGENT_REGISTRATION_TOKEN=PASTE_THE_POOL_TOKEN_HERE \
   --stop-timeout 300 \
-  lspo-agent:dev
+  ghcr.io/humansignal/lspo-agent:latest
+```
+
+Three of those values are placeholders and the printed command has them filled in: the
+orchestrator's address, the pool name, and the token — see the registration section above
+for when the reply carries a token and when it does not.
+
+**RECOMMENDATION, and it is the other half of a safety check the agent cannot make.** The
+first line above is a prerequisite rather than decoration: the agent runs as a non-root
+user and creates its own state directory inside the one you make, which requires owning
+the parent. Skip it and the container exits at startup with "Operation not permitted",
+which names nothing anybody can act on.
+
+The agent checks the state directory's permissions from **inside** its own container,
+where it can prove almost nothing about the host: the directories above the mount are its
+own image, and even for the mount it cannot show that the name it reads is the name the
+docker daemon resolves. The block below runs that check where the answer is. **It only
+reads; it changes nothing.** Anything it prints as `UNSAFE` is a directory another account
+on that machine could use to replace the agent's state — the directory the daemon hands
+your jobs their credentials out of — so fix those before starting the agent. On a fresh
+machine it ends `INCOMPLETE`, because the state directory does not exist until the agent
+has started once; run it again afterwards. It has to be told which uid the agent runs as,
+and before there is an agent that can only be the uid the image declares (10001); the agent
+prints this same block in its own startup log with the uid it really has.
+
+```bash
+t="$HOME/lspo-agent/state"; u=$(id -u); a=10001; g=1; bad=; here=; leaned=
+lean() { if [ "$1" = "$a" ] && [ "$1" != "$u" ] && [ "$1" != 0 ]; then leaned=1; fi; }
+seen() { m=${1%% *}; r=${1#* }; o=${r%% *}; k=${r##* }; }
+now=$(stat -c "%a %u %f" "$t") || now=; seen "$now"; why=
+if [ -n "$now" ]; then here=1
+  lean "$o"
+  if [ "$o" != "$u" ] && [ "$o" != 0 ] && [ "$o" != "$a" ]; then leaned=1; why="the docker daemon hands your jobs their credentials out of this directory, and whoever owns it decides what is in it -- uid $o is neither you, nor root, nor the uid this block was told the agent runs as ($a)"
+  elif [ $((0$m&022)) -ne 0 ]; then why="any account on this host can write into the directory the daemon hands your jobs their credentials out of, so any account can leave a symlink there for the daemon to follow AS ROOT -- chmod g-w,o-w '$t' (a symbolic link in its place reports mode 777 here, and is the same finding)"
+  fi
+  if [ -n "$why" ]; then bad=1; echo "UNSAFE $t (mode $m, owner uid $o): $why"; fi
+fi
+p="$t"
+while [ "$p" != / ]; do d=$(dirname "$p"); why=
+  now=$(stat -c "%a %u %f" "$p") || now=; seen "$now"; e=$o; el=
+  if [ -n "$k" ] && [ $((0x$k&0xf000)) -eq $((0xa000)) ]; then el=1; fi
+  now=$(stat -Lc "%a %u %f" "$d") || now=; seen "$now"
+  lean "$o"
+  if [ -n "$el" ] && [ $((0$m&022)) -ne 0 ] && [ $((0$m&01000)) -ne 0 ]; then lean "$e"; fi
+  if [ "$o" != "$u" ] && [ "$o" != 0 ] && [ "$o" != "$a" ]; then leaned=1; why="its owner (uid $o) may rename $p away whatever the mode says, and a sticky bit does not restrain a directory's OWNER -- that is neither you, nor root, nor the uid this block was told the agent runs as ($a); chmod cannot fix it, move the agent's state directory out from under it"
+  elif [ $((0$m&022)) -ne 0 ] && [ $((0$m&01000)) -eq 0 ]; then why="any account on this host can rename $p away -- chmod g-w,o-w '$d', or chmod +t '$d' if it must stay shared"
+  elif [ $((0$m&022)) -ne 0 ] && [ -n "$e" ] && [ "$e" != "$u" ] && [ "$e" != 0 ] && [ "$e" != "$a" ]; then leaned=1; why="its sticky bit stops everyone but the owner of $p, and that entry belongs to uid $e -- neither you, nor root, nor the uid this block was told the agent runs as ($a); chown it to yourself, or move the agent's state directory elsewhere"
+  fi
+  if [ -n "$why" ]; then bad=1; echo "UNSAFE $d (mode $m, owner uid $o): $why"; fi
+  p="$d"
+done
+if [ -n "$bad" ]; then echo "fix every UNSAFE directory above -- each line says how; until then another account here can put its own directory in the agent's place"; fi
+if [ -n "$leaned" ] && [ -n "$g" ]; then echo "ASSUMED this block was TOLD the agent runs as uid $a and did not check it, and at least one directory above was judged on that -- ACCEPTED because it belongs to $a, or reported because it does not. If the number is wrong (a --user override, an image of your own, version skew) then an acceptance here is worth nothing and a report here is a mismatch rather than an intruder. Set a= at the top and run this again, or use the copy the agent prints in its own startup log, which carries the uid it really has."; fi
+if [ -z "$here" ]; then echo "INCOMPLETE $t does not exist yet, so the directory the daemon will hand your jobs their credentials out of was NOT checked -- and a sticky bit protects the entries in a directory, not the vacant names, so any account that can write to a shared parent can create it before the agent does. Run this block again after the agent's first start."
+elif [ -z "$bad" ]; then echo "OK: nothing but you, root or uid $a can replace $t or any directory on the way to it"; fi
 ```
 
 **BEHAVIOUR, for all four bullets below.** Four parts of that command are load-bearing, and
@@ -223,11 +305,21 @@ production and fails in the demo. Use `/tmp` or the staging directory.
 
 ## Pointing a pipeline node at your deployment
 
-Add a script node whose configuration is:
+In the pipeline editor: **Add node → External → External node**, pick the deployment you
+registered, and wire an edge into it from the step whose output it should read. That is
+the same thing as adding a script node with this configuration, which is what it stores
+and what an API caller writes directly:
 
 ```json
 {"step_kind": "external", "external_deployment_id": 12, "params": {}}
 ```
+
+**BEHAVIOUR.** Whatever the node delivers through its output ports comes back as that
+run's **artifacts**, and each one's kind is the **port name** it was delivered under. A
+downstream step configured to read `output` finds exactly what was published under
+`output` — which is why "the node ran but nothing downstream sees anything" is almost
+always a port name that does not match, or an object the marker inventoried but claimed
+under no port at all.
 
 **RULE for the "Required" column, BEHAVIOUR for the rest of the table below.** The
 configuration validator refuses a node whose `external_deployment_id` is missing or is not
