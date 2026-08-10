@@ -42,6 +42,13 @@ the contract happily permits a real node to skip.
 
 So: **start with [docs/](docs/), then copy `node.py` and edit it.**
 
+If you would rather follow a numbered list — and if you are a coding agent working from
+somebody's task description, this is the one to follow — the ordered path from that
+description to a node the orchestrator can run is
+[Building your own node from this template](CLAUDE.md#building-your-own-node-from-this-template)
+in `CLAUDE.md`: read the documents, edit `node.py`, prove it with the harness, take the
+digest, hand it over.
+
 ## What is here
 
 | Path | What it is |
@@ -53,6 +60,7 @@ So: **start with [docs/](docs/), then copy `node.py` and edit it.**
 | `tests/` | The tests that harness runs, and `pytest.ini` names the label on each one |
 | `CONFORMANCE-BASELINE.md` | What the harness measured against `node.py`, before and after the repair |
 | `CONTRIBUTING.md` | Notes on making this repository your own |
+| `CLAUDE.md` | The ordered path from a task description to a connected node, and the invariants `node.py` exists to demonstrate |
 
 ## Build and run
 
