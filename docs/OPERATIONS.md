@@ -149,9 +149,10 @@ prefer either of those, because they carry the real pool name and, when that reg
 minted one, the real token. The general form:
 
 ```bash
-mkdir -p "$HOME/lspo-agent" && chmod 1777 "$HOME/lspo-agent"
+mkdir -p "$HOME/lspo-agent" && chmod 700 "$HOME/lspo-agent"
 
 docker run -d --name lspo-agent \
+  --user "$(id -u):$(id -g)" \
   -v /var/run/docker.sock:/var/run/docker.sock \
   --group-add $(getent group docker | cut -d: -f3) \
   -v "$HOME/lspo-agent:$HOME/lspo-agent" \
@@ -168,55 +169,44 @@ Three of those values are placeholders and the printed command has them filled i
 orchestrator's address, the pool name, and the token — see the registration section above
 for when the reply carries a token and when it does not.
 
-**RECOMMENDATION, and it is the other half of a safety check the agent cannot make.** The
-first line above is a prerequisite rather than decoration: the agent runs as a non-root
-user and creates its own state directory inside the one you make, which requires owning
-the parent. Skip it and the container exits at startup with "Operation not permitted",
-which names nothing anybody can act on.
+**BEHAVIOUR.** The first line is a prerequisite rather than decoration, and skipping it does
+not fail where the mistake is. `docker run` needs the mount source to exist, and when it does
+not, the daemon creates it — **as root**. The agent then cannot create its own state directory
+inside it, which it has to do itself because it makes that directory owner-only and a `chmod`
+needs ownership rather than write permission, and the container exits at startup with
+"Operation not permitted", which names nothing anybody can act on.
 
-The agent checks the state directory's permissions from **inside** its own container,
-where it can prove almost nothing about the host: the directories above the mount are its
-own image, and even for the mount it cannot show that the name it reads is the name the
-docker daemon resolves. The block below runs that check where the answer is. **It only
-reads; it changes nothing.** Anything it prints as `UNSAFE` is a directory another account
-on that machine could use to replace the agent's state — the directory the daemon hands
-your jobs their credentials out of — so fix those before starting the agent. On a fresh
-machine it ends `INCOMPLETE`, because the state directory does not exist until the agent
-has started once; run it again afterwards. It has to be told which uid the agent runs as,
-and before there is an agent that can only be the uid the image declares (10001); the agent
-prints this same block in its own startup log with the uid it really has.
+**BEHAVIOUR.** `--user "$(id -u):$(id -g)"` runs the agent as the account that pasted the
+command rather than as the service account its image declares, and that flag is what makes
+`chmod 700` enough. Everything the agent keeps on the machine — its identity file, every
+running job's credentials — then belongs to that account, and nothing here is shared with any
+other account on the host. Earlier releases had no such flag: the agent ran as a uid that
+belongs to nobody on the host, so the parent directory had to be world-writable (`chmod 1777`)
+before the agent could create anything inside it, and a world-writable directory then had to be
+policed, which is what the long host-side audit that used to be printed here existed for.
+Running as the operator removes the world-writable directory, and the audit went with it.
 
-```bash
-t="$HOME/lspo-agent/state"; u=$(id -u); a=10001; g=1; bad=; here=; leaned=
-lean() { if [ "$1" = "$a" ] && [ "$1" != "$u" ] && [ "$1" != 0 ]; then leaned=1; fi; }
-seen() { m=${1%% *}; r=${1#* }; o=${r%% *}; k=${r##* }; }
-now=$(stat -c "%a %u %f" "$t") || now=; seen "$now"; why=
-if [ -n "$now" ]; then here=1
-  lean "$o"
-  if [ "$o" != "$u" ] && [ "$o" != 0 ] && [ "$o" != "$a" ]; then leaned=1; why="the docker daemon hands your jobs their credentials out of this directory, and whoever owns it decides what is in it -- uid $o is neither you, nor root, nor the uid this block was told the agent runs as ($a)"
-  elif [ $((0$m&022)) -ne 0 ]; then why="any account on this host can write into the directory the daemon hands your jobs their credentials out of, so any account can leave a symlink there for the daemon to follow AS ROOT -- chmod g-w,o-w '$t' (a symbolic link in its place reports mode 777 here, and is the same finding)"
-  fi
-  if [ -n "$why" ]; then bad=1; echo "UNSAFE $t (mode $m, owner uid $o): $why"; fi
-fi
-p="$t"
-while [ "$p" != / ]; do d=$(dirname "$p"); why=
-  now=$(stat -c "%a %u %f" "$p") || now=; seen "$now"; e=$o; el=
-  if [ -n "$k" ] && [ $((0x$k&0xf000)) -eq $((0xa000)) ]; then el=1; fi
-  now=$(stat -Lc "%a %u %f" "$d") || now=; seen "$now"
-  lean "$o"
-  if [ -n "$el" ] && [ $((0$m&022)) -ne 0 ] && [ $((0$m&01000)) -ne 0 ]; then lean "$e"; fi
-  if [ "$o" != "$u" ] && [ "$o" != 0 ] && [ "$o" != "$a" ]; then leaned=1; why="its owner (uid $o) may rename $p away whatever the mode says, and a sticky bit does not restrain a directory's OWNER -- that is neither you, nor root, nor the uid this block was told the agent runs as ($a); chmod cannot fix it, move the agent's state directory out from under it"
-  elif [ $((0$m&022)) -ne 0 ] && [ $((0$m&01000)) -eq 0 ]; then why="any account on this host can rename $p away -- chmod g-w,o-w '$d', or chmod +t '$d' if it must stay shared"
-  elif [ $((0$m&022)) -ne 0 ] && [ -n "$e" ] && [ "$e" != "$u" ] && [ "$e" != 0 ] && [ "$e" != "$a" ]; then leaned=1; why="its sticky bit stops everyone but the owner of $p, and that entry belongs to uid $e -- neither you, nor root, nor the uid this block was told the agent runs as ($a); chown it to yourself, or move the agent's state directory elsewhere"
-  fi
-  if [ -n "$why" ]; then bad=1; echo "UNSAFE $d (mode $m, owner uid $o): $why"; fi
-  p="$d"
-done
-if [ -n "$bad" ]; then echo "fix every UNSAFE directory above -- each line says how; until then another account here can put its own directory in the agent's place"; fi
-if [ -n "$leaned" ] && [ -n "$g" ]; then echo "ASSUMED this block was TOLD the agent runs as uid $a and did not check it, and at least one directory above was judged on that -- ACCEPTED because it belongs to $a, or reported because it does not. If the number is wrong (a --user override, an image of your own, version skew) then an acceptance here is worth nothing and a report here is a mismatch rather than an intruder. Set a= at the top and run this again, or use the copy the agent prints in its own startup log, which carries the uid it really has."; fi
-if [ -z "$here" ]; then echo "INCOMPLETE $t does not exist yet, so the directory the daemon will hand your jobs their credentials out of was NOT checked -- and a sticky bit protects the entries in a directory, not the vacant names, so any account that can write to a shared parent can create it before the agent does. Run this block again after the agent's first start."
-elif [ -z "$bad" ]; then echo "OK: nothing but you, root or uid $a can replace $t or any directory on the way to it"; fi
-```
+**BEHAVIOUR, and it is what `--user` does not fix.** `0700` protects the directory; it does
+not protect its **name**. If any directory above `$HOME/lspo-agent` can be written by other
+accounts — a home directory at `0775` with a shared group, which some sites ship — a member of
+that group can rename `lspo-agent` away and leave their own directory under the same name. The
+running agent never notices: its bind mount stays attached to the original inode, so its
+startup checks and every recheck go on passing, while the docker daemon resolves the
+replacement **on the host and as root** every time it mounts a job's credentials. Nothing
+checks that, and nothing prints a checker for you to run — not the block above, not the agent's
+own startup log. One shipped for several releases and was withdrawn: every version of it was
+wrong in the same family of ways, because a short check cannot soundly resolve a chain of
+symbolic links — resolving a path to its canonical form is exactly what discards the directory
+that *holds* each link — and the platform's position is that a checker it cannot vouch for is
+worse than none (`agent/README.md`, "Run it").
+
+**BEHAVIOUR for the first sentence below, RECOMMENDATION for the second.** They are the two
+the orchestrator prints with the block, word for word:
+
+> On a machine other accounts use, nothing here checks who can replace the agent's state
+> directory or anything on the path to it — including the directories holding any symbolic
+> links in that path. Satisfy yourself of that before you start, and prefer a machine you do
+> not share.
 
 **BEHAVIOUR, for all four bullets below.** Four parts of that command are load-bearing, and
 each one fails in its own way when it is wrong (`agent/README.md`, "Run it"). None of them
@@ -225,7 +215,9 @@ what visibly breaks:
 
 * **`--group-add`** with the host's docker group id. The agent image runs as a non-root
   user and has no access to the docker socket without it. The agent refuses to start
-  rather than failing on its first job.
+  rather than failing on its first job. It grants a supplementary **group**, and a group is
+  independent of the uid, so `--user` above does not take the socket away — the two flags do
+  not fight, they are answering different questions.
 * **The state bind mount, with the host path and the container path spelled the same**,
   and the workdir pointing at a **child** of it. This is the one that silently destroys
   jobs when it is wrong. The agent asks the host's docker daemon to bind-mount each job's
