@@ -14,9 +14,12 @@ threefold, and each is worth the file:
   restatement against the original in one step, which is exactly how the "exactly nine
   environment variables" mistake in this file was found and fixed;
 * two of them are not restatements at all. ``test_a_bind_mounted_file_never_sees_a_rotation``
-  and ``test_a_0700_credentials_directory_is_unreadable_to_any_other_user`` exercise real
+  and ``test_a_workload_running_as_any_uid_can_read_its_own_credentials`` exercise real
   kernel and docker behaviour with real containers, and would genuinely change if the
-  platform's mount or permission choices did.
+  platform's mount or permission choices did. The second of those is the closest thing in
+  this repository to a tripwire on the platform: it goes red if the credential modes are
+  ever narrowed back to the shape that forced a customer's image to run as one particular
+  uid.
 """
 
 from __future__ import annotations
@@ -270,62 +273,126 @@ def test_a_bind_mounted_file_never_sees_a_rotation(image, workdir):
         container.remove()
 
 
-# ------------------------------------------------- who may read the credentials file
+# ------------------------------------------- which user may read the credentials file
 
 
 @subject_is_platform
 @traces_to(
-    'agent/creds.py JobCredentials.write: "The directory is created 0700 and the file 0600 — on a shared '
-    'machine the credential must not be readable by other users", with the agent running as its own uid '
-    'and agent/runner.py setting run_as only in local demo mode.'
+    'agent/creds.py: "The workload runs as whatever user the customer\'s image declares, which is not this '
+    'agent\'s user and is not ours to choose — so the credential file is readable by any uid" '
+    '"in a directory anyone may walk through but only the runner may list"; CREDS_FILE_MODE is "The '
+    'credential file itself: readable by every uid, writable by none" and "Both modes are applied on EVERY '
+    'call, and that is load-bearing rather than tidy". agent/runner.py _local_staging_mounts: "On object '
+    'storage the image\'s own user is left alone, because the only host path it touches is its own '
+    'credentials directory, and that one is deliberately readable by every uid so this stays true".'
 )
-def test_a_0700_credentials_directory_is_unreadable_to_any_other_user(image, workdir):
-    """The undocumented constraint a customer's Dockerfile has to satisfy.
+def test_a_workload_running_as_any_uid_can_read_its_own_credentials(image, workdir):
+    """There is no uid your image has to run as — measured, not asserted.
 
-    Setup:    a credentials directory with the modes the agent really uses — 0700 on the
-              directory, 0600 on the file — owned by the user running these tests.
-    Action:   read it from inside the node's image twice: once as the image's own user,
-              once as the directory's owner.
-    Validate: the first is refused with a permission error; the second succeeds.
+    Setup:    a credentials directory with the modes the agent really uses — 0711 on the
+              directory, 0444 on the file — owned by the user running these tests, which
+              is nobody the node's image has ever heard of.
+    Action:   read the file from inside the node's image as three different users — the
+              image's own, a uid that exists in no passwd file anywhere, and the uid of
+              the directory's owner — and then once more as that stranger uid after the
+              file has been atomically replaced the way a credential refresh replaces it.
+    Validate: all four reads return the document. Then, separately, that the stranger uid
+              is refused when it tries to LIST that directory rather than open the file
+              it was told the name of — which is the one constraint the modes still place
+              on a node, and the reason this test does not simply assert "everything is
+              readable".
 
-    Not a restatement either: this measures real containers against a real 0700
-    directory. In production the two happen to line up — the agent runs as uid 10001 and
-    this node's image also runs as uid 10001 — so the workload can read a directory only
-    its owner can open. That is a coincidence, not a design. A customer image that picks
-    any other non-root user gets ``PermissionError`` on its own credentials file, and
-    nothing in the contract documentation warns them. Running as root avoids it, which is
-    precisely the wrong thing to encourage.
+    Not a restatement: this runs real containers against a real directory and lets the
+    kernel answer. It replaces a test that asserted the OPPOSITE, and the replacement is
+    the stronger of the two. The old one measured a genuine defect — the file was 0600 in
+    a 0700 directory owned by whatever uid the agent ran as, so an image declaring any
+    other user got ``PermissionError`` on its own credentials, and the workaround a
+    customer would find was to run as root. Both halves of that are gone: the modes were
+    widened so the leaf is readable by anybody who is told its name, and the agent is now
+    started as the operator's own account rather than as the uid its image declares, so
+    "the agent is uid 10001" is not true of a deployed agent either.
+
+    So this test is a tripwire on the thing that would bring the defect back. If the
+    platform ever narrows either mode, the customer-visible symptom is a permission error
+    inside somebody's container hours into a job — and this goes red first, here, naming
+    the mode that moved. The refresh case is not padding: the modes are applied on every
+    write and a refresh creates a brand-new inode, so a permission granted once and not
+    re-applied would pass every short test and kill exactly the long jobs.
     """
+    import json
     import os
+    import tempfile
 
-    assert contract.CREDENTIALS_DIR_MODE == 0o700 and contract.CREDENTIALS_FILE_MODE == 0o600
-
+    # NOTE for anyone tempted to add `assert CREDENTIALS_FILE_MODE == 0o444` here. An
+    # earlier draft did, and it made the test WEAKER: narrowing the constant then failed
+    # on a literal in this repository disagreeing with a constant in this repository,
+    # which is a check marking its own homework, and the container never ran at all. The
+    # modes below are applied and the kernel is asked; a constant that moves the wrong way
+    # is reported as what a customer would actually see, which is a container that cannot
+    # open its own credentials.
     creds_dir = workdir / 'perms'
     creds_dir.mkdir(parents=True, exist_ok=True)
-    (creds_dir / 'creds.json').write_text('{"schema_version": 1}')
+    creds_file = creds_dir / 'creds.json'
+    creds_file.write_text('{"schema_version": 1}')
     os.chmod(creds_dir, contract.CREDENTIALS_DIR_MODE)
-    os.chmod(creds_dir / 'creds.json', contract.CREDENTIALS_FILE_MODE)
+    os.chmod(creds_file, contract.CREDENTIALS_FILE_MODE)
 
-    as_image_user = _read_creds_as(image, creds_dir, user=None)
-    assert 'PermissionError' in as_image_user, (
-        f'a 0700 directory owned by uid {os.getuid()} was readable by the image\'s own user: {as_image_user}'
+    # 31337 deliberately has no entry in the image's /etc/passwd and no home directory:
+    # "any uid" has to mean a uid nobody arranged for, or the claim is about this image's
+    # own accounts rather than about the platform.
+    for user in (None, '31337:31337', f'{os.getuid()}:{os.getgid()}'):
+        whose = user or "the image's own user"
+        got = _read_creds_as(image, creds_dir, user=user)
+        assert '"schema_version": 1' in got, (
+            f'a {contract.CREDENTIALS_FILE_MODE:04o} file in a {contract.CREDENTIALS_DIR_MODE:04o} directory '
+            f'owned by uid {os.getuid()} was NOT readable as {whose}: {got}. That is the uid coupling coming '
+            f'back, and it costs a customer their node'
+        )
+
+    # The refresh: a new inode moved into place, exactly as agent/creds.py does it. The
+    # mode has to be re-applied on the new file, and nothing but a real replacement can
+    # show whether it was.
+    handle, replacement = tempfile.mkstemp(dir=str(creds_dir), prefix='.creds-', suffix='.json')
+    with os.fdopen(handle, 'w') as stream:
+        stream.write(json.dumps({'schema_version': 1, 'generation': 'refreshed'}))
+    os.chmod(replacement, contract.CREDENTIALS_FILE_MODE)
+    os.replace(replacement, creds_file)
+
+    after_refresh = _read_creds_as(image, creds_dir, user='31337:31337')
+    assert '"generation": "refreshed"' in after_refresh, (
+        f'the replaced credential file was not readable by an arbitrary uid: {after_refresh}. A mode applied '
+        f'once and not re-applied fails only the jobs that live long enough to see a refresh'
     )
 
-    as_owner = _read_creds_as(image, creds_dir, user=str(os.getuid()))
-    assert '"schema_version": 1' in as_owner, as_owner
+    # And the limit of the freedom: the directory is traversable, not listable.
+    listing = _list_creds_as(image, creds_dir, user='31337:31337')
+    assert 'PermissionError' in listing, (
+        f'a {contract.CREDENTIALS_DIR_MODE:04o} directory was listable by a uid that does not own it: '
+        f'{listing}. The node must open the path LSPO_CREDENTIALS_FILE names, never enumerate its directory'
+    )
 
 
 def _read_creds_as(image: str, creds_dir, user: str | None) -> str:
+    return _in_the_image(image, creds_dir, user, 'print(open("/lspo/creds/creds.json").read())')
+
+
+def _list_creds_as(image: str, creds_dir, user: str | None) -> str:
+    return _in_the_image(image, creds_dir, user, 'import os; print(os.listdir("/lspo/creds"))')
+
+
+def _in_the_image(image: str, creds_dir, user: str | None, script: str) -> str:
     import os
+    import re
 
     container = docker.start(
         image,
-        name=f'lspo-conformance-perms-{os.getpid()}-{user or "image"}',
+        name=f'lspo-conformance-perms-{os.getpid()}-{re.sub(r"[^0-9a-z]+", "-", (user or "image").lower())}'
+        f'-{"list" if "listdir" in script else "read"}',
         env={},
         creds_dir=creds_dir,
         user=user,
         entrypoint='python',
-        command=('-c', 'print(open("/lspo/creds/creds.json").read())'),
+        command=('-c', script),
     )
     try:
         container.wait(timeout=60)

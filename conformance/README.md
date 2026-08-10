@@ -118,7 +118,11 @@ orchestrator, so a change there cannot turn them red by itself. Their value is t
 rules the rest of the suite leans on are written down with a citation a human can check in
 one step — which is exactly how the "the agent injects exactly nine variables" error in
 this file was found. Two of them are not restatements and really do exercise the
-mechanism, with real containers: the bind-mounted-file test and the 0700-permissions test.
+mechanism, with real containers: the bind-mounted-file test and the one that reads a
+job's credentials from inside the image as four different users, including a uid that
+exists in no passwd file. That second one is the closest this repository comes to a
+tripwire on the platform — it goes red if the credential modes are ever narrowed back to
+the shape that forced a customer's image to run as one particular uid.
 
 ## What is in here
 

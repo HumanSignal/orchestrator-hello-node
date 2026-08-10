@@ -134,12 +134,16 @@ class Job:
 
         self.creds_dir = workdir / 'creds'
         self.creds_dir.mkdir(parents=True, exist_ok=True)
-        # 0755/0644, not the agent's 0700/0600: this image runs as uid 10001 and the
-        # harness runs as whoever invoked pytest, so the agent's own permissions would
-        # make the file unreadable here for a reason that has nothing to do with the
-        # node. See CONFORMANCE-BASELINE.md — whether the real agent hits the same wall
-        # is a platform question, not a node one.
-        os.chmod(self.creds_dir, 0o755)
+        # Exactly the modes the real agent applies (``contract.CREDENTIALS_*_MODE``),
+        # rather than the looser 0755/0644 this used to use. The looser pair existed
+        # because the agent's own modes at the time — 0700 on the directory, 0600 on the
+        # file, owned by the agent's uid — would have made the file unreadable to this
+        # image for a reason that had nothing to do with the node. That is no longer
+        # true, and using the real modes buys something: this directory is owned by
+        # whoever invoked pytest and the container runs as somebody else entirely, so
+        # EVERY container test in this suite now reads its credentials the way a
+        # customer's image does in production, through the "other" permission class.
+        os.chmod(self.creds_dir, contract.CREDENTIALS_DIR_MODE)
 
         self.endpoint = Endpoint(max_object_bytes=max_object_bytes)
         self.endpoint.on_rotate = self._write_creds
@@ -259,7 +263,10 @@ class Job:
         data = json.dumps(self.envelope(token), sort_keys=True, indent=2).encode('utf-8')
         handle, tmp = tempfile.mkstemp(dir=str(self.creds_dir), prefix='.creds-', suffix='.json')
         try:
-            os.fchmod(handle, 0o644)
+            # On the NEW inode, every time, because that is what the agent does. A mode
+            # applied once and not re-applied would let every short test pass and fail
+            # only the jobs that live long enough to see a refresh.
+            os.fchmod(handle, contract.CREDENTIALS_FILE_MODE)
             with os.fdopen(handle, 'wb') as stream:
                 stream.write(data)
                 stream.flush()
@@ -288,8 +295,12 @@ class Job:
         node believes.
         """
         path = self.creds_dir / filename
+        # Unlinked first because the mode below leaves the file read-only to everybody,
+        # its owner included: a second call under the same name would otherwise fail on
+        # the write rather than on anything the test is about.
+        path.unlink(missing_ok=True)
         path.write_bytes(json.dumps(self.envelope(token), sort_keys=True, indent=2).encode('utf-8'))
-        os.chmod(path, 0o644)
+        os.chmod(path, contract.CREDENTIALS_FILE_MODE)
         return path
 
     def start(
