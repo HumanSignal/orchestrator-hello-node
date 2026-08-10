@@ -17,6 +17,7 @@ below exists to serve both without lying to either.
 |---|---|
 | `node.py` | A complete, correct example step. Copy it and edit |
 | `Dockerfile` | The smallest image that is a real external step |
+| `logs.sh` | Follows the agent and the job containers it starts, live. An operator's convenience, not part of the contract |
 | `docs/` | **The documentation. Start here** |
 | `conformance/` | A black-box harness: it builds this image, runs it, judges it from the outside only |
 | `tests/` | The tests that harness runs |

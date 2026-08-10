@@ -500,6 +500,46 @@ which you cannot change from a node.
 
 ---
 
+## Watching a run, live
+
+**BEHAVIOUR, and it is why `docker logs` on its own is not the answer.** The agent removes
+a job's container when the job ends. So the container whose output you want is gone by the
+time you go looking for it, and the runs worth reading are exactly the short ones that went
+wrong. To see a step's own output on the machine that ran it you have to attach at the
+moment the container **starts**.
+
+`logs.sh` in this repository does that, by watching the docker daemon's event stream:
+
+```bash
+./logs.sh agent    # the agent: claims, heartbeats, container lifecycle
+./logs.sh node     # every job container the agent starts, from its first line
+./logs.sh both     # the two interleaved and tagged (the default)
+```
+
+**BEHAVIOUR.** Job containers are named `lspo-<execution>-g<generation>` and carry the
+labels the agent puts on them, including `lspo.agent` with the agent's own name — which is
+what lets the script follow only the work this agent started on a machine running several.
+
+**RECOMMENDATION.** Start it before you start the run rather than after. The interesting
+part of a failing step is usually its first three lines, and those are the ones a container
+that has already exited can no longer show you.
+
+**BEHAVIOUR, and it decides which of the two journals to trust.** The same node output is
+shipped to the orchestrator and appears live in the run view, which is the only option when
+the agent is on somebody else's machine. It is not the same document: the platform keeps a
+tail of the last **1000 lines** and drops the oldest when a run is chattier than that, and
+the durable copy stored with the execution is built from that same trimmed buffer (see
+[PROTOCOL.md](PROTOCOL.md#33-logging), which is also why a step should say the
+important things once, at the end, in few lines). The copy on the machine is the whole of
+it, for as long as the container lives.
+
+**BEHAVIOUR.** The agent's own journal is an ordinary `docker logs -f lspo-agent`, and it
+is the one that explains a run which never started at all: a refused image pull, a
+credentials directory it could not write, an environment variable outside the allowlist.
+None of those ever reach a container of yours, so none of them appears in a node's log.
+
+---
+
 ## Troubleshooting
 
 **The table below is labelled row by row, in its Kind column**, rather than by one label
@@ -535,6 +575,7 @@ two rows where that distinction bites are marked inline.
 | A cancelled run's partial output does not reach anything downstream | nothing was collected, because cancelling a step whose container is **still running** does not read its marker | BEHAVIOUR — by design, on both branches of the cancellation race. One exception, and it is not about a running container: a cancellation arriving while collection is **already under way** lets that collection finish, and what it verified is attached to the cancelled run as diagnostics under no output port — visible in the artifact browser, readable by nobody downstream ([PROTOCOL.md](PROTOCOL.md#7-cancellation)) | nothing to fix in the node. If partial output matters, let the step finish or fail on its own rather than cancelling it |
 | Logs stop partway through | you exceeded the shipping rate, or a single line exceeded 64 KiB and its tail was discarded | BEHAVIOUR — the excess is dropped silently | fewer, shorter lines |
 | Logs never appear at all | a logging library that defaults to WARNING and to stderr only, or a buffered stdout | Unchecked | configure the logger explicitly and set `PYTHONUNBUFFERED=1` |
+| A container's output is gone before you could read it | the agent removes a job's container when the job ends | BEHAVIOUR — nothing is retained locally afterwards | attach at the start instead: [Watching a run, live](#watching-a-run-live) |
 | Log lines arrive mangled, with stray `[31m` in them | you printed ANSI colour; the escape byte is stripped as a control character and the rest survives | BEHAVIOUR | print plain text |
 | The node runs but downstream steps see nothing | the objects were inventoried but claimed under no output port | BEHAVIOUR — an unclaimed object is verified and kept, but not offered downstream | claim them under a port; `produced_ports` is what becomes downstream artifacts |
 | A configuration key on the node seems to do nothing | unknown keys are accepted and ignored | BEHAVIOUR — validation ignores what it does not recognise | check the spelling against the configuration table above |
