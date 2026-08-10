@@ -21,6 +21,88 @@ below exists to serve both without lying to either.
 | `conformance/` | A black-box harness: it builds this image, runs it, judges it from the outside only |
 | `tests/` | The tests that harness runs |
 | `CONFORMANCE-BASELINE.md` | The measured record of what the harness found |
+| `CONTRIBUTING.md` | The two-minute version of making this repository your own node |
+
+## Building your own node from this template
+
+**Background**, about this repository and the order to work in. You have somebody's task
+description and a clone of this repository, and you have to finish at a node the
+orchestrator can run. Every step below points at the document that owns the detail rather
+than repeating it, because a rule written down twice goes stale in one of the two places
+and the stale copy is the one somebody is reading.
+
+1. **Read before you write.**
+   [docs/README.md](docs/README.md#how-to-read-this-three-kinds-of-statement) first — it
+   says how to read the three labels, and it routes everything else — then
+   [docs/AUTHORING.md](docs/AUTHORING.md#the-recipe) end to end: the recipe, the
+   [skeleton](docs/AUTHORING.md#the-skeleton), and the
+   [checklist](docs/AUTHORING.md#the-checklist) you come back to before you ship. Where the
+   shorter documents leave you guessing, [docs/PROTOCOL.md](docs/PROTOCOL.md) is the
+   authority; the [shipped-capability matrix](docs/README.md#shipped-capability-matrix) is
+   what keeps you from building against something the contract models and the orchestrator
+   does not send.
+
+2. **Implement the task by editing `node.py`.** Copy and edit it; do not rewrite it from
+   memory. Every one of the [invariants](#invariants-for-nodepy) below is something a
+   from-scratch version leaves out and a real run then punishes, and
+   [docs/AUTHORING.md](docs/AUTHORING.md#nodepy-and-this-skeleton) says which of its
+   choices are choices rather than rules. Another language is fine — nothing here imports
+   anything from the orchestrator — but then `node.py` is your behavioural reference rather
+   than your starting point, and the `Dockerfile`, which copies `node.py` and nothing else,
+   becomes yours to change too.
+
+3. **Verify with the harness. This is the step that makes the difference**, because after
+   step 2 it is judging **your** container: it builds the image from this repository's own
+   `Dockerfile` and never patches it. The commands are in
+   [Running the harness](#running-the-harness) — run them from the repository root, as
+   written. The bar, honestly:
+
+   * `python -m pytest` must be green. Exactly one skip is expected and is not about your
+     node: the verbatim-citation check, which needs a checkout of the orchestrator.
+   * `--red-for-real` differs from the plain run only when some test carries
+     `expected_red_until_fixed`, and none does today — see
+     [the expected-red mechanism](#the-expected-red-mechanism). Run both anyway: the day
+     they disagree, a known defect is being absorbed and you want to know whose.
+   * **A red test is a question, not an instruction.** Only tests in the `conforms_today`
+     group have `node.py` as their subject today, so nothing you write moves a
+     `subject_is_platform` or `harness_self_test` result; and most of that group rests on
+     `basis_reference_quality` or `basis_our_policy`, which by
+     [the definitions below](#the-three-labels-and-why-they-are-load-bearing) are things
+     the contract permits a node to do differently. Several assert that this node
+     **copies** its inputs to its outputs — a node that transforms them fails those
+     honestly, as `tests/test_inputs.py` says in its own opening docstring. Get the split
+     for your run from `--print-labels`, read the check, and change your node only if what
+     you broke is the contract
+     ([docs/CONFORMANCE.md](docs/CONFORMANCE.md#if-a-conformance-directory-exists-in-this-repository)).
+   * [CONFORMANCE-BASELINE.md](CONFORMANCE-BASELINE.md) measures the **reference** node,
+     before and after its repair. It is the most useful thing here to read before writing
+     your own, and it describes nothing about yours: its counts predict nothing about your
+     run, and it is not a document to rewrite in your node's image.
+
+4. **Build the image and take its digest.** `docker build` first, then whichever of the two
+   commands in [docs/OPERATIONS.md](docs/OPERATIONS.md#the-image-reference) matches how the
+   image will travel — the repo digest of a pushed image, or the bare id of one built
+   locally, which that section explains only resolves on a machine that already holds it.
+   Use them as they are written rather than a variant of your own.
+
+5. **Write the README the human gets.** What the node does; the input and output
+   assumptions you made, port names first, since
+   [docs/AUTHORING.md](docs/AUTHORING.md#1-decide-what-your-node-consumes-and-produces)
+   explains what those names decide downstream; the two commands from step 4; and the
+   connect steps from step 6. [CONTRIBUTING.md](CONTRIBUTING.md) is a fair model for length.
+
+6. **Hand back the digest, and where to paste it.** Point the human at the registration
+   steps instead of summarising them, and hand over the start line the registration reply
+   prints instead of one you wrote yourself. **BEHAVIOUR.** A node is registered from
+   Settings, the **External Nodes** tab, **Connect node**, where that digest is pasted; the
+   reply creates the pool, the deployment and the revision, and prints the agent's
+   `docker run` line already filled in with the orchestrator's address, the pool name and —
+   only when that registration minted one — the pool token
+   ([docs/OPERATIONS.md](docs/OPERATIONS.md#registering-a-node), and
+   [starting the agent](docs/OPERATIONS.md#starting-the-agent) for the general form). That
+   line is run on the machine that will run your container. Registering is not running:
+   nothing executes until a pipeline node points at the deployment
+   ([docs/OPERATIONS.md](docs/OPERATIONS.md#pointing-a-pipeline-node-at-your-deployment)).
 
 ## The three labels, and why they are load-bearing
 

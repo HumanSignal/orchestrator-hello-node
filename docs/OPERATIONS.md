@@ -139,11 +139,10 @@ that talks to the orchestrator: it enrols once, polls for work, starts your cont
 streams its logs back and reports the result. It listens on no port; every connection is
 outbound.
 
-**BEHAVIOUR.** The agent image is published at **`ghcr.io/humansignal/lspo-agent:latest`**.
+**BEHAVIOUR.** The agent image is published at **`ghcr.io/humansignal/lspo-agent:latest`**,
+and the package is **public**: an anonymous pull works and no `docker login` is needed.
 `docker run` pulls it for you; `docker pull ghcr.io/humansignal/lspo-agent:latest` fetches
-it on its own if you would rather do that first. **If the pull is denied there is nothing
-to retry and nothing wrong with the machine**: the package's visibility has not been made
-public yet. Ask the workspace admin to make it public, or to grant that account access.
+it on its own if you would rather do that first.
 
 Both the Connect reply and the setup command print the start line already filled in —
 prefer either of those, because they carry the real pool name and, when that registration
