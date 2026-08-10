@@ -268,29 +268,57 @@ ceiling at all (`agent/executors/docker_exec.py:248-274`).
 
 ---
 
-## The uid coupling
+## Which user your image runs as
 
-**BEHAVIOUR.** Each job's credentials directory is created on the agent's disk with mode
-`0700` and the file inside it `0600`, owned by the uid the agent process runs as
-(`agent/creds.py:88-98`, `agent/identity.py:64-65`). In object-storage mode the agent does
-**not** force your container's user, so your image runs as its own `USER`.
+**BEHAVIOUR.** Your image may run as **any user it likes**, and no uid has to match
+anything on the agent's side. Each job's credentials directory is created on the agent's
+disk mode `0711` — anyone may walk through it, only the agent may list it — with the file
+inside it mode `0444`, readable by every uid and writable by none, and **both modes are
+re-applied on every write**, a mid-job credential refresh included
+(`agent/creds.py:79-106`, `CREDS_DIR_MODE` / `CREDS_FILE_MODE` /
+`JobCredentials.write`). What keeps the credential off the rest of the machine is the
+agent's own working directory **above** the mounted leaf, which is owner-only and is
+bind-mounted into nothing (`agent/identity.py:74-75`, `ensure_private_workdir`) — not the
+file's own mode.
 
-A `0700` directory owned by uid A is unreadable to a process running as uid B. So the two
-uids must match, and nothing checks or warns.
+**BEHAVIOUR.** In object-storage mode the agent does **not** force your container's user,
+so your image runs as its own `USER`, and the file is deliberately readable by every uid
+so that this stays safe to do (`agent/runner.py` `_local_staging_mounts`).
 
-* The shipped agent image runs as **uid 10001** (`Dockerfile.agent`).
-* The example node image also uses **uid 10001**, independently.
-* An agent started directly on a host instead of from that image runs as the invoking
-  user, commonly uid 1000, and then 10001 is wrong.
+**RULE, and it is the only thing the mode bits still ask of you — enforced by the kernel
+rather than by any check the platform makes on your node.** Open the exact path the
+agent gives you in `LSPO_CREDENTIALS_FILE`. Do **not** list the directory it is in: `0711`
+grants traversal, not enumeration, so `os.listdir("/lspo/creds")` is a permission error for
+every user except the agent. Nothing needs enumeration — you were told the name.
 
-**RECOMMENDATION.** Build your image with `USER` at uid 10001 and confirm with whoever
-runs the agent. Do not "fix" a permission error by running as root: it does work, because
-root bypasses the check, and it puts a root process on somebody's machine for nothing.
+**RECOMMENDATION.** Run as a non-root user of your own choosing. Not because a permission
+depends on it — none does — but because there is no sandbox around your container, so a
+root workload is a root process on somebody else's machine for no benefit.
+
+### What this replaced, because a document that changed its mind owes you the reason
+
+Earlier revisions of this page, of `PROTOCOL.md` and of the example `Dockerfile` told you
+to build your image as **uid 10001**, and that instruction is now wrong in both of its
+halves. Following it is what would hurt you, so it is worth being explicit about what
+changed rather than quietly deleting it.
+
+* **The file was `0600` in a `0700` directory owned by the uid the agent ran as.** An
+  image declaring any other user got a permission error on its own credentials, and the
+  only repair a customer could find was to run their container as root — the platform
+  punishing the careful choice. The modes above replaced that: confidentiality now comes
+  from an ancestor nobody else can traverse, which is a property the workload's uid cannot
+  affect.
+* **"The agent is uid 10001" was never something you could rely on, and is no longer even
+  the common case.** That is the account the agent's own image declares, but the command
+  an operator is given starts the agent with `--user "$(id -u):$(id -g)"`, so a deployed
+  agent runs as the person who pasted it. Two independent numbers were being treated as
+  one.
 
 **BEHAVIOUR, local demo mode only.** With local-path staging the agent forces your
 container to its own uid and gid with no supplementary groups, so your image's user is
-ignored entirely. Anything that writes under that user's home directory works in
-production and fails in the demo. Use `/tmp` or the staging directory.
+ignored entirely — the opposite problem, and it is still live. Anything that writes under
+that user's home directory works in production and fails in the demo. Use `/tmp` or the
+staging directory.
 
 ---
 
@@ -555,7 +583,7 @@ two rows where that distinction bites are marked inline.
 | Agent logs 401 at startup | wrong pool token, or a stale `LSPO_AGENT_TOKEN` still in the environment, which wins over the saved identity | RULE — the token is authenticated on every request | remove the stale variable; the saved identity is enough after the first start |
 | Job fails immediately naming an environment variable | the deployment declares a variable the agent's `ALLOWED_ENV` does not permit | RULE — checked before your container starts | add the name or a pattern to the agent's allowlist, or stop declaring it |
 | Container dies at once with a missing credentials file | the agent's state is in a docker volume rather than a host path, so the credentials directory the daemon mounted was an empty one it created | Unchecked — the docker daemon creates an empty directory rather than failing | mount a real host directory at the same path inside and outside, with the workdir a child of it |
-| Container dies with permission denied on its credentials | uid mismatch between your image and the agent process | Unchecked — nothing compares the two uids or warns | rebuild with the agent's uid, usually 10001 |
+| Container dies with permission denied on its credentials | **not** a uid mismatch — the file is `0444` in a `0711` directory, so any user can open it. Either you listed the directory instead of opening the path (`0711` grants traversal, not enumeration), or your image makes `/lspo` itself non-traversable and has defeated its own mount, or the agent's state lives somewhere its modes are not enforced (a CIFS/SMB share, Docker Desktop file sharing, some NFS exports) | Unchecked in your container; the agent refuses at startup for the cases it can detect | open the exact path in `LSPO_CREDENTIALS_FILE` rather than listing its directory; check nothing in your image narrows `/lspo`. Do **not** rebuild as a particular uid — no uid is required, and do not "fix" it by running as root |
 | Node fails with "`LSPO_CREDENTIALS` is not set" | your code reads the wrong variable name | Unchecked — the platform sets `LSPO_CREDENTIALS_FILE` and cannot police how you read it | read `LSPO_CREDENTIALS_FILE` |
 | Run fails with "no completion marker" | your container exited 0 without writing `__lspo_complete.json` | RULE — a marker is required on a successful run | write one before exiting 0. (*RECOMMENDATION, not part of the rule*: write one on your own failure path too, so your `error` and your part-finished inventory survive. It will not save a run an operator stopped while it was still running, nor one whose running container was stopped by the runtime budget — neither of those collects anything today) |
 | Run fails naming a hash or size mismatch | the object changed after you hashed it, or the marker was written before the upload finished | RULE — every published object is re-read and held to the marker | hash the bytes you actually wrote. (*RECOMMENDATION, not part of the rule*: write the marker last — nothing observes write order, so this failure is the only symptom you will ever see of getting it wrong) |

@@ -429,8 +429,11 @@ that ignores SIGTERM completely. Assert the marker and the timing.
 **RECOMMENDATION.** Register the node, start an agent, run the pipeline. See
 [OPERATIONS.md](OPERATIONS.md#registering-a-node).
 
-**What only level 3 proves.** That your image's uid can read its credentials; that the
-agent's environment allowlist permits every variable your deployment declares; that your
+**What only level 3 proves.** That your container can read the credentials a **real** agent
+wrote — which is not a question about your image's uid (any uid can open them) but about
+that machine: a state directory on a share that reports permissions without enforcing them,
+or an image that makes `/lspo` non-traversable, both fail here and nowhere else. Also that
+the agent's environment allowlist permits every variable your deployment declares; that your
 output ports arrive downstream as the artifact kinds you expected; that collection accepts
 your hashes.
 

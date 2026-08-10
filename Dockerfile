@@ -12,14 +12,22 @@ FROM python:3.12-slim
 # more than that. A container that runs as root is a container that can do more damage
 # than the job it was given.
 #
-# The NUMBER matters, not just the fact of being non-root. The agent bind-mounts each
-# job's credentials directory mode 0700, owned by the uid the AGENT process runs as, and
-# a 0700 directory owned by uid A is unreadable by a process running as uid B. Nothing in
-# the platform compares the two or warns; it surfaces as "permission denied" on the
-# step's own credentials file and looks like a broken node. 10001 is what the shipped
-# agent image uses. An agent started directly on a host instead runs as the invoking
-# user, usually 1000 — rebuild with `--build-arg STEP_UID=1000` if that is yours.
-ARG STEP_UID=10001
+# The NUMBER does not matter, and this file used to say the opposite. It instructed you
+# to build as uid 10001 because the agent bind-mounted each job's credentials directory
+# mode 0700 with the file inside it 0600, owned by the uid the agent ran as — so an image
+# declaring any other user could not open its own credentials. That was a real defect and
+# it has been fixed on the platform, in both of its halves: the mounted directory is now
+# 0711 and the file inside it 0444, re-applied on every write, so any uid can open a path
+# it has been told the name of; and the agent is started as the operator's own account
+# (`docker run --user "$(id -u):$(id -g)"`) rather than as the uid its own image declares,
+# so "the agent is 10001" is not true of a deployed agent either.
+#
+# So 4242 here is arbitrary, and deliberately NOT the agent image's 10001 — a number this
+# file shares with the agent is a number the next reader will assume has to match. Pick
+# whatever suits you, or set --build-arg STEP_UID=<n>. The one thing that is still true of
+# the mode bits: the credentials directory is traversable but not LISTABLE by you, so open
+# the exact path in LSPO_CREDENTIALS_FILE and never enumerate the directory it sits in.
+ARG STEP_UID=4242
 RUN useradd --create-home --uid ${STEP_UID} step
 
 WORKDIR /app

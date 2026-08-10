@@ -212,39 +212,57 @@ ones you do not: both, at the same time.
 
 ### 1.3 Where the credentials live, and who may read them
 
-**BEHAVIOUR.** The agent creates one directory per job on its own disk, mode `0700`, with
-the credentials file inside it at mode `0600`, and bind-mounts that directory read-only
-into your container (`agent/creds.py:88-98`, `agent/identity.py:64-65`). The directory is
-owned by the numeric uid the agent process runs as.
+**BEHAVIOUR.** The agent creates one directory per job on its own disk and bind-mounts it
+read-only into your container. The directory is mode `0711` — traversable by anyone,
+listable by nobody but the agent — and the credentials file inside it is mode `0444`,
+readable by every uid and writable by none. **Both are re-applied on every write**, and
+that matters more than it sounds: a refresh replaces the file with a brand-new one, so a
+permission granted once and not re-granted would let a short job pass and kill a long one
+partway through (`agent/creds.py:79-106`, `CREDS_DIR_MODE`, `CREDS_FILE_MODE`,
+`JobCredentials.write`).
+
+**BEHAVIOUR.** What keeps that credential off the rest of the machine is not the file's
+mode but the agent's own working directory above the mount, which is owner-only and is
+bind-mounted into nothing (`agent/identity.py:74-75`, `ensure_private_workdir`). The
+protection is an ancestor nobody else can traverse; the leaf is deliberately open, and it
+is open so that your image's user is never the platform's business.
 
 **BEHAVIOUR.** In object-storage mode the agent does **not** force your container's user;
-your image runs as whatever `USER` it declares (`agent/runner.py:2973-2974` returns an
-empty user for anything that is not local-path mode).
+your image runs as whatever `USER` it declares (`agent/runner.py` `_local_staging_mounts`
+returns an empty user for anything that is not local-path mode, and says why: "on object
+storage the image's own user is left alone, because the only host path it touches is its
+own credentials directory, and that one is deliberately readable by every uid so this
+stays true").
 
-The consequence is a coupling that nothing in the platform manages or checks: a `0700`
-directory owned by uid A is unreadable by a process running as uid B.
+**So there is no uid coupling: build your image to run as whatever user suits it.** Earlier
+revisions of this document said the opposite — that your numeric uid had to equal the
+agent's, "usually 10001". That was true of an older platform and is now false twice over.
+The modes were widened precisely so it would stop being true, and the agent is started with
+`--user "$(id -u):$(id -g)"`, so a deployed agent runs as the operator rather than as the
+account its own image declares. If you built an image around 10001 on the strength of the
+old text, nothing breaks — 10001 is as valid as any other number — but you are free of it.
 
-**RECOMMENDATION, with a hard consequence.** Your image's numeric uid must equal the
-numeric uid the agent process runs as. In the shipped agent image that is **10001**
-(`Dockerfile.agent`, `useradd --system --uid 10001 ... lspo`, then `USER lspo`), and it is
-the only reason the example node works: `examples/hello-node/Dockerfile` in the
-orchestrator independently chose the same number. So **build your image to run as uid
-10001**, and check with whoever operates the agent, because an agent started directly on a
-host rather than from that image runs as the invoking user, typically uid 1000, and then
-10001 is the wrong answer. An image whose uid does not match gets permission denied on its
-own credentials file, and the failure looks like a broken node rather than a mismatched
-uid. Nothing in the platform detects or warns about this today.
+**RULE, and the one thing the modes still ask of you — enforced by the kernel rather
+than by a check on your node.** Open the exact path named by
+`LSPO_CREDENTIALS_FILE`; never enumerate the directory it lives in. `0711` grants
+traversal, not listing, so a directory listing is a permission error for every user but the
+agent. You were told the name, so nothing needs the listing.
 
-**RECOMMENDATION.** Do **not** solve this by running as root. Root does bypass the
-permission check, so it appears to work, and it is the wrong fix: there is no sandbox
-around your container (see [OPERATIONS.md](OPERATIONS.md#residual-limits-stated-plainly)),
-so a root workload is a root process on somebody's machine for no benefit. If uid 10001 is
-impossible for you, say so to whoever operates the agent rather than escalating privilege.
+**RECOMMENDATION.** Run as a non-root user. Not for a permission — none requires it — but
+because there is no sandbox around your container (see
+[OPERATIONS.md](OPERATIONS.md#residual-limits-stated-plainly)), so a root workload is a
+root process on somebody's machine for no benefit.
+
+**BEHAVIOUR to know about, not a duty on you.** Every process inside your container can
+read your job's credentials; they already share a filesystem and an environment, and the
+envelope is scoped to that attempt's own staging prefix and expires. And an image that
+makes `/lspo` non-traversable defeats its own mount — nothing on the host prevents that.
 
 **BEHAVIOUR, local demo mode only.** When the staging area is a local directory the agent
 forces your container to the agent process's own uid and gid, with **no supplementary
-groups** (`agent/runner.py:2991`). Your image's own user is ignored, so anything that
-depends on it, most obviously writing under that user's home directory, works in
+groups** (`agent/runner.py` `_local_staging_mounts`). Your image's own user is ignored
+there — the opposite problem from the one above, and this one is still live — so anything
+that depends on it, most obviously writing under that user's home directory, works in
 production and fails in the demo.
 
 **RECOMMENDATION.** Write scratch files to `/tmp` or into your staging area, never into

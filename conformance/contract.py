@@ -112,17 +112,32 @@ LEGACY_CREDENTIALS_ENV = 'LSPO_CREDENTIALS'
 #: The opt-in progress line prefix. The trailing space is part of it.
 PROGRESS_PREFIX = '@lspo:progress '
 
-#: The uid the orchestrator's agent runs as inside its own container, and therefore the
-#: OWNER of every credentials directory it writes. The directory is 0700 and the file
-#: 0600, so a workload image running as any other non-root user cannot read its own
-#: credentials. Written down here because it is a real constraint on a customer's
-#: Dockerfile that nothing in the contract documents states — see
-#: ``tests/test_platform_rules.py`` and CONFORMANCE-BASELINE.md.
-AGENT_UID = 10001
+#: The mode the agent gives a job's credentials DIRECTORY (``agent/creds.py``
+#: ``CREDS_DIR_MODE``): **traversable by everybody, listable by nobody but the agent**.
+#: The execute bit is what lets a KNOWN filename inside be opened; the read bit is what
+#: lets the directory be enumerated, and the contract never needs that — your container
+#: is told the exact path in ``LSPO_CREDENTIALS_FILE``. So this is the one real
+#: constraint the mode bits still place on a node: open the path you were given, do not
+#: list the directory it is in.
+CREDENTIALS_DIR_MODE = 0o711
 
-#: The mode the agent gives a job's credentials directory and file.
-CREDENTIALS_DIR_MODE = 0o700
-CREDENTIALS_FILE_MODE = 0o600
+#: The mode the agent gives the credentials FILE itself (``agent/creds.py``
+#: ``CREDS_FILE_MODE``): **readable by every uid, writable by none**, and re-applied on
+#: every write, a credential refresh included. What keeps the credential off the rest of
+#: the machine is the agent's own working directory ABOVE the mounted leaf — owner-only,
+#: bind-mounted into nothing — rather than this file's mode.
+#:
+#: **There is therefore no uid your image has to run as**, and this pair of constants is
+#: the whole of the reason. There used to be: the directory was 0700 and the file 0600,
+#: owned by the uid the agent happened to run as, so an image declaring any other user
+#: could not open its own credentials and the only repair a customer could find was to
+#: run their container as root — the platform punishing the careful choice. Both halves
+#: of that are gone (orchestrator PR #250 for the modes; PR #268 makes the agent run as
+#: the operator's own account rather than as the uid its image declares), and this
+#: repository no longer records an agent uid at all, because a number written down here
+#: is a number somebody will build an image around. See
+#: ``tests/test_platform_rules.py`` and CONFORMANCE-BASELINE.md.
+CREDENTIALS_FILE_MODE = 0o444
 
 SHA256_PATTERN = re.compile(r'[0-9a-f]{64}')
 

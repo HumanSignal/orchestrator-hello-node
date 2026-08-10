@@ -61,9 +61,11 @@ register a repo digest before a second runner joins.
 "/app/node.py"]`, so your process really is the container's PID 1 and receives signals
 directly rather than through a shell that will not forward them.
 
-**RECOMMENDATION.** Run as uid 10001 unless the agent's operator tells you otherwise; see
-[PROTOCOL.md](PROTOCOL.md#13-where-the-credentials-live-and-who-may-read-them) for why
-that number, and why "run as root" is the wrong repair.
+**RECOMMENDATION.** Run as a non-root user — **any** non-root user. No uid has to match
+the agent's: your credentials file is mode `0444` in a `0711` directory, so any user can
+open it. This document used to name a number here, and that instruction is withdrawn; see
+[PROTOCOL.md](PROTOCOL.md#13-where-the-credentials-live-and-who-may-read-them) for what
+changed and why "run as root" was, and still is, the wrong repair.
 
 **RECOMMENDATION.** Set `PYTHONUNBUFFERED=1`, or your language's equivalent. Without it a
 buffered stdout means your logs arrive only when the process ends, which is exactly when
@@ -408,6 +410,12 @@ apart either treats advice as law or treats law as advice. Both are expensive.
 * [ ] **RECOMMENDATION.** Reads the credentials path from `LSPO_CREDENTIALS_FILE`, with no
       fallback that hides a missing variable. Nothing checks how you find the path; there
       is simply nothing else to read.
+* [ ] **RULE, enforced by the kernel rather than by a check on your node.** OPENS that
+      path. Does **not** list the directory it is in to discover the file: the agent
+      mounts that directory `0711`, which grants traversal but not enumeration, so a
+      listing is a permission error for every user except the agent. You were given the
+      name, so nothing needs the listing
+      ([PROTOCOL.md](PROTOCOL.md#13-where-the-credentials-live-and-who-may-read-them)).
 * [ ] **RECOMMENDATION.** Refuses an envelope whose `schema_version` it does not
       implement, and a `scheme` or `staging.mode` it does not support.
 * [ ] **RECOMMENDATION.** Ignores envelope and manifest fields it does not recognise,
@@ -524,6 +532,8 @@ apart either treats advice as law or treats law as advice. Both are expensive.
 
 * [ ] **RULE.** Pinned by digest — `registry/name@sha256:<64 hex>` or a bare
       `sha256:<64 hex>`. A tag is refused at registration.
-* [ ] **RECOMMENDATION.** Exec-form entrypoint, unbuffered output, and a uid matching the
-      agent's (10001 for the shipped agent image). The uid is checked by nothing and
-      fails as a permission error on your own credentials file.
+* [ ] **RECOMMENDATION.** Exec-form entrypoint, unbuffered output, and a non-root user of
+      your own choosing. **No particular uid is required** — the credentials file is
+      `0444` in a `0711` directory, so any user can open it. An earlier version of this
+      checklist demanded a uid matching the agent's; that is withdrawn
+      ([PROTOCOL.md](PROTOCOL.md#13-where-the-credentials-live-and-who-may-read-them)).

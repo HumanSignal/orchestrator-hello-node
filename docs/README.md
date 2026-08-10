@@ -117,7 +117,7 @@ own label.
 | How to test my node without an orchestrator | [CONFORMANCE.md](CONFORMANCE.md#level-1-run-it-with-a-hand-written-envelope) |
 | What a conformance suite can and cannot prove | [CONFORMANCE.md](CONFORMANCE.md#what-testing-cannot-prove) |
 | How to register my node and start the agent | [OPERATIONS.md](OPERATIONS.md#registering-a-node) |
-| Which uid my image must use, and why | [OPERATIONS.md](OPERATIONS.md#the-uid-coupling) |
+| Which user my image should run as (any of them — here is why) | [OPERATIONS.md](OPERATIONS.md#which-user-your-image-runs-as) |
 | Limits, quotas, and things that do not exist yet | [OPERATIONS.md](OPERATIONS.md#residual-limits-stated-plainly) |
 | Why my run is stuck at "Waiting for runner" | [OPERATIONS.md](OPERATIONS.md#troubleshooting) |
 

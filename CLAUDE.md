@@ -207,9 +207,13 @@ covered by a test, and none of them is enforced by the platform.
    container output is stored with the execution and searchable. Route every message that
    can reach a log through the redaction helper — an HTTP library puts the whole URL,
    signature included, into the text of its errors.
-10. **Run as uid 10001.** The agent bind-mounts the credentials directory mode `0700`
-    owned by its own uid; a mismatch is "permission denied" on the step's own credentials
-    and nothing in the platform warns about it. Do not "fix" it by running as root.
+10. **Run as a non-root user — any of them.** No uid has to match the agent's. The
+    credentials directory is mounted `0711` with the file inside it `0444`, so any user
+    can open it; confidentiality comes from an ancestor directory nobody else can
+    traverse. What the modes *do* still require: open the exact path in
+    `LSPO_CREDENTIALS_FILE`, never list its directory — `0711` grants traversal, not
+    enumeration. This rule used to say "run as uid 10001"; that was true of an older
+    platform and telling an author to build for it is now the harmful answer.
 
 ## House style
 

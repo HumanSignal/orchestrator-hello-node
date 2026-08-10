@@ -577,6 +577,63 @@ from the sentence to the conclusion. That is a judgement about meaning, no strin
 answers it, and it stays with whoever reviews the test. The structural check makes the
 judgement *possible* by forcing the sentence into the open where a reader can weigh it.
 
+### The uid instruction that was false — the check earning itself a second time
+
+The same check fired again, on the worst thing a public repository can be wrong about: an
+instruction telling authors how to *build* their image, where following it is what hurts
+them. This repository said, in nine places, that a job's credentials arrive as a `0600`
+file in a `0700` directory owned by the agent's uid, and that a customer's image therefore
+had to run as **uid 10001**. Every part of that had stopped being true.
+
+* The credentials **file** is `0444` and its directory `0711`, re-applied on every write
+  (orchestrator PR #250). Confidentiality comes from an ancestor directory nobody else can
+  traverse, not from the leaf's mode — precisely so that an image running as any uid can
+  open its own credentials.
+* The **agent** now runs as the operator's own account, not as the account its image
+  declares (orchestrator PR #268, `--user "$(id -u):$(id -g)"`). So "the agent is 10001"
+  was not what a deployed agent gave you either.
+
+The two errors compounded in the nastiest possible way. A half-correction that fixed only
+the second — "the agent runs as the invoking user, so build as uid 1000" — would have been
+*worse* than the original text, because it keeps the false `0700`/`0600` premise alive and
+sends the author chasing a number that changes per machine. The premise had to go first.
+
+What the citation check actually caught was one stale quotation: the old permissions test
+cited *"The directory is created 0700 and the file 0600 — on a shared machine the credential
+must not be readable by other users"*, and `agent/creds.py` no longer contains that
+sentence. One red assertion, on one test, was the only thread that led to nine wrong
+statements across the documents, the Dockerfile and the harness's own constants — none of
+which any test would have contradicted, because they were prose.
+
+The test it guarded has been replaced rather than deleted, and the replacement is stronger
+than the original: instead of asserting a coupling, it now measures that the coupling is
+**gone**, with real containers and four different users. See
+`test_a_workload_running_as_any_uid_can_read_its_own_credentials`.
+
+**Its liveness was measured, not assumed**, because a test that says "everything is
+readable" is exactly the shape that passes when nothing is being checked. Four mutations,
+each run against real containers, and each has to fail for the *right* reason:
+
+| Mutation | Result |
+|---|---|
+| the credential file narrowed back to `0600` | red — *"a 0600 file in a 0711 directory owned by uid 1000 was NOT readable as the image's own user"* |
+| the directory narrowed back to `0700` | red — the same, naming `0700` |
+| the directory widened to `0755`, so it can be listed | red — *"a 0755 directory was listable by a uid that does not own it"* |
+| the mode re-applied at job start but **not** on the refreshed inode | red — *"the replaced credential file was not readable by an arbitrary uid"* |
+
+And two negative controls, which must stay **green**, because the whole claim is that the
+image's own uid is nobody's business: rebuilding this repository's image as uid `10001`
+(the agent image's account) and as uid `1000` (a typical host operator) both pass.
+
+The first draft of the test failed that battery in the most instructive way. It opened with
+`assert CREDENTIALS_FILE_MODE == 0o444` — and narrowing the constant then failed on *that*
+line, comparing a literal in this repository against a constant in this repository, with
+the container never starting. A guard that marks its own homework. Removing it is what
+turned the mutations into the four honest failures above. The lesson is the same one this
+section already teaches, sharpened: a quotation is the only part of a document that can be
+mechanically held to its source, so the rules worth quoting are the ones a reader will act
+on — and a check must compare itself against something it does not also own.
+
 ---
 
 ## One demotion I would argue about — and the sentence that would settle it
@@ -654,8 +711,12 @@ begin-after-expiry case becomes worth splitting out as a test of its own.
   `tests/test_hello_node_example.py` does exercise that branch.)
 * **The agent's real credential-file permissions, end to end.** Measured in
   `tests/test_platform_rules.py` with a synthetic directory rather than one a running
-  agent produced. The harness itself deliberately uses 0755/0644 everywhere else, so that
-  a permission problem can never be mistaken for a node defect.
+  agent produced. The harness now applies the agent's real modes everywhere — `0711` on
+  the directory, `0444` on the file — rather than the looser 0755/0644 it used while
+  those modes were still 0700/0600 and would have locked the harness out of its own
+  fixture. That change is worth more than tidiness: the directory belongs to whoever ran
+  pytest and the container runs as somebody else, so every container test in the suite
+  now reads its credentials through the same permission class a customer's image uses.
 * **The environment allowlist end-to-end.** The agent refuses a manifest naming a variable
   outside `LSPO_AGENT_ALLOWED_ENV` *before the container starts*, so no black-box test of
   the node can observe it.
@@ -667,7 +728,14 @@ begin-after-expiry case becomes worth splitting out as a test of its own.
   the platform reworded while the baseline was being measured (see "The check earned itself
   this round"). It catches a rule whose WORDS changed; a rule whose words stayed and whose
   behaviour changed would still pass. Two tests really do exercise the mechanism with real
-  containers: the bind-mounted-file test and the 0700-permissions test.
+  containers: the bind-mounted-file test and
+  `test_a_workload_running_as_any_uid_can_read_its_own_credentials`, which reads a job's
+  credentials from inside the image as three users — the image's own, a uid in no passwd
+  file, and the directory's owner — then once more as that stranger uid across a
+  credential refresh, and finally confirms it still cannot LIST the directory. The citation check
+  fired a second time on exactly this area: the platform had widened those modes so that a
+  node image may run as any user, and this repository was still instructing authors to
+  build as uid 10001 (see "The uid instruction that was false").
 * **Generation fencing.** That a superseded runner physically cannot write into the live
   attempt's directory is a property of the staging prefix and the upload policy, not of the
   node. The harness proves the fence exists (a key outside the prefix is refused with 403)
