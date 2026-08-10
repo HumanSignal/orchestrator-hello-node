@@ -55,10 +55,13 @@ and the stale copy is the one somebody is reading.
    step 2 it is judging **your** container: it builds the image from this repository's own
    `Dockerfile` and never patches it. The commands are in
    [Running the harness](#running-the-harness) — run them from the repository root, as
-   written. The bar, honestly:
+   written. The bar, honestly — and **green is not it**, which is the whole of the third
+   bullet and the only part of this step worth memorising:
 
-   * `python -m pytest` must be green. Exactly one skip is expected and is not about your
-     node: the verbatim-citation check, which needs a checkout of the orchestrator.
+   * `python -m pytest` is how you run it. A green result means your node also behaves
+     like the reference one, which is more than the contract asks of it; a red one is the
+     third bullet's business, not a verdict. Exactly one skip is expected and is not about
+     your node: the verbatim-citation check, which needs a checkout of the orchestrator.
    * `--red-for-real` differs from the plain run only when some test carries
      `expected_red_until_fixed`, and none does today — see
      [the expected-red mechanism](#the-expected-red-mechanism). Run both anyway: the day
