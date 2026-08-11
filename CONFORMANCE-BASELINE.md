@@ -2,20 +2,36 @@
 
 > ## Status: all twenty defects below are FIXED
 >
-> `node.py` was rewritten and the whole suite is green, in both modes:
+> `node.py` was rewritten and the whole suite is green, in every mode:
 >
 > ```
-> python -m pytest -q                  → 128 passed, 1 skipped
-> python -m pytest -q --red-for-real   → 128 passed, 1 skipped
+> python -m pytest -q                  → 140 passed, 1 skipped
+> python -m pytest -q --red-for-real   → 140 passed, 1 skipped
+> LSPO_ORCHESTRATOR_SRC=… LSPO_ORCHESTRATOR_REF=origin/master python -m pytest -q
+>                                      → 141 passed          (the skip is the citation check;
+>                                                             with the sources present it runs)
+> python verify_mutations.py           → 12/12 claims verified red against this suite
 > ```
 >
-> The two lines are now identical, which is the point: there is no `expected_red_until_fixed`
+> **A skip other than that one now FAILS the run** (`tests/conftest.py`): a conditional test
+> that skips has not run, and a guard that can disappear while the summary line stays green
+> is the failure mode this repository keeps rediscovering.
+>
+> Those numbers were 128 for one release. Twelve tests were added since — eleven in
+> `tests/test_cancellation.py` and one holding the harness's own stall instrument to
+> account — and what they measure is in
+> [the stop path was the right shape and inert](#the-round-after-the-stop-path-was-the-right-shape-and-inert)
+> immediately below. Group counts today: `conforms_today` 50, `subject_is_platform` 67,
+> `harness_self_test` 22, `expected_red_until_fixed` 0. Bases: `basis_contract` 82,
+> `basis_reference_quality` 35, `basis_our_policy` 24.
+>
+> The first two lines are identical, which is the point: there is no `expected_red_until_fixed`
 > test left, so CI mode and the true result cannot differ. All twenty tests that used to be
 > red were moved into `conforms_today`, where a regression turns the run red immediately
 > rather than being absorbed as an expected failure.
 >
-> **Everything below this box is the measurement that was taken BEFORE the repair, and it is
-> kept deliberately.** It is the evidence for what each defect actually cost, and every one
+> **Everything below the next section — *The round after* — is the measurement that was taken
+> BEFORE the repair, and it is kept deliberately.** It is the evidence for what each defect actually cost, and every one
 > of them is a mistake a first version of a node makes — which makes it the most useful
 > reading in this repository for somebody about to write one. Read it as history, not as a
 > description of the file in this directory.
@@ -34,6 +50,347 @@
 > * `test_several_inputs_are_all_copied` (green throughout) pinned the shape of output
 >   names. It is why the fix for the two-ports-one-filename collision disambiguates only
 >   the names that actually collide, instead of namespacing every output by its port.
+
+## The round after: the stop path was the right shape, and inert
+
+**The claim under test was that `node.py` does not handle a stop at all. It does** — and
+had since the rewrite: a handler installed on SIGTERM and SIGINT, setting a flag and
+nothing more; the flag checked between units of work; the inventory at module scope; a
+marker written last, with `status: "cancelled"` and `exit_code: 20`, matching the code the
+process returns. Every line of the shape `docs/AUTHORING.md` prescribes was there, and the
+suite proved it. So the gap was somewhere else, and there were two of them.
+
+### 1. The mechanism that made the flag readable did nothing
+
+A flag cannot be read by a process parked in a socket call, and `node.py` knew that: it
+kept a ledger of transfers in flight and its handler closed them. **Neither half worked**,
+and both were measured directly rather than argued about:
+
+| What the file did | What was measured |
+|---|---|
+| put the **response** on the ledger | a response exists only once the store has begun to answer, so during the wait that matters the ledger is empty |
+| called **`close()`** on it | mid-read that raises `RuntimeError: reentrant call inside <_io.BufferedReader>` *inside the handler*, where `contextlib.suppress` swallows it, and the read then waits out its whole timeout |
+
+So the real stop latency was the socket timeout, on both paths. Stopped during a held-open
+download: **12.2 s**. During an upload: **10.2 s**. Against a store that never answers at
+all — the case a stop actually has to survive — the read timeout is 25 s, and the container
+took **25.2 s** to go, out of a nominal thirty that
+[PROTOCOL.md](docs/PROTOCOL.md#7-cancellation) is explicit nobody is promised.
+
+The repair is on the **connection**, registered when its socket is created — before a byte
+of a request is sent — and the handler calls `shutdown(SHUT_RDWR)`, which makes the pending
+call return at once. Both schemes are covered: plain HTTP is what the harness and a local
+demo exercise, TLS is what every presigned URL in production uses, and a fix that covered
+only the first would have been invisible where it matters. Measured after: **0.22 s** and
+**0.24 s** on the same two scenarios. One thing is deliberately exempt — once the marker is
+being written, nothing may abandon it: there is nothing left to rescue by cutting that
+connection and a whole run's account of itself to lose.
+
+That is one further act inside a signal handler, and `docs/AUTHORING.md` says a handler
+sets a flag and does no work "and especially network work". **The ambiguity is real and it
+is resolved rather than ignored**: a socket shutdown starts nothing, waits for nothing and
+cannot block, so it is not work in the sense the rule is about — and the reason the rule
+gives (that the cancellation path itself crashes) is why it is the last thing in the
+handler and its failure is ignored. Nothing that *decides* anything moved into the handler.
+The reasoning is in the code, at `_on_stop`.
+
+### 2. The harness never asked for the receipt
+
+Four cancellation tests, and not one of them required a marker to exist. The helper they
+share returns early when there is none — deliberately, because the contract permits
+silence — with the consequence that **a step which exits the instant it is signalled,
+writing nothing at all, passed every one of them**. Prompt exit was measured; the account
+of the run was not, and the account is the only thing salvage can publish from.
+
+That was proved rather than asserted: a copy of `node.py` that writes no marker on the stop
+path still passes `test_a_step_stopped_during_a_download_does_not_claim_it_succeeded`,
+`test_a_cancelled_step_stops_taking_on_new_work` and
+`test_a_step_that_cannot_be_stopped_costs_the_whole_grace_period`. Only the fourth notices,
+and only because that scenario has an object already on the ledger — stopped before it
+produces anything, the old suite had nothing to say.
+
+Four tests close it, all `conforms_today`:
+
+| Test | What it forbids |
+|---|---|
+| `test_a_stopped_step_leaves_a_receipt_and_says_it_was_stopped` | being stopped and leaving no marker, or one that calls the ending anything but `cancelled` |
+| `test_the_receipt_of_a_stopped_step_carries_the_code_the_process_returned` | the marker and the process telling two different stories, and an exit code that reads as "broken" rather than "stopped" |
+| `test_a_stopped_step_claims_no_object_the_store_never_received` | a receipt that inventories an object nobody can find |
+| `test_a_stop_is_noticed_without_waiting_for_the_transfer_it_landed_in` | a stop latency equal to the socket timeout, measured against a store that never answers |
+
+### All four are `basis_reference_quality`, and none of them may be anything else
+
+The temptation here is `basis_contract`, and it has to be refused for the sixth time.
+`external/contract.py` does say *"A cancelled run still writes a marker: partial logs and
+partial outputs are exactly what someone will want to look at afterwards"* — but it says it
+while explaining what a field means, and everything the platform actually **does** with an
+absent marker on this path treats it as an ordinary outcome:
+`_salvage_what_the_step_produced` publishes *"what a FAILED or cancelled step managed to
+write"* and returns an empty list when there is none, and the collector reports *"No
+completion marker was written, so the step gave no account of itself and nothing it
+produced could be salvaged"* as a finding, not a refusal. A marker is **required** only
+after a reported success. Read literally, no rule makes any of these four behaviours a
+violation, so labelling them as conformance would teach a preference as law — which is the
+one mistake this document exists to keep correcting.
+
+The same goes for exit 20. `agent/runner.py` `_classify` asks
+`if context.cancel_requested.is_set() or exit_code == EXIT_CANCELLED` and answers
+`'cancelled'` either way, so nothing requires the code. Read the other way round, that line
+is the whole argument for using it: **20 is the only signal that says "stopped" rather than
+"broken" when the platform was not the party that asked.**
+
+### Liveness: one table, and it is executable
+
+Every row below was re-run against the suite **as it stands in this commit** by
+`verify_mutations.py`, which patches the file, runs the named test, records whether it went
+red and on which assertion, and restores. It exits non-zero if any claim is unsupported.
+
+```
+python verify_mutations.py     →  12/12 claims verified red against the current suite
+```
+
+| Mutation | The test that reds, and on what |
+|---|---|
+| the SIGTERM handler is never installed | the receipt test — *"its receipt says 'succeeded'"*; and the promptness test — *"took 25.4s to go"* |
+| `shutdown()` put back to `close()` | promptness — *"took 25.4s to go after being asked to stop, with a store that was never going to answer"* |
+| the marker claims `outputs/ghost.csv`, never written | the over-claim test names the ghost |
+| no marker on the stop path | the receipt test — *"wrote no completion marker: the store holds []"*; the other two **skip**, naming the legal ending |
+| the ledger forgets a `will_close` connection after its headers | the mid-body test — *"took 25.9s while reading a body that had stopped arriving"* |
+| one elapsed deadline replaced by the standard library's per-address spend | the multi-address test — *"spent 31.4s failing to reach a host with 3 addresses"* |
+| the name lookup left unbounded | the lookup test — *"spent 43.1s on a name lookup that was never going to answer"* |
+| the deadline not recomputed after a proxy's `CONNECT` | the proxy test — *"spent 20.4s getting a connection through a proxy that took seven of them to answer"* |
+| the receipt corrected by a second document | the one-receipt test — *"wrote 2 completion markers for one run"* |
+| the exit code revised after the document was written | the same test — *"the one receipt says the step exited 0 and it returned 1"* |
+| the receipt's elapsed deadline removed | the drip test — *"spent 42.9s on a receipt whose answer was dribbled out over forty"* |
+| the stalling listener announcing on `accept()` | the harness self-test — *"announced a stall before the client had said anything"* |
+
+### Why that script exists: this document once claimed three guards that were not here
+
+The multi-address, name-lookup and proxy tests were written, measured red under their
+mutations, and reported — and then an edit that replaced a **slice of the test file between
+two anchors** deleted all three while adding two others. The claims stayed. For one commit
+this document described a suite that did not exist, and the three helpers those tests used
+sat in the harness with no callers at all: replacing the elapsed deadline with per-address
+timeouts, removing the bounded lookup, or deleting the recomputation after `CONNECT` would
+every one of them have stayed green.
+
+Nothing caught it because **a claim about a test is prose, and prose is not executable**.
+`verify_mutations.py` makes it executable, and two things it found on its own first runs are
+worth keeping:
+
+* a mutation must be patched onto **the path the behaviour would really take** — the
+  "correct the receipt with a second document" patch first landed on the success path, where
+  in that scenario the first write has already timed out, so it never executed and reported
+  a green that said nothing;
+* a patch target that appears **twice** is now refused rather than resolved to the first
+  match, because the second version of that same mutation landed in the work-failure branch,
+  where its condition is dead — again green, again meaningless.
+
+The rule that follows, and it is a rule about evidence rather than about code: **never
+report mutation evidence for a test that is not in the committed suite at the moment of
+reporting**. The script is how that is checked rather than remembered.
+
+**What is still not measured.** That any of this is *collected*. A local SIGTERM models the
+node and nothing else: on the runtime-deadline path the terminal report is refused and the
+marker is never read (the lease is clamped to the deadline, so `complete()` answers
+`lease_lost`), and an operator's Cancel usually arrives as a SIGKILL. The receipt is
+written for the runs where it is read, and for the day those gaps close. Nothing in this
+repository can test that half.
+
+### The review of that round: the same defect, twice more, in the same file
+
+The repair above was shipped for review and came back with the finding that matters most
+here — **it had the defect it was fixing, one layer up, twice.** "The object was not on the
+ledger during the wait that matters" was fixed for exactly the wait that had been measured,
+and there are four waits on this path, reached through different objects:
+
+| The wait | What it was doing | What it does now |
+|---|---|---|
+| getting a connection: DNS, TCP, **TLS handshake** | governed by the 25-second transfer timeout, and unreachable — `ssl` detaches the plain socket while wrapping it, so shutting that down raises `OSError: [Errno 9] Bad file descriptor` and the handshake runs to the timeout regardless (measured) | **bounded** by its own three-second budget, with the flag re-checked the moment the call returns so a stop that arrived during it does not go on to start a request |
+| waiting for the store to begin answering | fixed last round | unchanged |
+| **reading the body** | the ledger was empty: `http.client` closes the connection as soon as it has parsed the headers of a `Connection: close` response — which urllib sets on every request — and the `close()` override took the entry off | the override is gone; one request is in flight at a time, so the entry is simply replaced by the next connection |
+| waiting for an upload to be acknowledged | fixed last round | unchanged |
+
+Measured on the shipped-and-reviewed version, both with a listener that accepts and then
+says nothing: a stop during a stalled **TLS handshake** cost **25.2 s**, and a stop while a
+**body had stopped arriving** cost **24.7 s** — the same 25-second timeout, twice, in the
+release whose whole subject was not paying it. After: **3.2 s** (bounded, not cut) and
+**0.3 s**.
+
+**The TLS half also closed a hole in what this suite can see at all.** Every presigned URL
+in production is https and this harness's store is plain http, so a stop mechanism proved
+only over http was a claim about the wrong protocol. It needed no certificate authority and
+no `openssl`: a handshake stalls before any certificate is offered, so a listener that
+accepts and refuses to speak is enough. `conformance/stalling.py` is that listener, and it
+is also what produces the mid-body case, which the store's hooks cannot — they fire while a
+request is still being authorised, which is before a byte of the response exists.
+
+### And the exception for a second stop was swallowing the first
+
+The same round introduced "nothing may abandon the receipt", and applied it to **every**
+marker. A stop landing while a marker claiming SUCCESS was in flight therefore changed
+nothing at all: the flag was set, the upload was left alone, it landed, and the step
+returned **0** — a document saying `succeeded` inside a launch the orchestrator records as
+cancelled, which is what `_step_account` renders for a human. Deterministic, not a race,
+and measured: exit `0`, receipts written `['succeeded']`.
+
+The protection is now asymmetric, and the asymmetry is the argument that was made for it in
+the first place. A receipt reporting a failure or a stop cannot be made worse by being cut
+short, and it is the run's only account: protected. A receipt claiming success is the one
+document a stop can turn into a lie: **not** protected — the handler cuts it, and the run
+writes the cancellation it has become. The flag is checked again after that write, before
+0 is returned, for the case where the receipt lands anyway.
+
+### The round after that: a retraction, and the same lesson a third time
+
+**The asymmetric protection argued for above is withdrawn.** It said: protect a receipt
+reporting a failure or a stop, but leave one claiming SUCCESS abandonable, because that is
+the document a stop can turn into a lie. The premise was right and the remedy was wrong.
+Abandoning the upload does not prevent the lie — **it makes which document survives
+unknowable.** Once the store has the whole body it may commit it, and cutting the socket
+revokes nothing, so the cancellation written next is a second write to the same key that
+can overlap the first. Neither this step nor object storage defines which of two
+overlapping writes wins. The harness demonstrated it directly: its delay hook holds the
+first commit back, the cancellation lands first, and the receipt the store serves is the
+one saying `succeeded` — with the process exiting 20 beside it, which is worse than the
+defect being fixed, because now the two accounts disagree as well.
+
+The test written for it made the same mistake one level up: **it looked away from the value
+the store serves**, and said so in its own docstring, blaming the harness's hook. That is
+the tell. A test that must avert its eyes from the property that matters is reporting a
+design problem, not a harness problem.
+
+What replaces it: the receipt is protected whatever it says, the check happens **after**
+that write, and the correction is a second write that begins only once the first has
+finished. The writes are sequential, so the survivor is knowable, and the test now asserts
+exactly it. This also makes the defence observable — the mutation that removes the check
+was **green** last round, because the abandonment covered for it; it is red now, because
+the check is the only thing standing there.
+
+### And the wait that was "bounded" was not bounded
+
+The three-second connect budget in that round was not an elapsed deadline, and could not
+have been: `socket.create_connection` resolves the name **before there is a socket to apply
+a timeout to**, and then applies the value **separately to each address it got back**.
+Measured, in a container:
+
+| Stimulus | Behaviour |
+|---|---|
+| one silently-dropped address, `timeout=4` | 4.0 s |
+| the same name on **three** such addresses, `timeout=4` | **12.0 s** — the number the caller passed, spent three times |
+| a name lookup against a resolver that receives every query and answers none | **40.6 s**, with the step's "budget" applying to none of it |
+
+Both are now covered by one elapsed deadline (`_connect_within`, `_resolve_within`), and the
+name lookup is bounded by handing it to a thread — the only thread in the file, and the
+only way the standard library offers, since `getaddrinfo` takes no timeout at all. Measured
+after: **10.4 s** and **10.5 s**.
+
+**And the value moved from three seconds to ten, in the opposite direction from the fix.**
+Three was chosen to make a test quick, and the cost of that is asymmetric in a way that is
+easy to get backwards: a deadline firing on a healthy-but-slow connect **kills the whole
+job**, because there is no automatic retry engine for external steps — every failed attempt
+is recorded as transient whatever the process returns, and a person has to notice and retry
+it by hand (`docs/PROTOCOL.md` section 6). A generous deadline costs, at worst, ten seconds
+of a stop nobody was promised any of.
+
+**Three stimuli were built and thrown away before one of these tests measured anything**,
+and that is worth recording because each looked correct:
+
+* an address in TEST-NET-3 — fails in **0.1 s**, nothing is routed there and the kernel
+  says so;
+* an unassigned address on the container's own bridge subnet — fails at **~3 s** whatever
+  timeout is asked for, because the kernel gives up on the ARP on its own schedule;
+* an unroutable *resolver* — the lookup fails in **0.4 s** for the same reason.
+
+Each made its test pass against a node with no bound at all. What works is a peer that
+receives and stays silent: a route that drops (`10.255.255.x`) and a resolver of our own in
+a container (`docker.silent_resolver`), and the multi-address test now **checks that its
+stimulus really hangs on this machine and skips if it does not**, rather than passing
+quietly where the network refuses what it cannot route.
+
+> Liveness for every round is in [one executable table](#liveness-one-table-and-it-is-executable)
+> near the top of this document, re-run by `verify_mutations.py`. The per-round tables that
+> used to sit in each section have been folded into it: they restated the same claims, and one
+> of them described a mechanism that a later round removed.
+
+### Round four: the correction could not be sequenced either, and the platform said so
+
+The redesign above — let the receipt land, then correct it — was reviewed and **fails on
+the same fact this file already documents about its own uploads**: a transport failure is
+ambiguous, and a store may accept a body after the client that sent it has gone. So when
+the success write times out and the cancellation is written next, the timed-out write can
+commit **after** it. Reproduced with the harness, holding the receipt's upload for twelve
+seconds against a step that gives up at ten: the cancellation lands first, the success
+commits last, and the run ends with `succeeded` beside exit 20 — the exact state the
+redesign existed to prevent. **Sequential calls are not sequential commits.**
+
+So the design got smaller instead of gaining a third mechanism. **One receipt, or none:**
+the flag is read once, before the document is composed; the write is protected; and if it
+fails, nothing else is written to that name — the exit code and one log line are the whole
+report, and the code is decided with the document so the two can never disagree.
+
+### What made that safe was measured on the platform, not assumed
+
+The question the design turns on is what the platform does with a `succeeded` marker beside
+a launch it recorded as cancelled. It was read rather than guessed, at `origin/master`:
+
+| Question | Answer, and where it is written |
+|---|---|
+| What decides the execution's outcome? | The orchestrator's own journal. `pipelines/external_finalize.py:254-260` maps `ExternalLaunchState` to the outcome and `:627-636` branches on it; the recovery path branches on `attempt.state` (`:819`, `:856`, `:863`). |
+| Can a marker claim a success? | No — it can only **veto** one. `:1371-1375` refuses a runner-reported success when the marker disagrees. There is no inverse. |
+| Are a stopped run's objects delivered? | No. Salvage attaches them with `role='logs'` and no `payload_kind` (`:3213-3216`, `:3242-3243`); even a cancellation racing a collection demotes what was already verified (`:2769-2770`). |
+| Does anything cascade downstream? | No. `_run_the_cascade` sits behind the compare-and-set in `_complete_execution` (`:2645-2651`), and `_cancel_execution` never calls it. |
+| What does the operator read? | Our sentence first, then the marker's **`exit_code` and `error`** — `status` is never rendered (`:2384-2394`). A stopped container that wrote `succeeded, 0` produces *"The external job was cancelled. The step exited with code 0."* |
+| Does the agent's exit code override? | No. `agent/runner.py:2829-2843` tests fence, hard stop, `deadline_hit` and `cancel_requested` **before** `exit_code == 0`. |
+
+**So the residual state is not a lie the platform can act on**, and a step that finished its
+work and was interrupted while *reporting* it has genuinely succeeded — the stop arrived
+late. That is what makes "write one document" sufficient rather than merely simpler.
+
+### The receipt is the one transfer that needs a clock — and the clock is a guess
+
+Nothing may abandon it, so nothing but elapsed time can end it — and `UPLOAD_TIMEOUT_S` is
+not elapsed time. It bounds **silence**, so a peer that sends one byte per window holds the
+transfer open indefinitely while never being idle. Measured with a store that dribbles the
+receipt's answer out over forty seconds: **42.9 s** without a deadline. With one: **20 s**.
+
+**The twenty is best-effort by construction, and an earlier version of this document
+justified it from a grace that was never promised.** Read at the deployed commit: nothing
+tells the container how long it has after a stop. Not the nine injected variables; not the
+credentials envelope, whose `expires_at` is a signature's lifetime; not the job description,
+whose `timeout_seconds` is a *requested* budget with no start time attached; and not the
+stop object the orchestrator composes on its heartbeat, which reaches the agent and stops
+there. Thirty seconds is what today's build passes to `docker stop` at every call site — an
+observation, not a guarantee, and the value is the agent's to choose. Against a remaining
+grace of zero no positive deadline can be honoured, and the alarm may be killed before it
+can log that it fired. What the number buys is a shape: long enough for a receipt to land on
+a store that is working, short enough that a step which will not land one stops trying while
+there may still be time to say so. Exposing the real remaining deadline to the workload is
+an open platform task, and it is the thing that would make this exact.
+
+### The deadline still leaked through a proxy
+
+`_connect_within` computes the remainder through the lookup and the TCP connect and stores
+it once, as the socket's timeout — and `HTTPSConnection.connect` then spends it *again* on
+the TLS handshake behind a proxy's `CONNECT`. Measured against a proxy that grants the
+tunnel after seven seconds and then goes silent: **17.6 s** for a ten-second deadline. The
+remainder is recomputed after the tunnel now: **10.5 s**.
+
+### A guard that could vanish, and a premise that proved the wrong thing
+
+The multi-address test's premise check probed **one** address for two seconds and accepted
+anything over 1.5 — which an address failing at the kernel's own ~3 s ARP give-up passes,
+while three of those cost ~9 s under the broken implementation, comfortably inside the
+test's own threshold. The guard could therefore have gone green against exactly what it
+exists to catch. It now probes the whole name and requires the timeout to have been spent
+once per address, which is the property the test depends on.
+
+And a skip no longer passes quietly: `tests/conftest.py` fails any run containing a skip
+other than the verbatim-citation check, and names it. A conditional test that skips has not
+run, and a guard that can disappear while the run stays green is the failure mode this
+repository keeps rediscovering.
+
+---
 
 Measured, not reasoned about. Every line below is the observed behaviour of the image
 built from this repository's own `Dockerfile`, run as a container against the harness in
@@ -612,7 +969,11 @@ than the original: instead of asserting a coupling, it now measures that the cou
 
 **Its liveness was measured, not assumed**, because a test that says "everything is
 readable" is exactly the shape that passes when nothing is being checked. Four mutations,
-each run against real containers, and each has to fail for the *right* reason:
+each run against real containers, and each has to fail for the *right* reason. (These
+mutate the harness's own permission constants rather than the node, so they are not in
+`verify_mutations.py`; what has been checked is that the test they name is still in the
+suite — `tests/test_platform_rules.py` — because a table of mutations against a test that
+no longer exists is exactly the failure recorded at the top of this document.)
 
 | Mutation | Result |
 |---|---|

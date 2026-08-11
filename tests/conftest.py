@@ -37,6 +37,20 @@ from conformance.markers import BASES, EXPECTED_RED_REASON, GROUPS
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
+#: The one skip this suite tolerates. It is the verbatim citation check, which needs a
+#: checkout of the orchestrator that this repository deliberately does not vendor, and it
+#: says so in its own message.
+TOLERATED_SKIP = 'test_every_contract_citation_quotes_the_platform_verbatim'
+
+#: Every other skip fails the run, and that is a deliberate reversal. Several tests here
+#: are conditional by design — a marker that may legitimately be absent, a stimulus the
+#: network may refuse to produce — and a conditional test that skips has NOT run: the
+#: guard it provides is gone for that run. Reported only in a summary line, that is
+#: invisible, and a guard that can disappear while the run stays green is the failure mode
+#: this repository keeps rediscovering. So a skip is now a red run that names itself, and
+#: whoever reads it decides whether the condition or the test is what needs fixing.
+_skipped: list = []
+
 
 def pytest_addoption(parser):
     parser.addoption(
@@ -150,3 +164,48 @@ def make_job(image, workdir):
 @pytest.fixture
 def sample_input() -> InputSpec:
     return InputSpec(relpath='data.csv', data=b'id,value\n1,alpha\n2,beta\n')
+
+
+def pytest_runtest_logreport(report):
+    """Remember every skip, with the reason it gave — and never an expected failure.
+
+    Pytest reports an EXPECTED xfail as skipped, with ``wasxfail`` set on the report. This
+    hook used to record those indiscriminately, which would have turned the next
+    ``expected_red_until_fixed`` test into a red session and broken the mechanism this
+    repository documents as its way of carrying a known gap. The marker is the difference
+    between "this did not run" and "this ran and failed on purpose".
+    """
+    if not report.skipped or hasattr(report, 'wasxfail'):
+        return
+    reason = ''
+    if isinstance(report.longrepr, tuple) and len(report.longrepr) == 3:
+        reason = report.longrepr[2]
+    _skipped.append((report.nodeid, str(reason)))
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Fail a run in which a guard silently did not run.
+
+    A skipped test is not a passing test, and this suite's skips are all of the shape "the
+    premise for this measurement did not hold" — an optional document that was absent, a
+    network that refused to produce the stall a timing test needs. Any of them means the
+    property that test exists to protect went unmeasured, and the run said so only in a
+    number nobody reads.
+    """
+    # Matched on the test's own name, not as a substring of the node id: a future test
+    # called ``..._verbatim_and_something_else`` would otherwise inherit the exemption and
+    # smuggle its skip through the one gate that exists to notice skips.
+    unexpected = [
+        (nodeid, reason) for nodeid, reason in _skipped
+        if nodeid.rsplit('::', 1)[-1].split('[', 1)[0] != TOLERATED_SKIP
+    ]
+    if not unexpected:
+        return
+    session.exitstatus = 1
+    print('\n' + '=' * 70)
+    print(f'{len(unexpected)} test(s) SKIPPED, so what they measure was not measured in this run:')
+    for nodeid, reason in unexpected:
+        print(f'  {nodeid}\n      {" ".join(reason.split())[:400]}')
+    print('Each skip names the premise that did not hold. Decide whether the premise or the')
+    print('test is what needs fixing — but do not read this run as evidence about the node.')
+    print('=' * 70)

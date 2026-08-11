@@ -393,6 +393,44 @@ measure it against, because no interval on any stop path is guaranteed
 ([PROTOCOL.md](PROTOCOL.md#7-cancellation)). A node that needs the whole of a stop's
 notional grace is a node that gets nothing done on a stop that gives it none.
 
+**RECOMMENDATION, and it is the one this repository learned the hard way.** Make the store
+in your test hold a response open **longer than the stop is nominally given**, and stop the
+container during that. A store that eventually answers lets a step which merely *waited*
+look exactly like a step that stopped — every timing assertion passes, for the wrong
+reason. Held open past the grace, the two are no longer confusable, and it is the shape
+that caught `node.py` handling a stop correctly in every respect except noticing it:
+12.2 seconds to go, because its handler closed the wrong object. See
+`tests/test_cancellation.py` for both halves — the timing, and the receipt — and
+[AUTHORING.md](AUTHORING.md#the-skeleton) for what a handler has to do to pass them.
+
+**RECOMMENDATION, and it is worth more than the rest of this section.** Test **every wait**
+your step can be stopped inside, not the one you thought of first. There are four —
+getting a connection (DNS, TCP, TLS), waiting for the store to begin answering, reading the
+body, and waiting for an upload to be acknowledged — and they are reached through different
+objects, so a node can be interruptible in one and not the others. This repository fixed
+the second, shipped it, and still paid the full 25-second timeout on the first and the
+third. Two of the four need no store at all to test: a listener that accepts a connection
+and then says nothing stalls a **TLS handshake** (no certificate is involved — a handshake
+stalls before any certificate is offered), and the same listener sending response headers
+that promise more body than it delivers stalls a **read mid-body**. Roughly forty lines,
+no new dependency; `conformance/stalling.py` is the whole of it.
+
+**BEHAVIOUR, and it caps what any of these tests can prove.** A local SIGTERM followed by
+a kill after N seconds is your harness's number, not the platform's. The agent chooses what
+to pass to `docker stop`, a fence passes nothing at all, and — measured at the deployed
+commit — **no channel tells your container how much time it has left**: not the injected
+variables, not the credentials envelope, not the job description, and the stop object the
+orchestrator composes on its heartbeat reaches the agent and goes no further. So a timing
+test proves your node bounds ITSELF; it cannot prove the bound will be honoured, and a
+document that says otherwise is describing a promise nobody made.
+
+**RECOMMENDATION.** Assert that a marker exists **even when your step had produced nothing
+yet**. That case is easy to leave untested and it is where the hole hides: a step that
+exits the instant it is signalled, writing nothing at all, satisfies every assertion about
+promptness and every assertion about not over-claiming. This suite had that hole for a
+release — a stop landing during the first download was measured for its speed and never for
+its account of itself.
+
 **BEHAVIOUR, and it decides what this test is evidence of.** A local SIGTERM models your
 node's own behaviour on a stop, and nothing more. It is not a model of what the platform
 then does with the result, on any of the three stop paths. An **operator pressing

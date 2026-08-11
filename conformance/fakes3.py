@@ -145,6 +145,10 @@ class Request:
     #: become unauthorized because its body took a while to arrive.
     arrived_at: float = 0.0
     fields: dict = field(default_factory=dict)  #: the POST form fields, for an upload
+    #: Seconds to spend DRIBBLING the answer out, a byte at a time, instead of sending it.
+    #: A store that goes quiet and a store that answers slowly are different faults, and a
+    #: client can only tell them apart if it measures elapsed time rather than silence.
+    drip_for: float = 0.0
 
 
 @dataclass
@@ -628,9 +632,25 @@ def _make_handler(endpoint: 'Endpoint'):
                 self._error(refused)
                 return
             endpoint._record_upload(request, key, payload)
+            if request.drip_for:
+                self._drip(b'HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n', request.drip_for)
+                return
             self.send_response(204)
             self.send_header('Content-Length', '0')
             self.end_headers()
+
+        def _drip(self, answer: bytes, seconds: float) -> None:
+            """Answer one byte at a time, never pausing long enough to look idle.
+
+            This is the shape a socket timeout cannot catch: every gap is short, so nothing
+            is ever "quiet", and yet the exchange takes as long as the store feels like.
+            A client that bounds only silence waits it out in full.
+            """
+            per_byte = seconds / max(len(answer), 1)
+            for index in range(len(answer)):
+                self.wfile.write(answer[index:index + 1])
+                self.wfile.flush()
+                time.sleep(per_byte)
 
         # ----------------------------------------------------------------- errors
 
@@ -735,5 +755,19 @@ def delay_when(predicate, seconds: float):
     def hook(endpoint: 'Endpoint', request: Request) -> None:
         if predicate(request):
             time.sleep(seconds)
+
+    return hook
+
+
+def drip_when(predicate, seconds: float):
+    """Answer the matching request a byte at a time, taking ``seconds`` over it.
+
+    For the one property a socket timeout cannot express: a transfer that is never idle
+    and never ends. Everything else in this module models a store that goes QUIET.
+    """
+
+    def hook(endpoint: 'Endpoint', request: Request) -> None:
+        if predicate(request):
+            request.drip_for = seconds
 
     return hook

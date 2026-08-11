@@ -64,9 +64,14 @@ survives a real job. ``docs/AUTHORING.md`` explains every one at length.
 3. **It keeps its inventory where the failure path can see it.** Salvage publishes only
    what the marker lists, so an inventory local to the work function strands everything
    already uploaded.
-4. **It handles a stop request.** This process is PID 1 in its container, and Linux
-   gives process 1 no default signal handling: without a handler, SIGTERM is discarded
-   entirely and the step runs to completion for a run nobody will collect.
+4. **It handles a stop request, and notices it without waiting for the network.** This
+   process is PID 1 in its container, and Linux gives process 1 no default signal
+   handling: without a handler, SIGTERM is discarded entirely and the step runs to
+   completion for a run nobody will collect. Installing the handler is only half of it —
+   a step that installs one and then sits in a socket call until it times out has spent
+   the whole of a grace it was never promised, so the handler also abandons the transfer
+   in flight. See :class:`_StoppableTransport` for what that takes and what the obvious
+   version of it does instead, which is nothing.
 5. **It never prints a credential.** A presigned URL's query string IS a read credential
    for that object, and container output is stored with the execution, shown to everyone
    who can see the run, and searchable.
@@ -91,14 +96,17 @@ from __future__ import annotations
 import contextlib
 import datetime
 import hashlib
+import http.client
 import io
 import json
 import logging
 import os
 import re
 import signal
+import socket
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -131,14 +139,54 @@ MAX_RESULT_BYTES = 1024 * 1024
 #: The upload policy refuses a single object above this.
 MAX_OBJECT_BYTES = 1024 * 1024 * 1024
 
-#: Socket timeout for one read. A stop landing during a read is noticed as soon as the
-#: next block arrives, because the handler closes the response underneath it.
+#: Socket timeout for one read. It bounds a store that has gone quiet — NOT how long a
+#: stop takes to be noticed, which is what this constant used to claim. A stop is noticed
+#: at once, because the handler shuts the socket down underneath the call
+#: (:class:`_StoppableTransport`); this number is what is left for the case where nobody
+#: signalled anything and the other side simply stopped answering.
 READ_TIMEOUT_S = 25.0
-#: Socket timeout for one upload — deliberately shorter. Once the body has been sent the
-#: step is waiting for the store's answer, and there is nothing left to close: no signal
-#: can shorten that wait, so the timeout is the only thing that bounds it. It has to stay
-#: well inside the grace a stop is given, or ignoring a stop costs a runner slot.
+#: An ELAPSED deadline for getting a connection — the name lookup, every address tried,
+#: and the TLS handshake that follows, together. It exists because that whole stretch is
+#: the one a stop CANNOT interrupt: it hands out no socket anybody else can reach, and
+#: Python's ``ssl`` detaches the plain socket while it wraps it, so shutting that down
+#: raises "Bad file descriptor" rather than ending the handshake (measured). What cannot
+#: be interrupted has to be bounded.
+#:
+#: **Elapsed, and that word is the whole of it.** Passing a timeout to
+#: ``socket.create_connection`` does NOT bound this: it resolves the name first, with no
+#: timeout applied to that at all, and then applies the value **separately to each address
+#: it got back** — so a slow resolver is unbounded and a host with four addresses can take
+#: four times what you thought you asked for. :func:`_connect_within` is what makes one
+#: number mean one number. The handshake that follows inherits whatever is left of it.
+#:
+#: **Ten seconds, and it is chosen against what a real job needs, not against what makes a
+#: test quick.** Reaching an object store is milliseconds, so this is enormous headroom —
+#: deliberately, because the cost of being wrong is asymmetric in a way that is easy to get
+#: backwards. A deadline that fires on a healthy-but-slow connect **kills the whole job**:
+#: there is no automatic retry engine for external steps, every failed attempt is recorded
+#: as transient whatever this process returns, and somebody has to notice and retry it by
+#: hand (``docs/PROTOCOL.md`` section 6). A deadline that is generous costs, at worst, ten
+#: seconds of a stop nobody was promised any of. Ten is the point where a stall is
+#: unambiguous and a working network is nowhere near.
+CONNECT_DEADLINE_S = 10.0
+#: Socket timeout for one upload — deliberately shorter, because an upload's ending is the
+#: ambiguous one. Once the body has been sent the store may already have committed the
+#: object, so waiting longer buys only a clearer answer about something that has already
+#: happened, and this step has recorded that object either way.
 UPLOAD_TIMEOUT_S = 10.0
+#: An ELAPSED deadline for writing the completion receipt, covering the connection and the
+#: upload together. The receipt is the one thing this step will not abandon on a stop, so
+#: it is the one thing that needs its own clock: :data:`UPLOAD_TIMEOUT_S` bounds a socket
+#: going QUIET, not a transfer taking long, and a peer that sends a byte every few seconds
+#: keeps a connection alive for as long as it likes.
+#:
+#: **Twenty seconds, against a grace of thirty that nobody promises.** Thirty is the
+#: agent's own constant, hardcoded as a default and passed by no caller, so it is the most
+#: the polite path can ever give (``agent/executors/docker_exec.py`` ``stop``); a fence
+#: gives zero, and a cancellation may not even be noticed until the next heartbeat. Twenty
+#: leaves the process room to exit and say why before the kill lands, and a receipt that
+#: cannot be written in twenty seconds was not going to be written.
+RECEIPT_DEADLINE_S = 20.0
 #: Every streaming copy moves this much at a time.
 CHUNK_BYTES = 1024 * 1024
 #: How much a streaming copy may leave in the kernel's page cache before asking for it
@@ -167,22 +215,267 @@ class _Expired(TransientError):
 #: Set by the signal handler; read by ordinary control flow. Never do work in a handler.
 CANCELLED = False
 
-#: Transfers currently in flight. The handler closes them, which is what turns "the step
-#: was asked to stop" into an immediate return from a socket read that would otherwise
-#: block for as long as the other side felt like holding it open. Without this, a stop
-#: that lands inside a transfer is not noticed until the transfer ends on its own.
-_IN_FLIGHT: set = set()
+#: The transport of the request in flight — one, because this program makes exactly one
+#: request at a time. A copy of this file that overlaps requests needs a set here instead.
+_IN_FLIGHT: list = []
+
+#: Whether the handler may still abandon what is in flight. It may not once the receipt is
+#: being written: by then there is nothing left to rescue by cutting a connection, and a
+#: whole run's account of itself to lose. A second stop CAN arrive — the agent asks for one
+#: from three different places — and the kill behind it is what bounds this wait anyway.
+_ABANDONABLE = True
+
+
+class _StoppableTransport:
+    """An HTTP connection the stop handler can reach — for every wait that can be reached.
+
+    Mixed into whatever connection class urllib chose (:func:`_stoppable_version_of`).
+    This file's first attempt kept the RESPONSE object on the ledger and called
+    ``close()`` on it, and that fails twice over:
+
+    * **Too late.** A response exists only once the store has begun to answer, so a stop
+      landing while the step was still waiting for the first byte of a GET reached nothing
+      at all, and was noticed only when the socket timed out — measured at the full length
+      of a held-open response, out of a grace that is nominally thirty seconds and
+      guaranteed to be nothing at all.
+    * **Wrong call.** ``close()`` does not interrupt a read that is ALREADY blocked.
+      Measured: mid-body it raises ``RuntimeError: reentrant call inside
+      <_io.BufferedReader>`` from inside the handler — where the exception is swallowed —
+      and the read then waits out its whole timeout regardless. ``shutdown()`` makes the
+      pending call return immediately, which is the entire point of keeping this ledger.
+
+    **The same question has to be asked of every OTHER wait on this path**, which is what
+    the shape below is about. There are four, and they are not alike:
+
+    1. **DNS, the TCP connect and the TLS handshake.** All three happen inside one call,
+       which hands out no socket anybody else can reach: ``ssl`` detaches the plain socket
+       while it wraps it, so shutting that down raises ``OSError: [Errno 9] Bad file
+       descriptor`` instead of ending the handshake (measured — the handshake then ran to
+       the full read timeout regardless). Nothing here can be interrupted, so it is
+       BOUNDED instead, by :data:`CONNECT_DEADLINE_S` — one ELAPSED deadline over the
+       lookup, every address and the handshake, because the timeout the standard library
+       accepts here is none of those things (:func:`_connect_within`). The flag is
+       re-checked the instant the call returns, so a stop that arrived during it does not
+       go on to start a request nobody wants.
+    2. **Waiting for the store to begin answering.** Interruptible, and the reason the
+       connection goes on the ledger before a byte is sent rather than after.
+    3. **Reading the body.** Interruptible — but only if the connection is still ON the
+       ledger, which is why there is no ``close()`` override here. ``http.client``
+       calls ``close()`` on the connection as soon as the headers of a ``will_close``
+       response are parsed (and urllib sets ``Connection: close`` on every request), so
+       removing the entry there would empty the ledger for the whole of the body.
+    4. **Waiting for a store to acknowledge an upload.** Interruptible, same mechanism.
+
+    The socket is also remembered in an attribute of our own, because urllib drops its
+    reference to it the moment the response exists (``h.sock = None``, in
+    ``AbstractHTTPHandler.do_open``) while the response goes on reading through it.
+    """
+
+    def connect(self):
+        # On the ledger BEFORE the call that blocks rather than after it. Be exact about
+        # what that buys, because the obvious claim is wrong: nothing can be shut down
+        # during the call below — there is no socket yet, and the one ``ssl`` builds is
+        # detached from this object while it handshakes (note 1). What bounds that stretch
+        # is the deadline, and what acts on a stop is the check after it. The entry is
+        # still made here because the ledger should never say "nothing in flight" while a
+        # transfer is being set up, and it costs one assignment.
+        _IN_FLIGHT[:] = [self]
+        wanted = self.timeout
+        self._deadline = time.monotonic() + CONNECT_DEADLINE_S
+        # ``_create_connection`` is an instance attribute ``http.client`` sets in its own
+        # ``__init__``, so this replaces it rather than overriding a method — a method
+        # would be shadowed by that attribute and silently never called.
+        self._create_connection = lambda address, timeout, source=None: _connect_within(
+            address, self._deadline, source
+        )
+        super().connect()
+        # Getting here was the deadline's business. Everything after it is a transfer, and
+        # transfers get the timeout the caller asked for.
+        if wanted:
+            self.sock.settimeout(wanted)
+        self._transport = self.sock
+        if CANCELLED:
+            # The stop landed inside a phase nothing could interrupt. It is over now, and
+            # this is the first moment ordinary control flow gets a say: do not go on to
+            # send a request for a run that has been called off. The receipt is exempt —
+            # it is the one request a cancelled run still has to make.
+            if _ABANDONABLE:
+                raise _Stopped('stop requested while this connection was being made')
+
+    def _tunnel(self):
+        """Granting the tunnel spends the deadline too, so what follows gets what is LEFT.
+
+        With a proxy configured there are TWO waits inside one ``connect``: the proxy's
+        answer to ``CONNECT``, and then the TLS handshake through it. The socket's timeout
+        was set once, on the way out of the TCP connect, and TLS would otherwise re-use
+        that whole value — so a proxy taking nine seconds of a ten-second deadline left the
+        handshake nearly ten more, and the number meant nothing again. One deadline, read
+        twice.
+        """
+        super()._tunnel()
+        deadline = getattr(self, '_deadline', None)
+        if deadline is not None and self.sock is not None:
+            self.sock.settimeout(max(0.05, deadline - time.monotonic()))
+
+    def stop_now(self) -> None:
+        """Make whatever the main thread is waiting for on this socket return, now."""
+        transport = self.sock or getattr(self, '_transport', None)
+        if transport is not None:
+            transport.shutdown(socket.SHUT_RDWR)
+
+
+def _resolve_within(host: str, port, deadline: float) -> list:
+    """Look the host up, and give up if the resolver does not answer in time.
+
+    **The only thread in this program, and it is here because the standard library gives
+    no other way.** ``socket.getaddrinfo`` takes no timeout: it is a blocking call into
+    the system resolver, whose own limits come from ``/etc/resolv.conf`` and are typically
+    several seconds per nameserver, tried more than once. A container with a sick resolver
+    therefore stalls for tens of seconds inside a call that owns no socket — so a stop
+    cannot be acted on, and the completion receipt, which by then must not be abandoned,
+    cannot be written either. Handing the lookup to a thread is what turns that into a
+    number.
+
+    The thread is a daemon and is never joined beyond the deadline: a stuck lookup ends
+    when the resolver finally answers, writing into a list nobody reads. That is a leak of
+    one thread on a path that is already failing, and the alternative is having no bound at
+    all on the phase that most often hangs.
+    """
+    found: list = []
+    failed: list = []
+
+    def look_up() -> None:
+        try:
+            found.extend(socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM))
+        except Exception as exc:  # noqa: BLE001 — reported to the caller, never swallowed
+            failed.append(exc)
+
+    thread = threading.Thread(target=look_up, daemon=True)
+    thread.start()
+    thread.join(max(0.0, deadline - time.monotonic()))
+    if found:
+        return found
+    if failed:
+        raise TransientError(f'the name {host!r} could not be resolved: {redact(failed[0])}')
+    raise TransientError(
+        f'the name {host!r} was still being looked up {CONNECT_DEADLINE_S:.0f}s after this '
+        f'connection was started'
+    )
+
+
+def _connect_within(address, deadline: float, source_address=None) -> socket.socket:
+    """``socket.create_connection`` with ONE deadline over the whole thing.
+
+    The standard library's version takes a timeout and spends it more than once: the name
+    lookup happens first with nothing applied to it, and then the value is set on each
+    address in turn, so four addresses mean four times the wait. This one resolves within
+    the deadline and gives every attempt only what is left of it.
+
+    The socket handed back carries the remainder as its own timeout, which is what the TLS
+    handshake will then use — so the honest worst case for the whole establish phase is
+    the deadline plus one handshake operation, rather than a multiple of it.
+    """
+    host, port = address
+    refusals: list = []
+    for family, kind, proto, _canonical, sockaddr in _resolve_within(host, port, deadline):
+        left = deadline - time.monotonic()
+        if left <= 0:
+            break
+        connection = socket.socket(family, kind, proto)
+        try:
+            connection.settimeout(left)
+            if source_address:
+                connection.bind(source_address)
+            connection.connect(sockaddr)
+        except OSError as exc:
+            refusals.append(exc)
+            connection.close()
+            continue
+        connection.settimeout(max(0.05, deadline - time.monotonic()))
+        return connection
+    if refusals:
+        raise refusals[-1]
+    raise TimeoutError(
+        f'no address for {host!r} could be connected to within {CONNECT_DEADLINE_S:.0f}s'
+    )
+
+
+#: Cache of the stoppable subclass built for each connection class urllib hands us.
+_STOPPABLE_CLASSES: dict = {}
+
+
+def _stoppable_version_of(connection_class):
+    """The stoppable version of one of urllib's connection classes.
+
+    Built by subclassing whatever urllib passed rather than by naming
+    ``http.client.HTTPSConnection`` here, so this file never restates the keyword
+    arguments urllib gives its own connection classes — those have changed between Python
+    versions, and a node that reimplemented them would break on the next one.
+    """
+    made = _STOPPABLE_CLASSES.get(connection_class)
+    if made is None:
+        made = _STOPPABLE_CLASSES[connection_class] = type(
+            '_Stoppable' + connection_class.__name__, (_StoppableTransport, connection_class), {}
+        )
+    return made
 
 
 def _on_stop(signum, _frame):
+    """Set the flag, abandon the transfer in flight, and return. Nothing else.
+
+    **RECOMMENDATION, and the one place this file reads the guidance rather than quoting
+    it.** ``docs/AUTHORING.md`` says a signal handler sets a flag and does no work, "and
+    especially network work". Shutting down a socket is a single non-blocking syscall: it
+    starts nothing, waits for nothing and cannot block, so it is not work in the sense the
+    rule is about. The reason the rule gives — that the cancellation path itself crashes —
+    is why the flag is set FIRST and why the shutdown's failure is ignored: if it does not
+    work, this step is exactly as stopped as it would have been without it, and ordinary
+    control flow still sees the flag at its next check. Without the shutdown the flag is
+    the only mechanism, and a flag cannot be read by a process parked in a socket call.
+    Everything that DECIDES anything still happens in ordinary control flow.
+    """
     global CANCELLED
     CANCELLED = True
-    for handle in list(_IN_FLIGHT):
-        with contextlib.suppress(Exception):
-            handle.close()
+    if _ABANDONABLE:
+        for transport in list(_IN_FLIGHT):
+            with contextlib.suppress(Exception):
+                transport.stop_now()
     with contextlib.suppress(Exception):
         sys.stderr.write(f'hello-node: stop requested (signal {signum}); finishing up\n')
         sys.stderr.flush()
+
+
+@contextlib.contextmanager
+def _within(seconds: float, what: str):
+    """Bound everything inside this block by ELAPSED time, network calls included.
+
+    A socket timeout is not a deadline: it measures silence, so a peer that dribbles one
+    byte per window holds a transfer open indefinitely without ever being idle. The alarm
+    is what turns "no long silences" into "no long transfer", and it reaches a blocked
+    socket call the same way the stop handler does — by shutting the transport down, which
+    is the one thing that makes a syscall already in progress return.
+
+    Used for the receipt, which is the transfer this step has promised not to abandon on a
+    stop. That promise is what makes an upper bound necessary rather than merely tidy: the
+    kill behind the stop arrives on its own schedule, and a step still politely waiting on
+    a store when it lands has written nothing and said nothing.
+    """
+
+    def _out_of_time(_signum, _frame):
+        for transport in list(_IN_FLIGHT):
+            with contextlib.suppress(Exception):
+                transport.stop_now()
+        with contextlib.suppress(Exception):
+            sys.stderr.write(f'hello-node: giving up on {what} after {seconds:.0f}s\n')
+            sys.stderr.flush()
+
+    previous = signal.signal(signal.SIGALRM, _out_of_time)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
 
 
 class _Stopped(Exception):
@@ -192,17 +485,6 @@ class _Stopped(Exception):
 def _check_stopped() -> None:
     if CANCELLED:
         raise _Stopped('stop requested')
-
-
-@contextlib.contextmanager
-def _in_flight(handle):
-    _IN_FLIGHT.add(handle)
-    try:
-        yield handle
-    finally:
-        _IN_FLIGHT.discard(handle)
-        with contextlib.suppress(Exception):
-            handle.close()
 
 
 # --------------------------------------------------------------------- logging
@@ -464,7 +746,28 @@ class _NoRedirects(urllib.request.HTTPRedirectHandler):
         )
 
 
-_OPENER = urllib.request.build_opener(_NoRedirects)
+class _StoppableHandler:
+    """Substitute a stoppable connection for the one urllib was about to construct.
+
+    Intercepting ``do_open`` rather than ``http_open``/``https_open`` is what keeps this
+    scheme-agnostic: the plain-HTTP path is what a local demo and this repository's own
+    conformance suite exercise, and the TLS path is what every presigned URL in production
+    uses, so a fix that covered only the first would be invisible where it matters.
+    """
+
+    def do_open(self, http_class, req, **kwargs):
+        return super().do_open(_stoppable_version_of(http_class), req, **kwargs)
+
+
+class _StoppableHTTPHandler(_StoppableHandler, urllib.request.HTTPHandler):
+    pass
+
+
+class _StoppableHTTPSHandler(_StoppableHandler, urllib.request.HTTPSHandler):
+    pass
+
+
+_OPENER = urllib.request.build_opener(_NoRedirects, _StoppableHTTPHandler, _StoppableHTTPSHandler)
 
 
 def _open(url: str, *, what: str):
@@ -472,6 +775,8 @@ def _open(url: str, *, what: str):
     request = urllib.request.Request(url, method='GET', headers={'User-Agent': USER_AGENT})
     try:
         response = _OPENER.open(request, timeout=READ_TIMEOUT_S)
+    except _Stopped:
+        raise  # the connection refused to start because this run was called off
     except urllib.error.HTTPError as exc:
         raise _classify(exc, _http_error_detail(exc), f'reading {what}')
     except urllib.error.URLError as exc:
@@ -585,8 +890,13 @@ def _post_object(post: dict, key: str, source_path: str, size: int, what: str) -
                  'User-Agent': USER_AGENT},
     )
     try:
-        with _in_flight(body):
+        # ``closing`` releases the file handle the body streams from, on every path out.
+        # The transfer itself is abandoned through the CONNECTION, which is on the ledger
+        # from the moment its socket exists — before a byte of this body is sent.
+        with contextlib.closing(body):
             response = _OPENER.open(request, timeout=UPLOAD_TIMEOUT_S)
+    except _Stopped:
+        raise  # the connection refused to start because this run was called off
     except urllib.error.HTTPError as exc:
         raise _classify(exc, _http_error_detail(exc), f'the upload of {what}')
     except urllib.error.URLError as exc:
@@ -777,7 +1087,7 @@ def fetched_and_verified(creds: Credentials, index: int, scratch: str):
 
 def _stream(source: dict, name: str):
     if source.get('get_url'):
-        with _in_flight(_open(source['get_url'], what=f'input {name!r}')) as response:
+        with contextlib.closing(_open(source['get_url'], what=f'input {name!r}')) as response:
             while True:
                 chunk = response.read(CHUNK_BYTES)
                 if not chunk:
@@ -885,6 +1195,11 @@ def process(creds: Credentials, manifest: dict, scratch: str) -> dict:
     metrics = {'files': len(INVENTORY), 'total_bytes': total_bytes, 'lines': total_lines}
     _write_result(creds, manifest, metrics, scratch)
     progress(1.0, 'done')
+    # One last look before the caller writes a receipt claiming success. A stop that
+    # landed during the final upload has to end this run as the cancellation it is, and
+    # the ordinary failure path — which writes a cancelled marker with this same
+    # inventory — is a better place to do that than a special case afterwards.
+    _check_stopped()
     return metrics
 
 
@@ -990,7 +1305,31 @@ def write_marker(creds: Credentials, manifest: dict | None, *, status: str, exit
 
     It states its own identity — execution, attempt, generation — so the orchestrator can
     tell a receipt for THIS run from one a superseded copy of the job left behind.
+
+    **From here on a stop request may not abandon anything, whatever this receipt says.**
+    Cutting the upload costs the run its only account of itself and saves nothing: every
+    object is already written and the work is over.
+
+    That applies to a receipt claiming SUCCESS too, and this file argued the opposite for
+    one release. A stop landing inside a success receipt looks like it turns the document
+    into a lie, and the two obvious repairs — abandon that upload, or follow it with a
+    correction — both end in the same place: **a write that failed ambiguously may still be
+    accepted**, so the correction can commit first and the thing it corrected can land on
+    top of it. Two documents for one run have no defined winner. One document has no
+    problem to solve.
+
+    So the caller decides what this receipt says BEFORE it is composed, and nothing
+    afterwards writes another. What that leaves is a run that finished its work and was
+    interrupted while reporting it, whose receipt says ``succeeded`` inside a launch the
+    orchestrator has recorded as cancelled — and that is not a lie the platform can act on:
+    the outcome is decided from the orchestrator's own journal, a marker can only ever VETO
+    a success and never claim one, a stopped attempt's objects are salvaged as diagnostics
+    rather than published, and the sentence an operator reads quotes the ``exit_code`` and
+    the ``error``, never the ``status``. The work really was done; the stop arrived late.
     """
+    global _ABANDONABLE
+    _ABANDONABLE = False
+
     inventoried = {entry['relpath'] for entry in INVENTORY}
     ports = {}
     for name, relpaths in PORTS.items():
@@ -1020,7 +1359,8 @@ def write_marker(creds: Credentials, manifest: dict | None, *, status: str, exit
         # force=True: the marker is written last, which on a long run is exactly when the
         # envelope this step started with is most likely to be dead.
         creds.get(force=True, allow_stale=True)
-        write_object(creds, MARKER_FILENAME, handle.name, len(payload), 'the completion marker')
+        with _within(RECEIPT_DEADLINE_S, 'the completion marker'):
+            write_object(creds, MARKER_FILENAME, handle.name, len(payload), 'the completion marker')
     finally:
         with contextlib.suppress(OSError):
             os.unlink(handle.name)
@@ -1070,17 +1410,39 @@ def main() -> int:
                       file=sys.stderr, flush=True)
             return code
 
+        # ONE receipt, decided here and not revisited. The flag is read once, before the
+        # document is composed, and whatever happens to the write afterwards this process
+        # never writes a DIFFERENT receipt to the same name. Two versions of this file
+        # tried to correct one receipt with another — first by abandoning the first write,
+        # then by letting it finish and following it with a second — and both lose the
+        # same way: a write that fails AMBIGUOUSLY may still be accepted (this file says so
+        # itself, in ``publish``), so the correction can commit first and the thing it was
+        # correcting can land on top of it. Sequential calls are not sequential commits.
+        stopped = CANCELLED
+        status = 'cancelled' if stopped else 'succeeded'
+        code = EXIT_CANCELLED if stopped else EXIT_OK
         try:
-            write_marker(creds, manifest, status='succeeded', exit_code=EXIT_OK)
-        except BaseException as marker_failure:
-            # The work is done and every object is in staging, but with no marker there is
-            # no inventory, so the run fails with no account of itself. Say why, in one
-            # line, and classify the ending rather than letting a traceback out.
-            print(f'hello-node: the work finished but the marker could not be written: '
+            write_marker(creds, manifest, status=status, exit_code=code)
+        except StepError as marker_failure:
+            # This step's own refusal to produce a valid document — an oversized marker, a
+            # name it will not write. Nothing was offered to the store, so there is no
+            # doubt about what is there: nothing, and the run has no account of itself.
+            print(f'hello-node: the work finished but no valid marker could be written: '
                   f'{redact(marker_failure)}', file=sys.stderr, flush=True)
-            return EXIT_PERMANENT if isinstance(marker_failure, StepError) else EXIT_TRANSIENT
+            return EXIT_PERMANENT
+        except BaseException as marker_failure:
+            # Ambiguous by nature: a store can accept a body after the client that sent it
+            # has gone. So the receipt may be there or may not, and this process must not
+            # start telling a different story from the one it already wrote — the code was
+            # decided with the document and does not change now. If the document did not
+            # land, the platform refuses to publish a success it cannot inventory, which is
+            # the correct outcome for a step that cannot prove what it produced.
+            print(f'hello-node: the work finished but the {status} marker could not be confirmed '
+                  f'(it may or may not have been stored): {redact(marker_failure)}',
+                  file=sys.stderr, flush=True)
+            return code
         log.info('done — %s file(s), %s bytes', metrics['files'], metrics['total_bytes'])
-        return EXIT_OK
+        return code
     finally:
         import shutil
 
