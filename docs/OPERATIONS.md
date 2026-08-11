@@ -140,9 +140,12 @@ streams its logs back and reports the result. It listens on no port; every conne
 outbound.
 
 **BEHAVIOUR.** The agent image is published at **`ghcr.io/humansignal/lspo-agent:latest`**,
-and the package is **public**: an anonymous pull works and no `docker login` is needed.
-`docker run` pulls it for you; `docker pull ghcr.io/humansignal/lspo-agent:latest` fetches
-it on its own if you would rather do that first.
+and the package is **public**: an anonymous pull works and no `docker login` is needed. The
+block below fetches the image itself, before it starts or stops anything, so there is nothing
+to build and nothing to fetch by hand first. A standalone `docker logout ghcr.io && docker
+pull ghcr.io/humansignal/lspo-agent:latest` is worth keeping for a different job: it is how
+you establish that a machine can reach the registry at all, anonymously, which is the one
+question that separates "this host has no route to ghcr.io" from anything about your node.
 
 Both the Connect reply and the setup command print the start line already filled in —
 prefer either of those, because they carry the real pool name and, when that registration
@@ -151,6 +154,10 @@ minted one, the real token. The general form:
 ```bash
 mkdir -p "$HOME/lspo-agent" && chmod 700 "$HOME/lspo-agent"
 
+# Safe to re-run: it fetches a newer agent image and replaces the running agent. A failed fetch changes nothing.
+docker pull -q ghcr.io/humansignal/lspo-agent:latest &&
+c=$(docker ps -aq -f 'name=^/?lspo-agent$') &&
+if [ -n "$c" ]; then docker stop -t 20 "$c" && docker rm "$c"; fi &&
 docker run -d --name lspo-agent \
   --user "$(id -u):$(id -g)" \
   -v /var/run/docker.sock:/var/run/docker.sock \
@@ -158,9 +165,10 @@ docker run -d --name lspo-agent \
   -v "$HOME/lspo-agent:$HOME/lspo-agent" \
   -e LSPO_AGENT_WORKDIR="$HOME/lspo-agent/state" \
   -e LSPO_AGENT_API_URL=https://orchestrator.example.com \
-  -e LSPO_AGENT_NAME=$(hostname) \
   -e LSPO_AGENT_POOL=self-hosted \
   -e LSPO_AGENT_REGISTRATION_TOKEN=PASTE_THE_POOL_TOKEN_HERE \
+  -e LSPO_AGENT_NAME=$(hostname) \
+  -e LSPO_AGENT_MAX_CONCURRENT_JOBS=1 \
   --stop-timeout 300 \
   ghcr.io/humansignal/lspo-agent:latest
 ```
@@ -168,6 +176,29 @@ docker run -d --name lspo-agent \
 Three of those values are placeholders and the printed command has them filled in: the
 orchestrator's address, the pool name, and the token — see the registration section above
 for when the reply carries a token and when it does not.
+
+**BEHAVIOUR.** Paste it again whenever you like. That is the ordinary thing to do — after
+re-registering a node, after a new agent build, after any mistake — and the block is written
+for it: it fetches the image, stops and removes the agent that is already running, and starts
+a fresh one. On a machine that has never run it, the two middle lines find nothing and say
+nothing. Before they existed, the second paste ended in `docker: Error response from daemon:
+Conflict. The container name "/lspo-agent" is already in use`, which is an error message about
+a machine that was working perfectly.
+
+**BEHAVIOUR.** If the fetch fails, nothing is taken away. No network, an unreachable registry,
+a package whose visibility was changed back — in every one of those you see docker's own pull
+error and keep the agent you already have, running, untouched. That holds at a shell prompt as
+well as inside a script, and it is the `&&` at the end of those lines that makes it hold: an
+interactive shell has no `set -e`, so without the chain a failed pull would stop nothing, and
+the block would go on to remove a working agent and then start a stale cached image or none at
+all. The same conditionality covers the later steps: a stop that did not work removes nothing,
+a removal that did not work starts nothing.
+
+**RECOMMENDATION.** Quote those lines into your own runbook as they are — one chain, and the
+filter still in its single quotes. Splitting the chain into separate lines reads the same and
+looks tidier, and it is the version that destroys a healthy agent the first time a registry is
+unreachable; dropping the quotes leaves `?` as a shell glob, so a matching filename in the
+working directory is handed to docker in place of the filter.
 
 **BEHAVIOUR.** The first line is a prerequisite rather than decoration, and skipping it does
 not fail where the mistake is. `docker run` needs the mount source to exist, and when it does
@@ -208,10 +239,10 @@ the orchestrator prints with the block, word for word:
 > links in that path. Satisfy yourself of that before you start, and prefer a machine you do
 > not share.
 
-**BEHAVIOUR, for all four bullets below.** Four parts of that command are load-bearing, and
-each one fails in its own way when it is wrong (`agent/README.md`, "Run it"). None of them
-is a duty on your node — they are the operator's, and they are here because your node is
-what visibly breaks:
+**BEHAVIOUR, for all four bullets below.** Four parts of the `docker run` line itself are
+load-bearing — the `&&` chain above it is a fifth — and each one fails in its own way when it
+is wrong (`agent/README.md`, "Run it"). None of them is a duty on your node — they are the
+operator's, and they are here because your node is what visibly breaks:
 
 * **`--group-add`** with the host's docker group id. The agent image runs as a non-root
   user and has no access to the docker socket without it. The agent refuses to start
