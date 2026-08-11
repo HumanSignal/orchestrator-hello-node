@@ -194,10 +194,40 @@ covered by a test, and none of them is enforced by the platform.
    so an inventory local to the work function strands everything already uploaded.
    Record an object *before* its upload starts: a store can accept a body after the client
    is gone, and an object nobody named is never looked at again.
-6. **Handle SIGTERM.** This process is PID 1, and Linux gives process 1 no default signal
-   handling — without a handler the signal is discarded entirely. Set a flag, never do
-   work in the handler, and check the flag *between units of work* so a stop changes what
-   the step does next rather than only how it ends.
+6. **Handle SIGTERM, and notice it without waiting for the network.** This process is
+   PID 1, and Linux gives process 1 no default signal handling — without a handler the
+   signal is discarded entirely. Set a flag, never do work in the handler, and check the
+   flag *between units of work* so a stop changes what the step does next rather than only
+   how it ends. The flag is not enough on its own: a process parked in a socket call
+   cannot read it, so the handler also shuts down the transport in flight. Two measured
+   facts decide the shape of that — closing the *response* does nothing (mid-read it
+   raises `reentrant call inside <_io.BufferedReader>` inside the handler, where it is
+   swallowed, and the read waits out its whole timeout), and a response does not exist at
+   all while the store is still deciding whether to answer. Registering the *connection*
+   and calling `shutdown` on its socket is what works, and it took this file from 12.2
+   seconds to 0.2. Then ask it of every OTHER wait on the path, because that fix shipped
+   with two of them still open: the connection must go on the ledger before the call that
+   blocks, and it must NOT come off when `http.client` closes it after the headers of a
+   `Connection: close` response, or the ledger is empty for the whole body. Getting a
+   connection (DNS, TCP, TLS) cannot be interrupted at all — `ssl` detaches the socket
+   while wrapping it — so bound it with its own ELAPSED deadline and re-check the flag when
+   it returns. A timeout is not a deadline: `create_connection` spends yours once per
+   address, `getaddrinfo` ignores it entirely (so the lookup needs a thread), and a proxy's
+   CONNECT spends it a second time unless you recompute after the tunnel. Size it for a real
+   job — nothing retries an external step automatically.
+7b. **One receipt, or none.** Decide what it says from the flag BEFORE composing it, protect
+   that write from your own handler, give it an elapsed deadline (a socket timeout measures
+   silence, not duration), and never write a second, correcting document to the same name: a
+   write that failed ambiguously may still be accepted and may commit after its own
+   correction. This repository shipped both repairs — abandonment, then correction — and
+   both lost the same way. Give that write an ELAPSED deadline (a socket timeout measures
+   silence), and size it knowing it is best-effort: **nothing tells the container how long
+   it has after a stop** — not the injected variables, not the credentials envelope, not
+   the job description, and the orchestrator's stop object stops at the agent — so no
+   positive number survives a remaining grace of zero. What makes that safe is measured on the platform side: the
+   orchestrator decides an outcome from its own journal, a marker can only veto a success,
+   a stopped attempt's objects are salvaged as diagnostics rather than published, and the
+   operator's sentence quotes `exit_code` and `error` but never `status`.
 7. **Write the marker last**, and write one on the failure and cancellation paths too,
    with the real exit code and an inventory of whatever already landed.
 8. **Classify exits honestly.** 0 succeeded, 1 a later attempt might survive, 10 no retry

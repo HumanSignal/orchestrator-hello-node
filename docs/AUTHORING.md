@@ -131,6 +131,7 @@ import hashlib
 import json
 import os
 import signal
+import socket
 import sys
 import tempfile
 import time
@@ -148,12 +149,59 @@ class Permanent(Exception):
 # RECOMMENDATION. PID 1 receives SIGTERM only because we install this. The
 # handler sets a flag; ordinary control flow decides what to do about it, which
 # is what keeps the partial inventory and lets the marker still be written.
+#
+# RECOMMENDATION, and this is the half that gets left out — including by the
+# first version of this repository's own node.py, which is where the two facts
+# below were measured rather than reasoned about. A flag cannot be read by a
+# process parked in a socket call, so the handler must also make that call
+# return, or your stop latency is your network timeout and nothing else.
+#
+#   * Closing the RESPONSE object does not do it. Mid-read it raises
+#     "reentrant call inside <_io.BufferedReader>" INSIDE the handler, where you
+#     will never see it, and the read then waits out its whole timeout anyway.
+#   * A response does not exist yet while the store is still deciding whether to
+#     answer, so a ledger of responses is empty during the wait that matters.
+#
+# Shutting the socket down does do it, and it works from the moment the
+# connection is made. Nothing here starts anything or waits for anything, which
+# is the line this rule is really drawing.
+#
+# BEHAVIOUR, and it decides one of your timeouts. There is one wait on this path
+# that no signal can shorten: DNS, the TCP connect and the TLS handshake happen
+# inside a single call that hands out no socket anybody else can reach — `ssl`
+# detaches the plain socket while wrapping it, so shutting THAT down raises
+# "Bad file descriptor" and the handshake runs to its timeout regardless
+# (measured). What cannot be interrupted has to be bounded: give getting a
+# connection its own short budget, separate from the timeout you allow a
+# transfer, and re-check the flag the moment the call returns so a stop that
+# arrived during it does not go on to start a request nobody wants.
 CANCELLED = False
+# The transport of the request in flight, put here by whatever opens the
+# connection — in node.py, a small HTTPConnection subclass that adds itself in
+# connect(). It does NOT remove itself in close(): http.client closes the
+# connection as soon as it has parsed the headers of a `Connection: close`
+# response, which urllib sets on every request, so a ledger that forgets a
+# connection there is empty for the whole of the body.
+IN_FLIGHT = []
+
+
+# RECOMMENDATION. One transfer is exempt: the receipt. Cutting that upload
+# saves nothing — the work is over and everything else is written — and costs
+# the run its only account of itself. It gets a deadline instead (see main).
+WRITING_THE_RECEIPT = False
 
 
 def _on_sigterm(signum, frame):
     global CANCELLED
+    # The flag FIRST, then the socket. If the shutdown throws, this step is
+    # exactly as stopped as it would have been without it, and ordinary control
+    # flow still sees the flag at its next check.
     CANCELLED = True
+    if WRITING_THE_RECEIPT:
+        return
+    for transport in list(IN_FLIGHT):
+        with contextlib.suppress(Exception):
+            transport.shutdown(socket.SHUT_RDWR)
 
 
 signal.signal(signal.SIGTERM, _on_sigterm)
@@ -295,7 +343,16 @@ def write_marker(creds, manifest, status, exit_code, error=None, ports=None):
         'error': error,
     }
     body = json.dumps(marker, sort_keys=True, indent=2).encode('utf-8')
-    _write_raw(creds.get(force=True), MARKER_FILENAME, body)   # fresh credentials
+    # RECOMMENDATION. Protected from the stop handler, and bounded by a clock of
+    # its own. Those two go together: the moment nothing may abandon this
+    # transfer, nothing but elapsed time can end it, and a socket timeout is not
+    # elapsed time — it measures silence, so a peer sending one byte per window
+    # holds you open for as long as it likes. Size the deadline under whatever
+    # grace the platform gives a stopped container.
+    global WRITING_THE_RECEIPT
+    WRITING_THE_RECEIPT = True
+    with _elapsed_deadline(RECEIPT_DEADLINE_S):        # shuts IN_FLIGHT down when it fires
+        _write_raw(creds.get(force=True), MARKER_FILENAME, body)   # fresh credentials
 
 
 def main():
@@ -326,8 +383,24 @@ def main():
             print(f'node: could not write the marker: {_redact(marker_failure)}', file=sys.stderr, flush=True)
         return code
 
-    write_marker(creds, manifest, 'succeeded', EXIT_OK, ports=ports)
-    return EXIT_OK
+    # RECOMMENDATION, and it is the one this document got wrong twice. Decide what
+    # the receipt says ONCE, from the flag, before composing it — and if the write
+    # fails, do not write a different receipt to the same name afterwards. A write
+    # that fails ambiguously may still be accepted, so a "correction" can commit
+    # first and the thing it corrected can land on top of it: two documents for one
+    # run, and no defined winner. The exit code is decided with the document and is
+    # not revised either, so they never differ by decision — only ever because a kill
+    # landed between the document and this process's own exit, which nothing can prevent.
+    stopped = CANCELLED
+    status, code = ('cancelled', EXIT_CANCELLED) if stopped else ('succeeded', EXIT_OK)
+    try:
+        write_marker(creds, manifest, status, code, ports=ports)
+    except Permanent as exc:          # nothing was offered to the store
+        print(f'node: no valid marker could be written: {_redact(exc)}', file=sys.stderr, flush=True)
+        return EXIT_PERMANENT
+    except Exception as exc:          # it may or may not be there; say so, write nothing else
+        print(f'node: the {status} marker could not be confirmed: {_redact(exc)}', file=sys.stderr, flush=True)
+    return code
 
 
 if __name__ == '__main__':
@@ -344,11 +417,11 @@ the obvious alternative fails on a real run, later, saying something unrelated:
 | Credentials behind an accessor | The file is replaced under you, without a signal. An accessor makes "re-read near expiry" one line instead of a decision at every call site. |
 | `force=True` before the marker | The marker is written last, which on a long run is the moment the original envelope is most likely to be dead. |
 | Bootstrap in its own `try` | Before credentials exist there is nowhere to write a marker. That failure has to be reported on stderr and by exit code alone. |
-| Signal handler sets a flag only | Doing work, and especially network work, inside a signal handler is how the cancellation path itself crashes. |
+| Signal handler sets a flag, and abandons the transfer in flight | Doing work, and especially network work, inside a signal handler is how the cancellation path itself crashes — so nothing there decides anything, and its one further act cannot block: a socket shutdown starts nothing and waits for nothing. Without it the flag is unreadable for as long as your socket timeout, because the process is inside the call. |
 | Streaming everywhere | 1 GiB permitted per object against 2 GiB of container memory. An OOM kill leaves the process no chance to write a marker. |
 | Inputs fetched one at a time, and deleted | Nothing bounds the size, the total or the count of your inputs, and the container has no disk quota. Keeping them all is how a node fills the customer's disk. |
 | Comparing envelopes with `==`, not `is` | Each read parses a new object, so an identity test is always "changed" and the retry guard never fires. |
-| Exit code passed into the marker | So the marker and the process cannot tell two different stories about one run. |
+| Exit code passed into the marker | So the marker and the process do not tell two different stories about one run. Not *cannot*: a SIGKILL landing after the marker commits and before your process returns leaves your `exit_code: 0` beside the 137 the runner observes, and no ordering of yours closes that. What this buys is that the two never differ because of a DECISION you made. |
 
 ---
 
@@ -381,12 +454,17 @@ Two things in `node.py` are still worth pointing at rather than copying blindly:
   upload with it needs a further dependency. The standard library does it in about sixty
   lines. If you bring your own HTTP client, check what it does with a large body before
   you trust it.
-* **Its two network timeouts differ on purpose.** Reads get longer than uploads, because a
-  stop landing during a read is noticed as soon as the next block arrives — the handler
-  closes the response underneath it — while a stop landing after an upload's body has been
-  sent cannot be shortened by anything at all: the step is waiting for the store's answer,
-  and only the timeout bounds that wait. Size it well inside whatever grace a stop is
-  given.
+* **Its two network timeouts differ on purpose, and neither of them is its stop latency.**
+  That sentence used to read the other way round here — reads were given the longer
+  timeout because a stop was said to be noticed "as soon as the next block arrives", and
+  uploads the shorter one because after the body has been sent "nothing can shorten that
+  wait". The first half was measured and found false, which is what produced the socket
+  shutdown in the skeleton above; the second half is false for the same reason. A stop is
+  noticed at once on both paths now, and the timeouts bound something else entirely: a
+  store that has gone quiet with nobody signalling anything. The upload's is the shorter
+  of the two because an upload's ending is the ambiguous one — the store may already have
+  committed the object — so waiting longer only buys a clearer answer about something that
+  has already happened.
 
 One thing that is **not** a defect: `node.py` claims `result.json` under a `report` port
 rather than under `output`. Both are legal. The orchestrator's own test of its example
@@ -495,6 +573,66 @@ apart either treats advice as law or treats law as advice. Both are expensive.
 * [ ] **RECOMMENDATION.** A SIGTERM handler sets a flag; the work loop checks it; the
       stopped path writes a marker and exits 20. Without a handler your process, as PID 1,
       discards the signal entirely.
+* [ ] **RECOMMENDATION, and it is the one that is usually missing from a handler that
+      exists.** The handler also makes the network call you are inside return — shut the
+      socket down; closing the response does nothing (see the skeleton). A handler that
+      only sets a flag leaves your stop latency equal to your socket timeout, which on a
+      stop that gives you no warning is the difference between a receipt and silence.
+* [ ] **RECOMMENDATION.** Ask that question of **every** wait on the path, not the one you
+      thought of first. There are four, and they are reached through different objects:
+      getting a connection (DNS, TCP, TLS), waiting for the store to begin answering,
+      reading the body, and waiting for an upload to be acknowledged. This repository
+      fixed the second, shipped it, and had the first and third still costing the full
+      timeout — the same defect twice more, in the same file, a week apart.
+* [ ] **RECOMMENDATION.** Give **getting a connection** its own deadline, separate from the
+      timeout you allow a transfer: it is the one wait nothing can interrupt, so its length
+      IS your stop latency there. Two traps, both measured. **A timeout is not a deadline:**
+      `socket.create_connection` resolves the name before there is a socket to time, then
+      applies your number *separately to each address* — one name on three addresses spent
+      12 seconds of a 4-second "timeout". And **`getaddrinfo` takes no timeout at all**, so
+      a sick resolver hangs you for as long as `/etc/resolv.conf` says to be patient
+      (measured: 40 s), inside a call owning no socket, which is also where a receipt you
+      have promised not to abandon goes to die. Bounding the lookup needs a thread.
+* [ ] **RECOMMENDATION.** Choose that number for a real job, not for a quick test. A
+      deadline that fires on a healthy-but-slow connect kills the whole run: nothing retries
+      an external step automatically, so a person has to notice
+      ([PROTOCOL.md](PROTOCOL.md#6-exit-codes)). Generous costs you seconds of a stop; tight
+      costs somebody a job.
+* [ ] **RECOMMENDATION, and this document has now been wrong about it twice.** Write
+      **one** receipt, or none. Decide what it says from the stop flag *before* you compose
+      it, protect that write from your own handler, and if it fails do **not** write a
+      different receipt to the same name afterwards — report the ambiguity through your exit
+      code and your log and stop there. Neither repair that suggests itself works: cutting
+      the upload does not revoke a body the store already has, and following it with a
+      correction races it, because a write that failed ambiguously may still be accepted and
+      may commit *after* the correction. Sequential calls are not sequential commits, and
+      two documents for one run have no defined winner.
+* [ ] **BEHAVIOUR, and it is why the paragraph above can be so relaxed.** A receipt saying
+      `succeeded` beside a launch the platform recorded as cancelled is not a state the
+      platform can act on. The outcome is decided from the orchestrator's own journal; a
+      marker can only ever *veto* a success, never claim one; a stopped attempt's objects are
+      salvaged as diagnostics with no output port, so nothing is delivered; the cascade sits
+      behind a compare-and-set a cancellation wins; and the sentence an operator reads quotes
+      your `exit_code` and `error`, never your `status`. A step that finished its work and
+      was interrupted while *reporting* it has genuinely succeeded — the stop arrived late,
+      and there is nothing to correct.
+* [ ] **RECOMMENDATION.** Give that protected write a deadline of its own, in elapsed time.
+      The two go together: the moment nothing may abandon a transfer, nothing but a clock can
+      end it — and a socket timeout is not a clock, it measures silence, so a peer sending one
+      byte per window holds you open indefinitely while never being idle.
+* [ ] **BEHAVIOUR you must size that deadline against, and it is uncomfortable.** **Nothing
+      tells your container how long it has after a stop.** Not the injected variables, not the
+      credentials envelope (its `expires_at` is a signature's lifetime), not the job
+      description (`timeout_seconds` is a *requested* budget with no start time attached), and
+      not the stop object the orchestrator composes on its heartbeat — that reaches the agent
+      and stops there. The interval before the kill is the agent's to choose and can be
+      nothing at all. So a save deadline of your own is **best-effort by construction**: no
+      positive number can be honoured against a remaining grace of zero, and your alarm may be
+      killed before it can log that it fired. Choose one anyway — long enough that a receipt
+      lands on a store that is working, short enough that a step which will not land one stops
+      trying while there may still be time to say so — and do not write down a justification
+      that depends on a grace nobody gave you. The number worth wanting is the remaining stop
+      deadline itself, which is an open platform task.
 * [ ] **BEHAVIOUR to know while you write that handler, because it decides what it is
       worth.** **Neither of the two stops named here preserves what you write.** An
       **operator pressing Cancel** usually does not reach your process at all — it normally

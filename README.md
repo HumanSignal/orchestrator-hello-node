@@ -9,7 +9,7 @@ whatever the container declares it produced.
 
 **`node.py` is safe to copy.** It passes the whole conformance suite: the harness in
 `conformance/` builds this repository's image, runs it as a real container and judges it
-from the outside only, and **all 128 of its tests are green**.
+from the outside only, and **all 141 of its tests are green**.
 
 That was not true until recently. Twenty tests used to be red, and
 [CONFORMANCE-BASELINE.md](CONFORMANCE-BASELINE.md) is the measured record of what each one
@@ -28,10 +28,12 @@ one of which decides whether a real job survives:
 * it re-reads its credentials, so a run longer than fifteen minutes can still upload;
 * it keeps its inventory where the failure path can see it, and records an object before
   the upload starts;
-* it handles a stop request, so a cancelled run stops taking on new work instead of
-  running to completion for nobody;
-* it writes the completion marker last, on every path, with the exit code the process
-  really returns;
+* it handles a stop request — stops taking on new work instead of running to completion
+  for nobody, and *notices* the stop instead of sitting in a socket call until it times
+  out, which is the half a handler usually leaves out;
+* it writes the completion marker last, on every path, with the exit code it is about to
+  return — *about to*, because a kill landing between that document and the process's own
+  exit is a boundary nothing can make atomic;
 * it never prints a presigned URL.
 
 Read the label on any test before treating it as a rule: they do not carry the same

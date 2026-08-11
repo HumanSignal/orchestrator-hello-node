@@ -16,6 +16,8 @@ and a bind-mounted file pins the old inode, so the container would never see a r
 
 from __future__ import annotations
 
+import contextlib
+import ipaddress
 import json
 import os
 import re
@@ -306,8 +308,19 @@ def start(
     user: str | None = None,
     entrypoint: str | None = None,
     command: tuple[str, ...] = (),
+    extra_hosts: tuple[tuple[str, str], ...] = (),
+    dns: tuple[str, ...] = (),
+    dns_options: tuple[str, ...] = (),
 ) -> Container:
     """Start one workload container, detached.
+
+    ``extra_hosts``, ``dns`` and ``dns_options`` exist for one question the harness cannot
+    ask any other way: how long does this node spend GETTING a connection? Repeating a name
+    in ``extra_hosts`` puts several addresses in the container's ``/etc/hosts``, which is
+    how a test produces a host whose addresses must each be tried; pointing ``dns`` at an
+    address nobody answers, with the resolver's own patience widened by ``dns_options``,
+    is how a test produces a name lookup that hangs. Both are properties of the container's
+    network, not of the store, so no fake server can express either.
 
     ``unset_env`` names variables to REMOVE from the container's environment even if the
     image baked them in. ``docker run -e NAME`` with no ``=`` and no value on the host
@@ -328,6 +341,12 @@ def start(
         '--log-opt', 'max-size=10m',
         '--log-opt', 'max-file=3',
     ]
+    for host, address in extra_hosts:
+        argv += ['--add-host', f'{host}:{address}']
+    for server in dns:
+        argv += ['--dns', server]
+    for option in dns_options:
+        argv += ['--dns-option', option]
     for key, value in env.items():
         argv += ['--env', f'{key}={value}']
     for key in unset_env:
@@ -348,3 +367,112 @@ def start(
     if out.returncode != 0:
         raise DockerUnavailable(f'docker run failed: {out.stderr.strip()}')
     return Container(name=name, started_at=time.monotonic())
+
+
+#: What the silent resolver prints once it is bound and dropping queries. Waiting for this
+#: line is the difference between a test synchronised on evidence and one synchronised on a
+#: guess: a resolver that has not bound yet answers with an ICMP refusal, which makes a
+#: lookup fail in milliseconds and a test about a HANGING lookup pass for the wrong reason.
+RESOLVER_READY = 'silent-resolver-bound'
+
+_SILENT_RESOLVER = f"""
+import socket, sys
+handle = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+handle.bind(('0.0.0.0', 53))
+print({RESOLVER_READY!r}, flush=True)
+while True:
+    handle.recvfrom(4096)
+"""
+
+
+@contextlib.contextmanager
+def silent_resolver(image: str, *, timeout: float = 30.0):
+    """A container that RECEIVES every DNS query and answers none. Yields its address.
+
+    A name lookup only hangs if the query is delivered and ignored. An unroutable
+    nameserver does not do it — measured, inside a container: an address in TEST-NET-3
+    fails in **0.4 s** with "Temporary failure in name resolution", because nothing is
+    routed and the kernel says so at once. A listener that swallows the packet gives the
+    resolver nothing to conclude, so it waits its configured patience, twice over, and the
+    lookup takes tens of seconds (measured: 20.0 s at ``timeout:5 attempts:2``).
+
+    It has to be a container because port 53 is privileged in the HOST's namespace and this
+    harness must never need root; inside a container of its own it is ordinary. It reuses
+    the image this suite already built, so nothing is pulled.
+    """
+    require_docker()
+    name = f'lspo-conformance-resolver-{uuid.uuid4().hex[:10]}'
+    started = subprocess.run(
+        ['docker', 'run', '--detach', '--rm', '--name', name, '--user', '0:0',
+         '--entrypoint', 'python3', image, '-c', _SILENT_RESOLVER],
+        capture_output=True, text=True,
+    )
+    if started.returncode != 0:
+        raise DockerUnavailable(f'the silent resolver would not start: {started.stderr.strip()}')
+    try:
+        deadline = time.monotonic() + timeout
+        address = ''
+        while time.monotonic() < deadline:
+            logs = subprocess.run(['docker', 'logs', name], capture_output=True, text=True)
+            if RESOLVER_READY in (logs.stdout + logs.stderr):
+                found = subprocess.run(
+                    ['docker', 'inspect', '-f', '{{.NetworkSettings.IPAddress}}', name],
+                    capture_output=True, text=True,
+                )
+                address = found.stdout.strip()
+                if address:
+                    break
+            time.sleep(0.1)
+        if not address:
+            raise DockerUnavailable('the silent resolver never reported itself bound')
+        yield address
+    finally:
+        subprocess.run(['docker', 'kill', name], capture_output=True, text=True)
+
+
+#: Addresses whose packets are DROPPED rather than refused, so a connect to one waits out
+#: the caller's timeout instead of failing. Reaching them goes to the container's default
+#: gateway, which has nowhere to send them and says nothing back.
+#:
+#: Three kinds of "unreachable" were measured from inside a container, and only the third
+#: is any use for asking how long a step is prepared to spend connecting:
+#:
+#: * TEST-NET-3 (``203.0.113.7``) — fails in **0.1 s**: nothing is routed there and the
+#:   kernel says so at once;
+#: * an unassigned address on the container's own bridge subnet (``172.17.255.254``) —
+#:   fails in **~3 s** whatever timeout is asked for, because the ARP for it goes
+#:   unanswered and the kernel gives up on its own schedule;
+#: * these — **4.0 s against a 4-second timeout, and 12.0 s across three of them**, which
+#:   is the behaviour a test about connect budgets needs to see.
+SILENTLY_DROPPED = ('10.255.255.1', '10.255.255.2', '10.255.255.3')
+
+_TIME_A_CONNECT = """
+import socket, sys, time
+began = time.monotonic()
+try:
+    socket.create_connection((sys.argv[1], 9), float(sys.argv[2]))
+except Exception:
+    pass
+print('%.2f' % (time.monotonic() - began), flush=True)
+"""
+
+
+def seconds_spent_connecting(
+    image: str, address: str, *, timeout: float = 2.0, extra_hosts: tuple[tuple[str, str], ...] = ()
+) -> float:
+    """How long a container spends failing to reach ``address``. For checking a premise.
+
+    Whether a packet is dropped in silence or refused is a fact about the machine this
+    suite happens to run on, not about the node — so a test that needs a connect to HANG
+    has to establish that one does here, and say so rather than pass quietly when it does
+    not. This is what it asks with.
+    """
+    require_docker()
+    argv = ['docker', 'run', '--rm']
+    for host, host_address in extra_hosts:
+        argv += ['--add-host', f'{host}:{host_address}']
+    argv += ['--entrypoint', 'python3', image, '-c', _TIME_A_CONNECT, address, str(timeout)]
+    done = subprocess.run(argv, capture_output=True, text=True)
+    if done.returncode != 0:
+        raise DockerUnavailable(f'the connect probe would not run: {done.stderr.strip()}')
+    return float(done.stdout.strip().splitlines()[-1])

@@ -38,6 +38,7 @@ import requests
 
 from conformance import citations, contract, docker
 from conformance.fakes3 import Blob, Endpoint, delay_when, matching
+from conformance.stalling import StallingEndpoint, a_body_that_stops
 from conformance.job import InputSpec, Job
 from conformance.markers import harness_self_test, our_policy, traces_to
 
@@ -644,3 +645,73 @@ def _env_in_container(image: str, *, name: str, unset: tuple[str, ...]) -> dict[
         return json.loads(result.stdout.strip().splitlines()[-1])
     finally:
         container.remove()
+
+
+@harness_self_test
+@our_policy(
+    'The stalling listener is an instrument, and this is the reading it must not get wrong. Its whole '
+    'purpose is to let a test signal a container at a moment it can otherwise only guess at, so an '
+    'announcement that arrives before the client is really waiting hands every test built on it a way to '
+    'pass for the wrong reason — a node with an unbounded handshake looks prompt if the signal lands '
+    'while the raw socket is still interruptible. Announcing on accept() is exactly that mistake, and it '
+    'is the version this harness shipped first. ' + _INSTRUMENT
+)
+def test_the_stalling_listener_announces_only_once_a_client_is_really_waiting():
+    """Setup:   two listeners — one silent, one with a preamble far larger than any buffer.
+    Action:   connect to each without speaking, and without reading.
+    Validate: neither announces; the silent one announces once bytes are sent to it, and
+              the loud one stays quiet while its own sendall is blocked on backpressure.
+
+    The two halves are the two waits the cancellation tests are built on. A TLS client is
+    "really waiting" once it has sent its hello, which is evidence the listener can read
+    directly. An HTTP client is "really waiting" once it is inside the body rather than the
+    headers, which the listener cannot see at all — but it can refuse to announce until its
+    own sixteen megabytes have been taken off its hands, and nothing takes them but a
+    client that is reading.
+    """
+    with StallingEndpoint() as silent, StallingEndpoint(a_body_that_stops()) as loud:
+        quiet_client = socket.create_connection((LOCALHOST, silent.port), timeout=10)
+        loud_client = socket.create_connection((LOCALHOST, loud.port), timeout=10)
+        try:
+            assert silent.wait_for_stall(timeout=0.75) is False, (
+                'the silent listener announced a stall before the client had said anything, so a test '
+                'signalling on it would be signalling before TLS negotiation had begun'
+            )
+            assert loud.wait_for_stall(timeout=0.75) is False, (
+                'the listener with a preamble announced before the client had read any of it'
+            )
+            quiet_client.sendall(b'\x16\x03\x01\x00\x2f')  # the first bytes of a ClientHello
+            assert silent.wait_for_stall(timeout=10), (
+                'the client spoke and the listener never noticed, so nothing can be synchronised on it'
+            )
+            loud_client.sendall(b'GET /held-open HTTP/1.1\r\nHost: x\r\n\r\n')
+            assert loud.wait_for_stall(timeout=0.75) is False, (
+                'the listener announced while its own sendall was still blocked, which means it was not '
+                'waiting for the client to consume anything and the mid-body test is synchronised on '
+                'nothing'
+            )
+            # Drain until the listener lets go, rather than until some fixed number of
+            # bytes: how much has to be taken before ``sendall`` can finish depends on the
+            # socket buffers, which are the machine's business and not this test's. A first
+            # version drained eight megabytes and called that enough — true where the
+            # buffers are large, false on CI, and a test that passes on the author's
+            # machine and fails on the runner is a test that measured the machine.
+            drained = 0
+            preamble = len(a_body_that_stops())
+            while drained < preamble and not loud.wait_for_stall(timeout=0.05):
+                drained += len(loud_client.recv(1024 * 1024))
+            assert loud.wait_for_stall(timeout=20), (
+                f'the client drained {drained} of {preamble} bytes and the listener still never '
+                f'announced, so nothing can be synchronised on it'
+            )
+            # A client that goes away without asking for anything must NOT be announced as
+            # a stall: an instrument that reports somebody waiting when nobody is sends a
+            # test's signal into an empty room and calls whatever happens a pass.
+            with StallingEndpoint() as abandoned:
+                socket.create_connection((LOCALHOST, abandoned.port), timeout=10).close()
+                assert abandoned.wait_for_stall(timeout=1.5) is False, (
+                    'a client that connected and closed without speaking was announced as a stall'
+                )
+        finally:
+            quiet_client.close()
+            loud_client.close()
