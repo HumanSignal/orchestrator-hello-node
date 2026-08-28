@@ -25,6 +25,8 @@ failure it had — and that is where the real defect is.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from conformance import contract
@@ -306,6 +308,76 @@ def test_what_a_failed_run_already_produced_is_still_salvageable(make_job):
 
 @conforms_today
 @reference_quality(
+    'The orchestrator reads result.json\'s optional "facts" list whenever it accepts this attempt\'s '
+    'marker — a failed or cancelled receipt included — so the facts a run collected before it died are '
+    'recorded exactly like a successful run\'s. Nothing requires a step to write the document at all, '
+    'on any path, which is why this is reference quality: what it demonstrates is that the value of '
+    'being findable is highest on the run that went wrong. An operator asking "what happened to '
+    'one.csv?" is almost never asking about a run that worked, and a step that reports its facts only '
+    'after everything succeeded answers that question for every run except the interesting one.'
+)
+def test_a_failed_run_still_reports_the_inputs_it_had_already_touched(make_job):
+    """A run that died half way through still touched the half it got through.
+
+    Setup:    three inputs, the SECOND served with bytes that do not match its pin — so
+              the step fails after it has already copied the first one.
+    Action:   run.
+    Validate: a ``result.json`` was written, it names ``one.csv`` and nothing it never
+              reached, and it went to the store BEFORE the completion marker.
+
+    The ordering assertion is the marker-last discipline applied to this document, and it
+    is worth stating plainly what it is and is not. Nothing observes the order a container
+    wrote things in — collection begins only once the process has exited — so no check
+    anywhere will catch a document written after the receipt. What writing the receipt last
+    buys is that its existence MEANS everything else is already there, and a report written
+    after it sits outside that guarantee for no gain at all.
+
+    If the step completed this job instead, there is no half-finished run here to report
+    on and this skips — nothing obliges a node to verify its inputs against their pins,
+    which is the same premise the salvage test above rests on.
+    """
+    job = make_job(
+        inputs=[
+            THREE_INPUTS[0],
+            InputSpec(relpath='two.csv', data=b'pinned', served=b'pinnEd'),
+            THREE_INPUTS[2],
+        ]
+    )
+    result = job.run()
+    if result.exit_code == 0:
+        pytest.skip(
+            'the step completed this job rather than failing it, which is legal — nothing obliges a '
+            'step to verify its inputs against their pins, and there is then no partial run to report'
+        )
+
+    uploaded = job.endpoint.keys_in_order()
+    assert contract.RESULT_FILENAME in uploaded, (
+        f'the run failed after copying {THREE_INPUTS[0].relpath} and wrote no report document at all; '
+        f'the store saw {uploaded or "nothing"}. The work it did do is findable by nothing'
+    )
+    document = json.loads(job.endpoint.body_of(contract.RESULT_FILENAME).decode('utf-8'))
+    findings: list = []
+    contract.validate_result(document, recommendations=findings)
+    assert not findings, 'the orchestrator would decline to record: ' + '; '.join(findings)
+
+    facts = document.get('facts')
+    assert isinstance(facts, list), f'the failed run\'s report carries facts={facts!r}'
+    assert [fact.get('value') for fact in facts if fact.get('key') == 'input'] == [
+        THREE_INPUTS[0].relpath
+    ], (
+        f'the failed run reports having touched {[fact.get("value") for fact in facts]}. It copied '
+        f'{THREE_INPUTS[0].relpath!r} and then failed on the next one, so that is the one input it can '
+        f'honestly claim'
+    )
+    if contract.MARKER_FILENAME in uploaded:
+        assert uploaded.index(contract.RESULT_FILENAME) < uploaded.index(contract.MARKER_FILENAME), (
+            'the report document was written AFTER the completion marker. The marker is the terminal '
+            'receipt: its existence is the platform\'s proof that everything else is already readable'
+        )
+
+
+@conforms_today
+@reference_quality(
     'The contract INVITES a failure marker rather than requiring one — pipelines/external_finalize.py '
     '_step_account: "A failed or cancelled step is invited by the contract to write a marker carrying '
     'its error and exit_code", and _marker_for_this_attempt treats an absent marker as an ordinary '
@@ -344,3 +416,77 @@ def test_a_failure_before_the_manifest_is_read_still_writes_a_marker(make_job, s
     assert marker['status'] == 'failed'
     assert marker['execution_id'] == job.execution_id
     assert marker['generation'] == job.generation
+
+
+@conforms_today
+@reference_quality(
+    'external/README.md, on what the marker is: its inventory is the list of objects collection will '
+    'try to publish or salvage, and the receipt is written last precisely because its presence is the '
+    'orchestrator\'s proof that everything it names is already durably readable. A receipt naming a '
+    'document the store never accepted breaks exactly that promise. Salvage survives it — it verifies '
+    'each object and drops the one it cannot find — so this is reference quality and not a rule; what '
+    'it costs is the report itself, because a node that believes it has already reported never tries '
+    'again.'
+)
+def test_a_report_the_store_refused_is_written_again_and_never_falsely_inventoried(make_job, sample_input):
+    """Being named in the inventory is not the same claim as having been stored.
+
+    Setup:    one input, and a store that refuses every upload of ``result.json`` with a
+              503 while accepting everything else.
+    Action:   run.
+    Validate: the run fails; the marker exists; every relpath the marker inventories names
+              an object the store really holds — ``result.json`` above all; and the step
+              asked the store for the report TWICE, the second time from the failure path,
+              which also says so in its own output.
+
+    The ordinary write records this document BEFORE uploading it, which is the right order
+    for work (an ambiguous upload may still commit, and an object nobody named is never
+    looked at again). It is the wrong order for the one document read BY NAME rather than
+    through the inventory, and getting the two mixed up costs twice over: the receipt names
+    a file salvage will hunt for and not find, and the failure path — asking "is it already
+    inventoried?" — concludes there is nothing left to do at the exact moment there is, so
+    the report is never retried and the run's own account of itself is lost for a fault
+    that lasted one request.
+    """
+    def is_the_report(request) -> bool:
+        # The endpoint sees the full object KEY, prefix and all, so the name is matched by
+        # its tail — the same way the cancellation suite finds this document's uploads.
+        return request.kind == 'upload' and request.name.endswith(contract.RESULT_FILENAME)
+
+    job = make_job(inputs=[sample_input])
+    job.endpoint.hooks.on_request.append(refuse_when(is_the_report, status=503, code='SlowDown'))
+
+    result = job.run()
+
+    assert result.exit_code != 0, f'the store refused the report and the run reported success:\n{result.output}'
+    marker = _marker_if_the_step_wrote_one(job)
+    held = set(job.endpoint.keys_in_order())
+    inventoried = [obj['relpath'] for obj in marker['objects']]
+    assert contract.RESULT_FILENAME not in held, 'the store was supposed to refuse every copy of the report'
+    missing = [relpath for relpath in inventoried if relpath not in held]
+    assert not missing, (
+        f'the receipt inventories {missing}, which the store never received. Salvage will look for each '
+        f'of them and find nothing; the store holds {sorted(held)}'
+    )
+    # Raw REQUESTS, not ``names_of('upload')``. That helper deduplicates by name — by
+    # design, it answers "how much of the work was done" — so it can see that the report was
+    # asked for and never that it was asked for a SECOND time, which is the whole property
+    # here. Two requests are the ordinary write and the failure path's retry; nothing else
+    # can produce the second, because the transport retries only a credential that expired
+    # mid-write and never a 503.
+    attempts = [
+        request
+        for request in job.endpoint.requests
+        if request.kind == 'upload' and request.name.endswith(contract.RESULT_FILENAME)
+    ]
+    assert len(attempts) >= 2, (
+        f'the store refused {contract.RESULT_FILENAME} and the step asked for it {len(attempts)} time(s). '
+        f'The failure path is supposed to notice the document was never stored and write it again — with '
+        f'one attempt, the run has no report at all and nothing said why. Its output was:\n{result.output}'
+    )
+    # The line only the retry can print, as a second witness that the second request came
+    # from the failure path and not from somewhere else touching the endpoint twice.
+    assert f'could not write {contract.RESULT_FILENAME} for the failed run' in result.output, (
+        f'the failure path never reported trying to write {contract.RESULT_FILENAME} again, so the second '
+        f'request above did not come from where this test says it does:\n{result.output}'
+    )

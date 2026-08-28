@@ -45,6 +45,10 @@ The rules, in one place:
 * An input port with ``layout='prefix'`` must carry a ``prefix_digest``, a ``relpath``
   on every object, no duplicate relpaths, and a digest that matches the one recomputed
   from its own listing.
+* ``result.json`` may carry an optional ``facts`` list — the searchable ``key=value``
+  pairs the orchestrator records for the run. It is checked here and never enforced: a
+  bad entry costs itself, so every finding about it is a RECOMMENDATION returned to the
+  caller rather than a refusal (see :class:`Recommendation`).
 * In a completion marker every relpath in ``produced_ports`` must also appear in
   ``objects``; a relpath may not repeat within one port; the same relpath MAY appear
   in two different ports; and ``objects`` may not inventory one relpath twice. An
@@ -54,6 +58,7 @@ The rules, in one place:
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 from collections.abc import Iterable
 
@@ -149,6 +154,48 @@ SHA256_PATTERN = re.compile(r'[0-9a-f]{64}')
 #: name, so such a relpath cannot name a file that exists.
 CONTROL_CHARACTER = re.compile(r'[\x00-\x1f]')
 
+#: The orchestrator's rules for ONE search fact — the optional ``facts`` list in
+#: ``result.json``. Re-stated from where they are written down (``pipelines/facts.py``:
+#: ``KEY_RE``, ``MAX_VALUE_LEN``, ``_CONTROL_RE``; ``external/contract.py``:
+#: ``MAX_RESULT_FACTS``) rather than imported, for the reason at the top of this file.
+#: ``\Z`` and not ``$``, mirroring the orchestrator exactly: ``$`` also matches before a
+#: final newline, so ``'task\n'`` would pass a check written with it — and be stored with
+#: the newline attached, where no search can reach it. At full length it is worse than
+#: unsearchable: 64 characters plus a newline is 65 going into a 64-character column, a row
+#: no store will take. The rules here are picked so that cannot happen — everything they
+#: accept is something the columns hold, which is what makes one bad entry cost only itself.
+FACT_KEY = re.compile(r'^[a-z][a-z0-9_]{0,63}\Z')
+MAX_FACT_VALUE_CHARS = 512
+MAX_RESULT_FACTS = 10_000
+
+#: The shape of one fact's ``meta``: FLAT, and small (``pipelines/facts.py``:
+#: ``MAX_META_KEYS``, ``MAX_META_KEY_LEN``). See :func:`_why_this_meta_is_not_flat`.
+MAX_FACT_META_KEYS = 32
+MAX_FACT_META_KEY_CHARS = 64
+
+#: The control characters a fact VALUE may not carry. Deliberately NOT the same set as
+#: :data:`CONTROL_CHARACTER` above: this one includes DEL (0x7f). A value is refused
+#: rather than cleaned for the reason the orchestrator gives beside the rule — a value
+#: carrying a control character "did not come from the canonical formatter, and a
+#: silently-mangled value would never match" anything anybody searches for.
+CONTROL_CHARACTER_IN_FACT = re.compile(r'[\x00-\x1f\x7f]')
+
+#: Half a UTF-16 surrogate pair, which is the one thing here that is not a matter of taste:
+#: a lone surrogate has no UTF-8 encoding at all, so a value carrying one is not merely
+#: unsearchable — the database refuses the row. It reaches a document the ordinary way, when
+#: bytes that are not valid UTF-8 are decoded with surrogate escapes, which is what a
+#: filename copied off a foreign filesystem does. Refused in a fact VALUE beside the control
+#: characters (``pipelines/facts.py`` puts both in one class) and reported separately: a
+#: finding is read one at a time, and "carries a control character" would suggest a tab.
+LONE_SURROGATE = re.compile(r'[\ud800-\udfff]')
+
+#: Every fact finding ends with this, because a finding is read one at a time and each
+#: has to say what it costs. Nothing here is a refusal.
+_A_BAD_FACT_COSTS_ITSELF = (
+    'the orchestrator skips this entry, records the rest and fails nothing (search facts are '
+    'not load-bearing; pipelines/facts.py)'
+)
+
 #: Contract versions this harness can read. The real gate lives in
 #: ``external/versioning.py``; the shape of it — default to 1 when unstamped, refuse a
 #: non-integer, refuse an integer with no parser — is what is re-stated here.
@@ -157,6 +204,24 @@ SUPPORTED_CONTRACT_VERSIONS = (1,)
 
 class ContractViolation(AssertionError):
     """A document that the orchestrator's parser would refuse."""
+
+
+class Recommendation(str):
+    """A finding the platform does NOT refuse — the RECOMMENDATION label, made executable.
+
+    Until search facts arrived, every rule this harness knew had the same consequence: the
+    platform refuses the document, so the only report it needed was an exception. The
+    optional ``facts`` list in ``result.json`` is the first thing here that is read ENTRY
+    BY ENTRY and skipped entry by entry — a fact that breaks a rule costs that fact and
+    nothing else, and the document, the objects it accompanies and the run are all
+    unaffected. Raising for one would teach a RULE where ``docs/PROTOCOL.md`` says
+    RECOMMENDATION, and somebody would then build a node around the stricter reading.
+
+    So a finding of this kind is RETURNED, never raised: :func:`validate_result` appends
+    one to the list a caller hands it and accepts the document regardless. It is a ``str``
+    subclass so that the sentence is the whole of it — "which rule" is the content of a
+    finding here exactly as it is for a violation.
+    """
 
 
 def classify_exit(code: int | None) -> str:
@@ -356,8 +421,16 @@ def validate_marker(document: object, *, raw_bytes: bytes | None = None) -> dict
     return document
 
 
-def validate_result(document: object, *, raw_bytes: bytes | None = None) -> dict:
-    """Hold ``result.json`` to its shape and to the 1 MiB ceiling."""
+def validate_result(document: object, *, raw_bytes: bytes | None = None,
+                    recommendations: list | None = None) -> dict:
+    """Hold ``result.json`` to its shape and to the 1 MiB ceiling.
+
+    The optional ``facts`` list is checked too, and it is the one part of this document
+    that is NOT held to anything: every finding about it is appended to
+    ``recommendations`` — a list the caller provides when it wants them — and the
+    document is accepted either way. See :class:`Recommendation` for why, and
+    :func:`_result_fact_findings` for the rules that are re-stated.
+    """
     if raw_bytes is not None and len(raw_bytes) > MAX_RESULT_BYTES:
         raise ContractViolation(
             f'result.json is {len(raw_bytes)} bytes, over the {MAX_RESULT_BYTES}-byte ceiling — '
@@ -371,7 +444,133 @@ def validate_result(document: object, *, raw_bytes: bytes | None = None) -> dict
         value = document.get(field, {})
         if not isinstance(value, dict):
             raise ContractViolation(f'result.{field} must be an object, got {type(value).__name__}')
+    if recommendations is not None:
+        recommendations.extend(_result_fact_findings(document))
     return document
+
+
+def _why_this_meta_is_not_flat(meta: dict) -> str | None:
+    """The first reason the orchestrator would refuse this ``meta``, or None. **No recursion.**
+
+    Its rule is FLAT and scalar: at most 32 keys; every key a string of 1 to 64 characters;
+    every value one scalar — a string of at most 512 characters, a number that is finite, a
+    boolean, or null. Every string, keys included, is held to the same rule as a fact value:
+    no control character, no half of a UTF-16 surrogate pair.
+
+    ``meta`` is small display detail for the Runs panel, so nothing anybody writes is being
+    refused, and what the flatness buys is worth far more: the accepted shapes are exactly
+    the shapes the orchestrator's columns hold, so a fact it accepts cannot then be rejected
+    by the store and one hostile display detail can never cost a document its other facts.
+    """
+    if len(meta) > MAX_FACT_META_KEYS:
+        return f'it has {len(meta)} keys, over the {MAX_FACT_META_KEYS} the orchestrator stores'
+    for key, value in meta.items():
+        if not isinstance(key, str) or not 1 <= len(key) <= MAX_FACT_META_KEY_CHARS:
+            return f'the key {key!r} is not a string of 1 to {MAX_FACT_META_KEY_CHARS} characters'
+        if CONTROL_CHARACTER_IN_FACT.search(key) or LONE_SURROGATE.search(key):
+            return f'the key {key!r} carries a control character or half a UTF-16 surrogate pair'
+        if value is None or isinstance(value, (bool, int)):
+            continue
+        if isinstance(value, float):
+            if not math.isfinite(value):
+                return f'{key!r} holds {value!r}, which is not a number any other JSON reader accepts'
+            continue
+        if not isinstance(value, str):
+            return f'{key!r} holds a {type(value).__name__}, and a value has to be one scalar'
+        if len(value) > MAX_FACT_VALUE_CHARS:
+            return f'{key!r} holds {len(value)} characters, over the {MAX_FACT_VALUE_CHARS} stored'
+        if CONTROL_CHARACTER_IN_FACT.search(value) or LONE_SURROGATE.search(value):
+            return f'{key!r} carries a control character or half a UTF-16 surrogate pair'
+    return None
+
+
+def _result_fact_findings(document: dict) -> list[Recommendation]:
+    """Every search fact in this document that the orchestrator would decline to record.
+
+    The rules are its, not ours, and they are re-stated in :data:`FACT_KEY`,
+    :data:`MAX_FACT_VALUE_CHARS`, :data:`CONTROL_CHARACTER_IN_FACT` and
+    :data:`MAX_RESULT_FACTS`: an entry is an object with a ``key`` matching the key
+    grammar, a ``value`` that is a string or an integer — a boolean is not one, because
+    ``True`` would be recorded as the string ``'True'`` — non-blank once trimmed, at most
+    512 characters and free of control characters, and a ``meta`` that is absent or an
+    object. Past the cap the orchestrator drops the remaining entries.
+
+    ``meta`` has one rule beyond "absent or an object": it must be FLAT and scalar (see
+    :func:`_why_this_meta_is_not_flat`), which is what makes the accepted shapes exactly the
+    shapes the columns hold. A fact VALUE carrying half a UTF-16 surrogate pair is refused on
+    the same ground — it has no UTF-8 encoding, so the row cannot be stored. Both arrive out
+    of a JSON writer that raised nothing, and the entry is then silently gone, which is
+    precisely the outcome a fact exists to prevent.
+
+    A ``facts`` key that is present and is not a list is reported the same way, and is worth
+    reporting rather than passing over: the orchestrator logs a warning and records nothing,
+    so a node that wrote its facts as an object is findable by none of them and never told.
+
+    Present-and-``null`` counts as present, for both ``facts`` and ``meta``, and that is the
+    orchestrator's own distinction rather than pedantry. Its rule is absent-OR-the-right-shape:
+    a node with nothing to say leaves the key out, and one that emitted ``null`` has a
+    serializer writing a shape nobody checked. Reading ``null`` as absence would make this
+    harness quieter than the platform on exactly the documents an author needs told about.
+    """
+    if 'facts' not in document:
+        return []
+    facts = document['facts']
+    if not isinstance(facts, list):
+        return [Recommendation(
+            f'result.facts must be a list, got {type(facts).__name__} — the orchestrator records '
+            f'nothing from this document and logs a warning; the run is unaffected'
+        )]
+
+    findings = [Recommendation(
+        f'result.facts carries {len(facts)} entries and only the first {MAX_RESULT_FACTS} are '
+        f'recorded (external/contract.py MAX_RESULT_FACTS); the rest are dropped, and a node with '
+        f'more things than that to name should record something coarser'
+    )] if len(facts) > MAX_RESULT_FACTS else []
+
+    for index, entry in enumerate(facts):
+        where = f'result.facts[{index}]'
+        if not isinstance(entry, dict):
+            findings.append(Recommendation(
+                f'{where} must be an object with key/value, got {type(entry).__name__} — '
+                f'{_A_BAD_FACT_COSTS_ITSELF}'))
+            continue
+        key = entry.get('key')
+        if not isinstance(key, str) or not FACT_KEY.match(key):
+            findings.append(Recommendation(
+                f'{where}.key {key!r} does not match the orchestrator\'s key grammar '
+                f'{FACT_KEY.pattern} — {_A_BAD_FACT_COSTS_ITSELF}'))
+        value = entry.get('value')
+        if isinstance(value, bool) or not isinstance(value, (str, int)):
+            findings.append(Recommendation(
+                f'{where}.value must be a string or an integer, got {value!r} — a boolean is not a '
+                f'value, and {_A_BAD_FACT_COSTS_ITSELF}'))
+        else:
+            trimmed = str(value).strip()
+            if not trimmed:
+                findings.append(Recommendation(
+                    f'{where}.value is blank once trimmed — {_A_BAD_FACT_COSTS_ITSELF}'))
+            elif len(trimmed) > MAX_FACT_VALUE_CHARS:
+                findings.append(Recommendation(
+                    f'{where}.value is {len(trimmed)} characters, over the {MAX_FACT_VALUE_CHARS} the '
+                    f'orchestrator stores — {_A_BAD_FACT_COSTS_ITSELF}'))
+            elif CONTROL_CHARACTER_IN_FACT.search(trimmed):
+                findings.append(Recommendation(
+                    f'{where}.value carries a control character — {_A_BAD_FACT_COSTS_ITSELF}'))
+            elif LONE_SURROGATE.search(trimmed):
+                findings.append(Recommendation(
+                    f'{where}.value carries half a UTF-16 surrogate pair, which has no UTF-8 encoding '
+                    f'and cannot be stored at all — {_A_BAD_FACT_COSTS_ITSELF}'))
+        if 'meta' in entry and not isinstance(entry['meta'], dict):
+            findings.append(Recommendation(
+                f'{where}.meta must be absent or an object, got {type(entry["meta"]).__name__} — '
+                f'{_A_BAD_FACT_COSTS_ITSELF}'))
+        elif isinstance(entry.get('meta'), dict):
+            not_flat = _why_this_meta_is_not_flat(entry['meta'])
+            if not_flat:
+                findings.append(Recommendation(
+                    f'{where}.meta must be a flat object of scalar values — {not_flat} — so the '
+                    f'orchestrator drops this entry: {_A_BAD_FACT_COSTS_ITSELF}'))
+    return findings
 
 
 def validate_manifest(document: object, *, raw_bytes: bytes | None = None) -> dict:

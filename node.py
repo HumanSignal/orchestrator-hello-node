@@ -920,6 +920,70 @@ def _post_object(post: dict, key: str, source_path: str, size: int, what: str) -
 INVENTORY: list[dict] = []
 PORTS: dict[str, list[str]] = {}
 
+#: Whether the store has actually ACCEPTED ``result.json``. Being in the inventory is not
+#: the same claim: the ordinary write records the document before uploading it (see
+#: :func:`publish` for why that order is right for work), so an upload that failed leaves a
+#: record of an object nobody holds. The failure path reads this rather than the inventory,
+#: because "already named" would tell it there is nothing left to do at exactly the moment
+#: there is — and the marker would then send salvage after a file that is not there.
+RESULT_UPLOADED = False
+
+#: What this run has done so far, and the facts by which somebody will find it again.
+#: Both are at module scope for the same reason the inventory is: the FAILURE path writes
+#: a report document too, and a run that died on its third input still touched the first
+#: two — which is exactly the run an operator goes looking for.
+#:
+#: **BEHAVIOUR.** The orchestrator reads the optional ``facts`` list out of ``result.json``
+#: when it accepts this attempt's marker, whatever that marker says, and records each
+#: entry against the execution. The run is then findable in the Runs search box by
+#: ``input:data.csv`` — and by ``task:41`` or ``annotation:7`` for a node that records the
+#: Label Studio ids it worked on, which is the convention worth following: record the ids
+#: of the things you touched, not a description of what you did.
+#:
+#: **RECOMMENDATION.** Nothing requires any of this, and nothing punishes getting it
+#: wrong: an entry that breaks a rule below is skipped by itself and the rest are still
+#: recorded, with no effect on the run. What is said about it is one summary line in the
+#: ORCHESTRATOR's log, counting how many were dropped — not one line per entry, and
+#: nothing that reaches this container. The rules are the orchestrator's own
+#: (``pipelines/facts.py``): each entry is an object with a ``key`` matching
+#: ``^[a-z][a-z0-9_]{0,63}\Z``, a ``value`` that is a string or an integer — never a
+#: boolean — non-blank, at most 512 characters and free of control characters, and an
+#: optional ``meta``: a FLAT object of scalars (at most 32 keys, keys of 1 to 64
+#: characters, each value one string, number, boolean or null — no nesting). Those rules
+#: are exactly what its columns hold, so an entry it accepts can never be refused by the
+#: store afterwards and take the document's other facts with it. At most 10,000 entries are
+#: recorded (``external/contract.py`` ``MAX_RESULT_FACTS``), so a node with more things than
+#: that to name should record something coarser rather than one fact per row.
+#:
+#: **RECOMMENDATION — apply those rules HERE, where they are still visible.** ``claim``
+#: below does, and that is the part worth copying. A node that writes whatever it has and
+#: lets the far side sort it out gets no error, no warning it will ever see and no fact:
+#: the entry is dropped inside somebody else's worker log, and the only symptom is a run
+#: that answers to nothing when it is searched for six weeks later. Checking at the point
+#: of writing is what turns that into a sentence in this run's own report.
+FACTS: list[dict] = []
+METRICS: dict[str, int] = {'files': 0, 'total_bytes': 0, 'lines': 0}
+
+#: Why the facts this run could not claim, counted rather than listed. The reason a fact
+#: is unusable is the same reason for every one of its kind — one relpath scheme that runs
+#: long, one job with more inputs than the cap — so a count and a cause say everything a
+#: list would, in a bounded number of characters inside a document with a ceiling.
+FACTS_UNCLAIMED: dict[str, int] = {'unusable': 0, 'bad_key': 0, 'over_cap': 0}
+
+#: The orchestrator's own ingest limits for one fact, re-stated (``pipelines/facts.py``:
+#: ``KEY_RE``, ``MAX_VALUE_LEN``, ``_CONTROL_RE``; ``external/contract.py``:
+#: ``MAX_RESULT_FACTS``). ``\Z`` and not ``$``, exactly as the orchestrator writes it: ``$``
+#: also matches immediately before a final newline, so a key written with one would pass a
+#: check made with it and then be stored with the newline attached, where no search reaches
+#: it. The surrogate range is in the control-character class for a harder reason than
+#: searchability — half a UTF-16 surrogate pair has no UTF-8 encoding, so the row cannot be
+#: stored at all. It gets into a value the ordinary way: a name copied off a filesystem
+#: whose bytes are not valid UTF-8 is decoded with surrogate escapes.
+_FACT_KEY = re.compile(r'^[a-z][a-z0-9_]{0,63}\Z')
+MAX_FACT_VALUE_CHARS = 512
+MAX_FACTS = 10_000
+_CONTROL_IN_FACT = re.compile(r'[\x00-\x1f\x7f\ud800-\udfff]')
+
 _BAD_IN_RELPATH = re.compile(r'[\x00-\x1f\\]')
 
 
@@ -993,6 +1057,16 @@ def record(relpath: str, digest: str, size: int, port: str | None) -> None:
     INVENTORY.append({'relpath': relpath, 'sha256': digest, 'size': size})
     if port:
         PORTS.setdefault(port.strip(), []).append(relpath)
+
+
+def forget(relpath: str) -> None:
+    """Take one relpath back out of the inventory, for a record that outlived its object.
+
+    Used on one path only: the report document, recorded before an upload that then failed.
+    The ports need no repair — :func:`write_marker` keeps only the relpaths the inventory
+    still names — and a second attempt then has a free name to record again.
+    """
+    INVENTORY[:] = [entry for entry in INVENTORY if entry['relpath'] != relpath]
 
 
 def publish(creds: Credentials, relpath: str, source_path: str, digest: str, size: int,
@@ -1172,12 +1246,64 @@ def output_relpath(port: str, name: str, taken: set) -> str:
         suffix += 1
 
 
+def claim(key: str, value: str) -> None:
+    """Record one search fact, or say in the report why this run could not.
+
+    The rules applied here are the ORCHESTRATOR's, re-stated beside :data:`FACTS`: a key
+    matching its grammar, a non-blank value of at most 512 characters with no control
+    characters or lone surrogates, and at most 10,000 entries. It applies them itself
+    rather than writing whatever it has and letting the far side sort it out, and the
+    difference is entirely about who finds out. An entry the orchestrator declines is
+    dropped inside a worker log this node's author will never read; the run simply answers
+    to nothing when somebody searches for it, weeks later, with no error anywhere to
+    explain why. Checked here, the same entry becomes a sentence
+    in this run's own report, next to the facts that did get through.
+
+    A skipped fact is never an error and never a reason to stop: the work really happened,
+    and all that is lost is one way of finding it again. Counting rather than listing is
+    the same discipline the orchestrator applies at its end — the reason one fact is
+    unusable is the reason all of its kind are, and a per-entry list inside a document
+    with a 1 MiB ceiling is a way of losing the whole document.
+    """
+    if len(FACTS) >= MAX_FACTS:
+        FACTS_UNCLAIMED['over_cap'] += 1
+        return
+    # The KEY is checked as well as the value, and it is not a formality: a key is chosen in
+    # this file, so a bad one is wrong for every fact of that kind on every run — the whole
+    # kind vanishes from the search at once, with nothing anywhere to say so.
+    if not isinstance(key, str) or not _FACT_KEY.match(key):
+        FACTS_UNCLAIMED['bad_key'] += 1
+        return
+    text = value.strip() if isinstance(value, str) else str(value)
+    if not text or len(text) > MAX_FACT_VALUE_CHARS or _CONTROL_IN_FACT.search(text):
+        FACTS_UNCLAIMED['unusable'] += 1
+        return
+    FACTS.append({'key': key, 'value': text})
+
+
+def _unclaimed_facts_note() -> str | None:
+    """One sentence for the summary, or None when everything this run touched was claimed."""
+    parts = []
+    if FACTS_UNCLAIMED['unusable']:
+        parts.append(
+            f"{FACTS_UNCLAIMED['unusable']} value(s) the orchestrator would not record "
+            f"(blank, over {MAX_FACT_VALUE_CHARS} characters, or carrying a control character "
+            f"or half a surrogate pair)")
+    if FACTS_UNCLAIMED['bad_key']:
+        parts.append(
+            f"{FACTS_UNCLAIMED['bad_key']} under a key the orchestrator's grammar refuses "
+            f"({_FACT_KEY.pattern})")
+    if FACTS_UNCLAIMED['over_cap']:
+        parts.append(f"{FACTS_UNCLAIMED['over_cap']} past the {MAX_FACTS}-fact cap")
+    if not parts:
+        return None
+    return 'not claimed as search facts: ' + '; '.join(parts)
+
+
 def process(creds: Credentials, manifest: dict, scratch: str) -> dict:
-    """Copy every input into ``outputs/`` and count what went past."""
+    """Copy every input into ``outputs/``, count what went past, and name what it touched."""
     sources = creds.get().get('inputs') or []
     taken: set = set()
-    total_bytes = 0
-    total_lines = 0
 
     for index in range(len(sources)):
         # Checked BEFORE each input, which is what makes a stop change what the step does
@@ -1189,18 +1315,24 @@ def process(creds: Credentials, manifest: dict, scratch: str) -> dict:
             port = (creds.get().get('inputs') or [])[index].get('port') or 'input'
             relpath = output_relpath(port, name, taken)
             publish(creds, relpath, path, digest, size, OUTPUT_PORT, f'output {relpath!r}')
-            total_bytes += size
-            total_lines += _count_lines(path)
+            # The INPUT's own name, not the copy's path. ``relpath`` is a name only this
+            # step ever chose, and it would send anyone searching for the run that touched
+            # ``data.csv`` looking for ``outputs/data.csv`` instead; the envelope's name is
+            # what the rest of the pipeline calls that object. Recorded after the copy came
+            # back accepted, so a fact is a claim about something that really happened.
+            claim('input', name)
+            METRICS['files'] = len(INVENTORY)
+            METRICS['total_bytes'] += size
+            METRICS['lines'] += _count_lines(path)
 
-    metrics = {'files': len(INVENTORY), 'total_bytes': total_bytes, 'lines': total_lines}
-    _write_result(creds, manifest, metrics, scratch)
+    _write_result(creds, manifest, scratch)
     progress(1.0, 'done')
     # One last look before the caller writes a receipt claiming success. A stop that
     # landed during the final upload has to end this run as the cancellation it is, and
     # the ordinary failure path — which writes a cancelled marker with this same
     # inventory — is a better place to do that than a special case afterwards.
     _check_stopped()
-    return metrics
+    return dict(METRICS)
 
 
 def _count_lines(path: str) -> int:
@@ -1219,7 +1351,8 @@ def _count_lines(path: str) -> int:
                 uncached = 0
 
 
-def _write_result(creds: Credentials, manifest: dict, metrics: dict, scratch: str) -> None:
+def _write_result(creds: Credentials, manifest: dict, scratch: str, *,
+                  inventory_first: bool = True) -> None:
     """The optional report document, kept inside the ceiling its reader is bound by.
 
     ``params`` is copied verbatim from whatever the pipeline author typed and is bounded
@@ -1230,12 +1363,49 @@ def _write_result(creds: Credentials, manifest: dict, metrics: dict, scratch: st
     It goes on its own port. Everything under a port is offered to every downstream step
     wired to it, and a metrics file delivered as if it were a result is a thing downstream
     steps have to learn to ignore.
+
+    It reads :data:`FACTS` and :data:`METRICS` rather than taking them as arguments, for
+    the same reason :func:`write_marker` reads the inventory that way: the failure path
+    writes this document too, out of a function that can see none of the work's locals.
+
+    Facts this run could not claim are reported here too — see :func:`claim`. They are the
+    step's own refusals, so they belong in the report of the run that made them, not only
+    in a counter nobody ever sees.
+
+    **The ``facts`` list is the one part of this document anything reads**, and the order
+    the three ways out of the ceiling are tried in follows from that. The ``params`` echo
+    is a diagnostic nobody reads, so it gives way first; the facts give way second, and
+    only as far as they have to, because a run findable by the first of its inputs is
+    worth much more than one findable by none of them; and a document that is still over
+    the ceiling with both gone is a mistake worth failing loudly on.
+
+    ``inventory_first`` inverts the one ordering this file otherwise treats as settled, and
+    only the failure path asks for it. Recording an object BEFORE its upload is right for
+    WORK, and for one reason: an ambiguous upload may still commit after the client has
+    gone, and an object nobody named is never looked at again. That reason does not reach
+    this document. Its facts are read from the staging prefix BY NAME and not from the
+    marker's inventory, so a copy the receipt never mentions still delivers everything
+    anybody reads it for — while a receipt that names a document the store never took
+    sends salvage looking for a file that is not there. This write happens as the run is
+    already ending, on credentials that may have died with it, so that is not a remote
+    case. Inventorying it only once the store has taken it keeps the receipt true and
+    costs nothing that was ever at risk.
     """
     params = manifest.get('params') or {}
+    # Two DIFFERENT things can cost this document facts, and they are reported under two
+    # different keys on purpose: ``facts_not_claimed`` is what this step declined to write
+    # because the orchestrator would not have recorded it, and ``facts_omitted`` below is
+    # what a document too large for its ceiling had to give up. Reading one as the other
+    # would send an author looking at the wrong end of the problem.
+    unclaimed = _unclaimed_facts_note()
+    summary = {'attempt': manifest.get('attempt'), 'params': params}
+    if unclaimed:
+        summary['facts_not_claimed'] = unclaimed
     document = {
         'schema_version': 1,
-        'metrics': metrics,
-        'summary': {'attempt': manifest.get('attempt'), 'params': params},
+        'metrics': dict(METRICS),
+        'summary': summary,
+        'facts': list(FACTS),
     }
     payload = _dump(document)
     if len(payload) > MAX_RESULT_BYTES:
@@ -1243,8 +1413,19 @@ def _write_result(creds: Credentials, manifest: dict, metrics: dict, scratch: st
         # on the way through would be teaching that to everyone who copies this file — but
         # not at the price of publishing a document its reader is forbidden to open. So
         # the echo is what gives way, and it says so rather than going quiet.
-        log.warning('params are too large to echo into %s (%d bytes); '
-                    'recording their shape instead', RESULT_FILENAME, len(payload))
+        #
+        # Only when there is an echo to blame, though. This branch runs on SIZE, and the
+        # params are not always what made the document big — a job with tens of thousands
+        # of inputs gets here on the facts list alone, with params empty. Naming the wrong
+        # cause sends whoever reads the line to look at a pipeline's configuration for a
+        # problem that is not in it; the line below, which knows whether facts had to be
+        # given up, is the one that names the real one.
+        if params:
+            log.warning('params are too large to echo into %s (%d bytes); '
+                        'recording their shape instead', RESULT_FILENAME, len(payload))
+        else:
+            log.warning('%s is %d bytes, over its 1 MiB ceiling, with no params to drop',
+                        RESULT_FILENAME, len(payload))
         document['summary'] = {
             'attempt': manifest.get('attempt'),
             'params': None,
@@ -1252,7 +1433,33 @@ def _write_result(creds: Credentials, manifest: dict, metrics: dict, scratch: st
             'params_keys': sorted(params)[:64] if isinstance(params, dict) else None,
             'params_count': len(params) if isinstance(params, dict) else None,
         }
+        # Re-stated, because this branch REPLACES the summary rather than editing it: a
+        # note that quietly disappeared when the params happened to be large would be
+        # worse than no note, since its absence reads as "everything was claimed".
+        if unclaimed:
+            document['summary']['facts_not_claimed'] = unclaimed
         payload = _dump(document)
+    if len(payload) > MAX_RESULT_BYTES:
+        # Halved until it fits, and it says how many it dropped in the same place the
+        # dropped params say so. Losing the tail of the list costs the run the facts it
+        # names; losing the document costs it every fact it has, and the whole point of
+        # them is that somebody can find this run afterwards.
+        kept = list(FACTS)
+        while kept and len(payload) > MAX_RESULT_BYTES:
+            kept = kept[: len(kept) // 2]
+            document['facts'] = kept
+            document['summary']['facts_omitted'] = (
+                f'{len(FACTS) - len(kept)} of {len(FACTS)} facts dropped: too large for the '
+                f'1 MiB ceiling on this document')
+            payload = _dump(document)
+        # Only said when facts were actually given up. A document that is still too large
+        # with an empty list — the params echo alone can do it, since its replacement keeps
+        # up to 64 of the key NAMES — would otherwise be reported as "carried too many
+        # facts; kept 0 of 0", which names the wrong cause and sends its reader to look at
+        # a list that is not the problem. The line above already said what is.
+        if len(kept) < len(FACTS):
+            log.warning('%s carried too many facts for its 1 MiB ceiling; kept %d of %d',
+                        RESULT_FILENAME, len(kept), len(FACTS))
     if len(payload) > MAX_RESULT_BYTES:
         # Fail loudly at the point of the mistake rather than publish a document that
         # only turns out to be unreadable later, in somebody else's process.
@@ -1261,8 +1468,15 @@ def _write_result(creds: Credentials, manifest: dict, metrics: dict, scratch: st
     path = os.path.join(scratch, 'result.json')
     with open(path, 'wb') as handle:
         handle.write(payload)
-    publish(creds, RESULT_FILENAME, path, _sha256_file(path), len(payload), REPORT_PORT,
-            f'{RESULT_FILENAME!r}')
+    digest = _sha256_file(path)
+    global RESULT_UPLOADED
+    if inventory_first:
+        publish(creds, RESULT_FILENAME, path, digest, len(payload), REPORT_PORT, f'{RESULT_FILENAME!r}')
+        RESULT_UPLOADED = True
+    else:
+        write_object(creds, RESULT_FILENAME, path, len(payload), f'{RESULT_FILENAME!r}')
+        RESULT_UPLOADED = True
+        record(RESULT_FILENAME, digest, len(payload), REPORT_PORT)
 
 
 # ------------------------------------------------------------------------ marker
@@ -1400,6 +1614,48 @@ def main() -> int:
                 code = EXIT_PERMANENT if isinstance(failure, StepError) else EXIT_TRANSIENT
                 reason = redact(failure)
             print(f'hello-node: {status.upper()}: {reason}', file=sys.stderr, flush=True)
+            # The report document is written HERE too, and before the receipt — on the
+            # FAILURE path. The run an operator goes looking for is usually the one that
+            # went wrong, and a step that only reports its facts when everything worked
+            # leaves that run findable by nothing at all: the inputs it really did copy
+            # before it died are as true as any others. Best-effort and wrapped in its own
+            # try, so this write may cost the run its report, never its receipt, and the
+            # marker stays strictly last. BaseException, because a stop arriving as a
+            # KeyboardInterrupt in the middle of this upload must still leave a marker.
+            #
+            # A CANCELLED run does not attempt it, and that is not a preference. A stopping
+            # step cannot open a new connection at all — ``_StoppableTransport.connect``
+            # refuses one while the abandon flag is set, and that flag is cleared only
+            # inside ``write_marker``, because the receipt is the ONE request a cancelled
+            # run still gets to make. So the write here is guaranteed to be refused, and
+            # attempting it would spend the last of a grace nobody promised and then print
+            # an error blaming this run for doing exactly what it was designed to do. What
+            # survives a cancellation is a document written BEFORE the stop.
+            #
+            # Nor is it attempted when the store has already taken the document, which
+            # happens on exactly one path: the stop noticed by the last check in ``process``,
+            # after the report was written. A second one would be a duplicate relpath —
+            # refused by ``record`` — and the refusal would print a line blaming this run for
+            # something that went right. ``inventory_first=False`` is the other half of
+            # keeping this receipt honest: see :func:`_write_result`.
+            #
+            # UPLOADED, not inventoried, and the difference is a whole failure of its own.
+            # The ordinary write records the document BEFORE uploading it, so an upload that
+            # failed leaves the name in the inventory with nothing behind it — and reading
+            # the inventory here would decide there is nothing left to do at the one moment
+            # there is, then hand the marker a receipt naming a file salvage cannot find.
+            if not RESULT_UPLOADED:
+                forget(RESULT_FILENAME)
+            if stopped and not RESULT_UPLOADED:
+                print(f'hello-node: no {RESULT_FILENAME} for this run: it was stopped before one was '
+                      f'written, and a stopping step keeps its last request for the receipt',
+                      file=sys.stderr, flush=True)
+            elif not RESULT_UPLOADED:
+                try:
+                    _write_result(creds, manifest or {}, scratch, inventory_first=False)
+                except BaseException as result_failure:
+                    print(f'hello-node: could not write {RESULT_FILENAME} for the {status} run: '
+                          f'{redact(result_failure)}', file=sys.stderr, flush=True)
             # A marker is written even here — especially here. Without one the platform
             # can report THAT the step failed and never why, and everything already
             # uploaded is stranded, because salvage publishes only what the marker names.

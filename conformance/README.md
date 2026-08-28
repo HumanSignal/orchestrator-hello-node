@@ -128,7 +128,7 @@ the shape that forced a customer's image to run as one particular uid.
 
 | File | What it is |
 |---|---|
-| `contract.py` | The wire contract, **re-implemented from the specification**, not vendored from the orchestrator. A harness that shares code with the system it judges inherits that system's bugs and stops being able to see them. The price is drift, which is why `fixtures/` exists. |
+| `contract.py` | The wire contract, **re-implemented from the specification**, not vendored from the orchestrator. A harness that shares code with the system it judges inherits that system's bugs and stops being able to see them. The price is drift, which is why `fixtures/` exists. One judgement in it is not a refusal: a bad entry in `result.json`'s optional `facts` list comes back as a `Recommendation` rather than a `ContractViolation`, because the orchestrator skips such an entry, records the others and fails nothing — raising would teach a RULE where the documents say RECOMMENDATION. |
 | `fixtures/` | The orchestrator's three frozen golden version-1 documents, copied byte for byte. Validating them is the one *measurement* that `contract.py` still agrees with the real parser. |
 | `fakes3.py` | The fake object store: presigned-style GETs, presigned-POST uploads with the whole signed form checked, one key prefix, arrival order recorded, credentials that expire, and an in-flight ledger so a test can wait for the store to finish (`settle()`) instead of reading it mid-request. See its module docstring for where it is stricter than S3 and where it now matches it exactly. |
 | `job.py` | One synthetic job: the credential envelope, `invocation.json`, the credentials directory, and the atomic `os.replace` swap that models a refresh. |
