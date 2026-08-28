@@ -9,7 +9,7 @@ whatever the container declares it produced.
 
 **`node.py` is safe to copy.** It passes the whole conformance suite: the harness in
 `conformance/` builds this repository's image, runs it as a real container and judges it
-from the outside only, and **all 141 of its tests are green**.
+from the outside only, and **all 151 of its tests are green**.
 
 That was not true until recently. Twenty tests used to be red, and
 [CONFORMANCE-BASELINE.md](CONFORMANCE-BASELINE.md) is the measured record of what each one
@@ -27,7 +27,12 @@ one of which decides whether a real job survives:
   memory and would contradict the very rule this file exists to demonstrate;
 * it re-reads its credentials, so a run longer than fifteen minutes can still upload;
 * it keeps its inventory where the failure path can see it, and records an object before
-  the upload starts;
+  the upload starts — with one deliberate exception, its own report document on the way out
+  of a failure, which is named only once the store has taken it
+  ([docs/AUTHORING.md](docs/AUTHORING.md#nodepy-and-this-skeleton) says why);
+* it records what the run touched as **search facts** in `result.json`, on the failure path
+  as well as the successful one, so the run can afterwards be found by the name of an input
+  it copied instead of by an execution number nobody has;
 * it handles a stop request — stops taking on new work instead of running to completion
   for nobody, and *notices* the stop instead of sitting in a socket call until it times
   out, which is the half a handler usually leaves out;

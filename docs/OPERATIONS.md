@@ -546,7 +546,11 @@ which you cannot change from a node.
   Cancel to stop work, never to harvest a partial result.
 * **One input port, single files only.** The contract models multiple ports and folder
   inputs; the orchestrator emits neither.
-* **`result.json` is never read.** Metrics come from what was published.
+* **Only `result.json`'s `facts` list is read.** Metrics still come from what was
+  published; the facts are what make the run findable in the Runs search box, and they
+  are read when the attempt's marker is accepted, whatever that marker says. A document
+  over the 1 MiB ceiling is abandoned by that reader, which costs the run its facts and
+  nothing else — see [PROTOCOL.md](PROTOCOL.md#44-resultjson).
 * **No sandbox.** Stated above, repeated here because it belongs on a limits list.
 
 ---

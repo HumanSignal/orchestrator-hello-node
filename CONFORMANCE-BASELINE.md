@@ -5,10 +5,10 @@
 > `node.py` was rewritten and the whole suite is green, in every mode:
 >
 > ```
-> python -m pytest -q                  → 140 passed, 1 skipped
-> python -m pytest -q --red-for-real   → 140 passed, 1 skipped
+> python -m pytest -q                  → 150 passed, 1 skipped
+> python -m pytest -q --red-for-real   → 150 passed, 1 skipped
 > LSPO_ORCHESTRATOR_SRC=… LSPO_ORCHESTRATOR_REF=origin/master python -m pytest -q
->                                      → 141 passed          (the skip is the citation check;
+>                                      → 151 passed          (the skip is the citation check;
 >                                                             with the sources present it runs)
 > python verify_mutations.py           → 12/12 claims verified red against this suite
 > ```
@@ -17,13 +17,31 @@
 > that skips has not run, and a guard that can disappear while the summary line stays green
 > is the failure mode this repository keeps rediscovering.
 >
-> Those numbers were 128 for one release. Twelve tests were added since — eleven in
-> `tests/test_cancellation.py` and one holding the harness's own stall instrument to
-> account — and what they measure is in
+> Those numbers were 128 for one release. Twelve tests were added in the round after that —
+> eleven in `tests/test_cancellation.py` and one holding the harness's own stall instrument
+> to account — and what they measure is in
 > [the stop path was the right shape and inert](#the-round-after-the-stop-path-was-the-right-shape-and-inert)
-> immediately below. Group counts today: `conforms_today` 50, `subject_is_platform` 67,
-> `harness_self_test` 22, `expected_red_until_fixed` 0. Bases: `basis_contract` 82,
-> `basis_reference_quality` 35, `basis_our_policy` 24.
+> immediately below. Ten more came with search facts: THREE when the feature was built —
+> the node's own report document on the successful path and on the failed one, and the
+> harness's new report-rather-than-refuse channel held to being both — and SEVEN across
+> three rounds of review, each round finding something the one before it had not. A
+> cancelled run that reported a failure of its own making (measured: every stopped run
+> printed `could not write result.json … stop requested while this connection was being
+> made`, because the report write is refused by the same transport rule that makes a stop
+> prompt). A fact written at a length the orchestrator will not store, and the entry cap
+> applied at the producer rather than left to the far side. A KEY the producer never checked
+> at all, though its own docstring said it applied the orchestrator's rules. A size warning
+> that blamed the facts for a document the `params` echo had filled — and, in the last
+> round, the same line blaming the echo for a document the FACTS had filled. And a report
+> the store refused: the ordinary write had already put it in the inventory, so the marker
+> claimed an object nobody holds and the failure path, asking only whether the name was
+> already there, decided it had nothing left to do.
+> Group counts today: `conforms_today` 61, `subject_is_platform` 67, `harness_self_test` 23,
+> `expected_red_until_fixed` 0. Bases: `basis_contract` 82, `basis_reference_quality` 44,
+> `basis_our_policy` 25. (The `conforms_today` figure said 50 for one round while the suite
+> collected 52 — it had gone stale with the totals beside it still right, which is how
+> nobody noticed. The totals above are read off a real run at the end of each round for the
+> same reason.)
 >
 > The first two lines are identical, which is the point: there is no `expected_red_until_fixed`
 > test left, so CI mode and the true result cannot differ. All twenty tests that used to be
@@ -718,9 +736,15 @@ That second sentence is why this is a rule about the writer and not only about t
 
 The step copies `params` into its summary without looking at their size, so a manifest the
 orchestrator was happy to write (3 MiB, well inside the 8 MiB manifest ceiling) produces a
-document the contract's own reader is forbidden to read. **Honest caveat:** nothing in the
-current collection path calls `read_result`, so today the oversized document is written and
-never read.
+document the contract's own reader is forbidden to read. **The caveat this section carried
+has expired**, and it is recorded rather than deleted because it was measured: when this
+defect was written up, nothing in the collection path read `result.json` at all, so the
+oversized document was written and never read. Collection now reads it for the optional
+`facts` list, under the same 1 MiB bound, so an oversized document loses the run its search
+facts. Still without failing it, and not silently on the platform's side — the reader logs
+a warning naming the document. Silent where it matters, though: nothing reaches the node,
+its author or the run, so the only symptom anybody here sees is a run that answers to
+nothing when it is searched for ([docs/PROTOCOL.md](docs/PROTOCOL.md#44-resultjson)).
 
 The test forbids the oversized document and nothing else. `external/io.py` explicitly wants
 a producer to *"fail loudly at the point of the mistake"*, so ending the run non-zero is a

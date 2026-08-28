@@ -53,7 +53,7 @@ and a run that exited 0 fails for having no marker.
 |---|---|---|
 | `invocation.json` | orchestrator | always present |
 | your output objects | you | as many as you like, including none |
-| `result.json` | you | optional, and **nothing reads it** (see 4.4) |
+| `result.json` | you | optional. Only its `facts` list is read, and only to make the run searchable (see 4.4) |
 | `logs.ndjsonl` | you | optional |
 | `__lspo_complete.json` | you | see section 5 |
 
@@ -777,15 +777,91 @@ lower bound for reads.
 
 ### 4.4 `result.json`
 
-**BEHAVIOUR. Nothing in the orchestrator ever reads `result.json`.** There is no caller of
-the contract's own `read_result` anywhere outside the contract package. The run's metrics
-come from the completion marker and the objects that were actually published: the
-execution records `objects_published`, `bytes_published` and `exit_code`
-(`pipelines/external_finalize.py:2112-2118`).
+Background, and it matters for the line numbers below: this section describes the
+orchestrator change **"search facts for external nodes"**, which landed AFTER the commit
+the preamble pins. Its provenance is that change, not the pinned tree; every other section
+of this document is still measured against the pinned commit.
 
-**BEHAVIOUR.** Because nothing reads it, the contract's 1 MiB ceiling for this document is
-not enforced against you. It becomes an ordinary object of yours, subject to the 1 GiB
+**BEHAVIOUR. The orchestrator reads exactly one thing out of `result.json`: the optional
+`facts` list.** Nothing reads its `metrics` or its `summary` — there is still no caller of
+the contract's own `read_result` anywhere outside the contract package — and the run's
+numbers come from the completion marker and the objects that were actually published: the
+execution records `objects_published`, `bytes_published` and `exit_code`
+(`pipelines/external_finalize.py` `_marker_metrics`). The facts are read separately, by a reader
+that takes the document's raw JSON and looks at that one key
+(`external/io.py` `read_result_facts`).
+
+**BEHAVIOUR.** The 1 MiB ceiling on this document is therefore enforced on the reading
+side now, and this document set said the opposite until search facts existed. The reader
+is bounded at `MAX_RESULT_BYTES` and abandons a document over it. **What that costs you is
+the facts and nothing else**: an oversized `result.json` is read as carrying none, with a
+warning in the orchestrator's log, and the run is collected exactly as it would otherwise
+have been. Besides that, the document is an ordinary object of yours, subject to the 1 GiB
 per-object ceiling like any other.
+
+**BEHAVIOUR — search facts, which are what makes a finished run findable.** Each entry in
+the `facts` list is recorded against the execution and becomes a search term in the Runs
+panel: an entry `{"key": "task", "value": "41"}` makes the run answer to `task:41`, and any
+other key answers to `<key>:<value>` with no change needed anywhere. The list is read when
+the orchestrator accepts **this attempt's** completion marker, so it is recorded whether
+that marker says `succeeded`, `failed` or `cancelled` — a failed run that touched task 41
+is exactly the run somebody goes looking for. A receipt belonging to a different attempt
+or generation is not accepted, and nothing is read from beside it. Whether a cancelled run
+still has a document there to be read is a separate question, and the answer is usually no
+— see the second recommendation below.
+
+```json
+{"schema_version": 1,
+ "metrics": {"files": 3},
+ "summary": {"attempt": 1},
+ "facts": [{"key": "task", "value": "41", "meta": {"project": 7}},
+           {"key": "input", "value": "rows.csv"}]}
+```
+
+**BEHAVIOUR, for the whole list below.** An entry the orchestrator cannot record is
+skipped on its own and counted into the one summary warning the orchestrator logs per document (never a line per entry); the other entries are recorded, and no run
+ever fails, retries or is delayed for any of this. The same is true of the list as a whole:
+a `facts` that is present but is not a list records nothing, and an absent, malformed or
+oversized `result.json` records nothing. These are the rules an entry is held to
+(`pipelines/facts.py`, `external/contract.py`):
+
+| Field | What is recorded |
+|---|---|
+| `key` | a string matching `^[a-z][a-z0-9_]{0,63}\Z` — lower case, starting with a letter, at most 64 characters. The anchor is the end of the string and not the end of a line, so `"task\n"` is not the key `task`; it is not a key at all |
+| `value` | a string or an integer, never a boolean; non-blank once trimmed, at most 512 characters, free of control characters, and free of lone UTF-16 surrogates — half a pair has no UTF-8 encoding, so the row cannot be stored at all |
+| `meta` | absent, or a **FLAT** object of scalars: at most 32 keys, each key a string of 1 to 64 characters, each value a single string (at most 512 characters), number, boolean or `null` — no nested objects or lists. Strings, keys included, follow the `value` rule: no control characters, no lone UTF-16 surrogates, and numbers must be finite (`NaN` and `Infinity` are things a JSON writer emits without complaint and no reader takes back). The flatness is deliberate: what it accepts is exactly what the orchestrator's columns hold, so an accepted entry can never be refused by the store afterwards and take its siblings with it. `meta` is kept with the fact and is not searched |
+| the list | at most 10,000 entries; the ones past that are dropped |
+
+**RECOMMENDATION.** Record the **identity of every thing your step touched**, not a
+description of what it did. Label Studio task and annotation ids under the keys `task` and
+`annotation` — the two the platform's own steps write, so `task:41` finds your run beside
+theirs — and the names of the objects you consumed or produced under a key of your own. A
+value somebody would plausibly paste into a search box is worth a fact; a sentence is not,
+and a value nobody can know in advance (a timestamp, a random id of yours) buys nothing.
+
+**RECOMMENDATION.** Write them on the failure path too, for what you had already done. A
+step that reports its facts only after everything worked answers "which run touched this
+file?" for every run except the one that went wrong, which is the run the question is
+almost always about. `node.py` writes its report document before the marker on that path
+for this reason.
+
+**BEHAVIOUR.** A `cancelled` receipt is read for its facts exactly like any other: the
+orchestrator's gate is the marker's identity and never its status, so a document sitting
+beside a cancelled marker is recorded in full.
+
+**RECOMMENDATION.** The cancellation path is nevertheless the one place NOT to write that
+document — in a node built the way this one is. `node.py` answers a stop by ABANDONING its
+remaining requests, and the completion marker is then the single exemption it grants
+itself, so no connection is left over for a report and the attempt is guaranteed to be
+refused. That is this reference node's design choice and not a platform rule: a node that
+kept one connection alive through its stop could write a report on the way out, at the cost
+of spending grace it was never promised on a document nothing depends on.
+
+What a cancelled run built this way therefore carries is whatever was written **before**
+the stop: report as you go and that copy is already in the store; leave it all to the way
+out and there is nothing to read. And whichever design you pick, do not attempt a write you
+have already given up the means to make — it fails, and the refusal is then printed as a
+failure of the step's own making on a run that somebody stopped deliberately.
 
 **BEHAVIOUR.** If you list `result.json` in the marker's `objects` it is copied and
 verified like any other object. If you also claim it under an output port, it becomes a

@@ -441,6 +441,92 @@ def test_the_receipt_of_a_stopped_step_carries_the_code_the_process_returned(mak
 
 @conforms_today
 @reference_quality(_THE_RECEIPT)
+def test_a_stopped_step_does_not_report_a_failure_of_its_own_making(make_job):
+    """A cancelled run says nothing went wrong, because nothing did.
+
+    Setup:    three inputs, the first response held open, so the signal lands inside a
+              transfer — the same scenario as the receipt tests above.
+    Action:   stop the container and read everything it printed.
+    Validate: its output carries no line claiming the report document could not be
+              written, it SAYS instead that there is no report and why, no upload of a
+              report ever reached the store, and it still leaves a receipt.
+
+    **What this is guarding, exactly.** A step that writes its report on the way out of a
+    failure must not try the same thing on the way out of a STOP. It cannot succeed: this
+    file's own transport refuses to open a new connection once a stop has been requested,
+    and the exemption that lets the receipt through is taken only inside the marker write
+    — the receipt being the one request a cancelled run still gets to make. So the attempt
+    is guaranteed to be refused, and the refusal is then printed as an error, on every
+    single cancelled run.
+
+    That line costs more than tidiness. It is the operator's first sight of a cancellation
+    they asked for themselves, and it says the step failed to do something — so the next
+    person reads a normal, deliberate stop as a broken run and goes looking for a defect
+    in a container that behaved perfectly. The output is also stored with the execution
+    and searched, which means one wrong sentence per cancelled job, forever.
+
+    The receipt assertion rides along on purpose: "prints no complaint" is satisfied by a
+    step that prints nothing at all because it wrote nothing at all, and that would be a
+    far worse node than the one this test was written against.
+
+    **The line the step PRINTS is the load-bearing assertion here**, and it is the only one
+    that can be. Silence and a plain sentence look the same to a test that merely forbids
+    the complaint, and they are not the same to the person reading the output: one leaves
+    them wondering whether a report was written, the other tells them there is none and
+    why. It is also the one thing that separates a fixed node from one that still tries the
+    write and swallows the refusal — measured, not assumed: a copy of ``node.py`` that
+    attempts it and catches the exception silently leaves output identical in every other
+    respect, this assertion the only one that turns red.
+
+    The store is asked as well, and it is worth being clear about what that adds and what
+    it cannot. It answers a different question — "printed nothing wrong" is about the
+    output, "attempted nothing" is about the traffic — and it holds the honest line that
+    nothing reaching this endpoint after the stop can be a report the run is entitled to.
+    What it CANNOT see is an attempt that never became traffic, which is exactly what a
+    stopping node makes: the transport refuses the connection before a byte is sent, so the
+    endpoint sees nothing whether the write was attempted or not. Nor does the container's
+    own refusal message ("stop requested while this connection was being made") reach the
+    output when it is swallowed — measured the same way, on the same copy. So this is a
+    guard against a node that reaches the store some other way, not the detector for the
+    bug the test was written against.
+    """
+    job = make_job(inputs=THREE_INPUTS)
+    job.endpoint.hooks.on_request.append(delay_when(matching('input', index=1), HELD_OPEN_SECONDS))
+
+    container = job.start()
+    assert job.endpoint.wait_for('input', timeout=60), 'the step never started reading'
+    container.stop(grace=docker.STOP_GRACE_SECONDS)
+    result = container.collect()
+
+    _assert_it_really_stopped(result)
+    assert job.endpoint.settle(timeout=HELD_OPEN_SECONDS + docker.STOP_GRACE_SECONDS), (
+        'the store was still handling a request when this test gave up waiting for it'
+    )
+    complaints = [line for line in result.output.splitlines() if 'could not write' in line]
+    assert not complaints, (
+        f'the run was stopped on request and reported a failure of its own: {complaints}. Nothing '
+        f'went wrong — a stopping step cannot open a new connection, which is the design — so this '
+        f'sentence is shown to the operator who pressed Stop, stored with the execution and searched, '
+        f'and it sends the next reader hunting for a defect that is not there'
+    )
+    assert any(f'no {contract.RESULT_FILENAME} for this run' in line for line in result.output.splitlines()), (
+        f'the step said nothing about the report it did not write. Its output was: {result.output!r}. '
+        f'A node that stays silent here is indistinguishable from one that still attempts the write and '
+        f'swallows the refusal, and the operator is left guessing whether a report exists'
+    )
+    attempted = [name for name in job.endpoint.names_of('upload') if name.endswith(contract.RESULT_FILENAME)]
+    assert not attempted, (
+        f'a report upload reached the store after the stop: {attempted}. The run had written none before '
+        f'it was stopped, so this request can only have come out of the grace reserved for the receipt'
+    )
+    assert contract.MARKER_FILENAME in job.endpoint.keys_in_order(), (
+        f'the step printed no complaint and also left no receipt: the store holds '
+        f'{job.endpoint.keys_in_order()}. Silence bought this way is worth nothing'
+    )
+
+
+@conforms_today
+@reference_quality(_THE_RECEIPT)
 def test_a_stopped_step_claims_no_object_the_store_never_received(make_job):
     """The inventory has to be true in both directions.
 

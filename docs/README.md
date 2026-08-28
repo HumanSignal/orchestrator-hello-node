@@ -137,7 +137,8 @@ reports it.
 | Empty input set | Yes, `inputs` defaults to `[]` | **Yes.** A step with no upstream artifacts gets `"inputs": []` | not applicable |
 | Multiple output ports | Yes, `produced_ports` is a name to relpath map | not applicable | **Yes.** Every port becomes a downstream artifact kind |
 | Objects claimed by no port | Yes | not applicable | Copied and verified, but **not offered downstream** on a successful run |
-| `result.json` as metrics | Yes, `ResultDoc` with `metrics` and `summary` | not applicable | **No. Nothing ever reads it.** Run metrics come from the marker inventory |
+| `result.json` as metrics | Yes, `ResultDoc` with `metrics` and `summary` | not applicable | **No. Nothing reads either of them.** Run metrics come from the marker inventory |
+| Search facts in `result.json` | Not a declared field: an additive optional `facts` key beside them, which the version-1 models ignore | not applicable | **Yes**, from any receipt the collector accepts — `succeeded`, `failed` or `cancelled` alike. What limits it is what your step can still WRITE: a stopping step has no connection left for a report, so a cancelled run carries only a document written before the stop — see [PROTOCOL.md](PROTOCOL.md#44-resultjson) |
 | `logs.ndjsonl` written by your step | Invited by the contract | not applicable | Published only if you also list it in the marker's `objects` |
 | Progress reporting | Yes, one stdout line per sample | not applicable | **Yes**, shown live in the run view |
 | Cancellation with exit code 20 | Yes | not applicable | **Only sometimes.** A `cancelled` marker is read and salvaged when your own report is what ends the job. When an **operator** cancels a step that is still running, nothing you wrote is collected — see [PROTOCOL.md](PROTOCOL.md#7-cancellation) |

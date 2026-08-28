@@ -531,6 +531,131 @@ def test_this_harness_agrees_with_the_orchestrators_own_frozen_documents():
 
 @harness_self_test
 @our_policy(
+    'That a bad search fact is REPORTED and not refused is this repository\'s choice, and it is the one '
+    'the platform\'s behaviour asks for: the orchestrator reads result.json\'s optional "facts" list '
+    'entry by entry and skips the entries it cannot record, so a bad one costs itself and the document, '
+    'the objects beside it and the run are untouched. Raising here would turn a RECOMMENDATION into a '
+    'RULE, and a node author reading this harness would build for the stricter platform it invented. '
+    'The shape rules themselves are the orchestrator\'s (pipelines/facts.py: the key grammar, the '
+    '512-character value, the refusal of control characters, and the FLAT scalar meta), re-stated here '
+    'rather than imported for '
+    'the reason the top of conformance/contract.py gives. ' + _INSTRUMENT
+)
+def test_a_bad_search_fact_is_reported_and_the_document_is_still_accepted():
+    """The one finding in this harness that is not a refusal, held to being both.
+
+    Setup:    twenty-two result documents — a ``facts`` that is an object rather than a
+              list, one written as ``null``, an entry whose ``meta`` is ``null``, a key
+              that breaks the orchestrator's key grammar, a key with a trailing newline
+              (the one the grammar's anchor decides), a value longer than the 512
+              characters it stores, a value carrying half a UTF-16 surrogate pair, eleven
+              ``meta`` objects that break the FLAT rule (a nested object, a nested list, a
+              U+0000 in a meta KEY and another in a meta value, half a surrogate pair in a
+              key and another in a value, a non-finite number, one with 33 keys, an empty
+              key, a key of 65 characters and a string of 513), and four controls: a
+              well-formed pair, a document with no ``facts`` key at all, a ``meta`` holding
+              the six printable characters that merely SPELL a U+0000, and a ``meta``
+              sitting exactly ON the size limits — a key of 64 characters holding a string
+              of 512.
+    Action:   validate each, collecting recommendations.
+    Validate: every bad one is REPORTED, no control is, and **none of them raises**.
+
+    Both halves matter and they fail in opposite directions. A harness that raised would
+    teach that a mistyped fact fails a run, which is false and would have somebody
+    guarding a document the platform is happy to accept. A harness that reported nothing
+    would let the reference node drift into writing facts the orchestrator silently drops
+    — which is exactly the failure a fact exists to prevent, and it comes with no symptom
+    at all: the run succeeds, the document is there, and the search finds nothing.
+    """
+    good = {'schema_version': 1, 'facts': [{'key': 'input', 'value': 'data.csv', 'meta': {'port': 'input'}}]}
+    no_facts_at_all = {'schema_version': 1, 'metrics': {}}
+    bad_shape = {'schema_version': 1, 'facts': {'input': 'data.csv'}}
+    # Present and null, for the list and for one entry's meta. The orchestrator's rule is
+    # absent-OR-the-right-shape, so null is a mistake and absence is not — and a harness
+    # quieter than the platform on exactly this point would let the reference node ship a
+    # serializer that writes null and be told nothing.
+    null_facts = {'schema_version': 1, 'facts': None}
+    null_meta = {'schema_version': 1, 'facts': [{'key': 'input', 'value': 'data.csv', 'meta': None}]}
+    bad_key = {'schema_version': 1, 'facts': [{'key': 'Input Name', 'value': 'data.csv'}]}
+    # A key the ORCHESTRATOR's grammar refuses only because that grammar is anchored with
+    # ``\Z``: written with ``$`` it would match here, be stored with the newline attached,
+    # and be findable by nothing — and at full length it is 65 characters going into a
+    # 64-character column, a row no store will take.
+    trailing_newline_key = {'schema_version': 1, 'facts': [{'key': 'input\n', 'value': 'data.csv'}]}
+    bad_value = {'schema_version': 1, 'facts': [{'key': 'input', 'value': 'x' * 513}]}
+    surrogate_value = {'schema_version': 1, 'facts': [{'key': 'input', 'value': 'photo_\udcff.png'}]}
+
+    def _with_meta(meta):
+        return {'schema_version': 1, 'facts': [{'key': 'input', 'value': 'a.csv', 'meta': meta}]}
+
+    # Everything the FLAT rule refuses. Depth first: ``meta`` is one level of scalars, so a
+    # nested object or list is out however innocent its contents — which is the whole point,
+    # because a bounded check with no recursion in it cannot be walked off a cliff by a
+    # document somebody else wrote. Then the strings the store cannot hold, in KEYS as well
+    # as values: a meta key is stored exactly as a meta value is, and a check that looked
+    # only at values would pass a document the database then refuses. Every one of these
+    # comes out of a writer that raised nothing — a name decoded off a filesystem whose
+    # bytes are not UTF-8 arrives as half a surrogate pair, a NUL travels inside a string
+    # nobody looked at, and a division that produced infinity is dumped into a display
+    # detail. Last, the size: 33 keys is one past the cap.
+    nested_object_in_meta = _with_meta({'a': {'b': 'c'}})
+    nested_list_in_meta = _with_meta({'a': [{'b': '\x00'}]})
+    nul_in_meta_key = _with_meta({'a\x00b': 'v'})
+    nul_in_meta_value = _with_meta({'n': 'a\x00b'})
+    surrogate_in_meta_key = _with_meta({'\ud800': 'v'})
+    surrogate_in_meta_value = _with_meta({'n': '\ud800'})
+    too_many_meta_keys = _with_meta({f'k{n}': n for n in range(33)})
+    infinite_meta = _with_meta({'n': float('inf')})
+    # The three sizes, each one step past its limit. They are here for the same reason the
+    # accepted neighbour below is: a limit is a PAIR, and a harness that only ever tries the
+    # far side of one cannot tell 64 from 63 — it would go on passing a rule copied one
+    # character wrong, and the node author would find out from a fact that never appears.
+    empty_meta_key = _with_meta({'': 'v'})
+    over_long_meta_key = _with_meta({'k' * 65: 'v'})
+    over_long_meta_value = _with_meta({'n': 'x' * 513})
+    # And the accepted neighbour: exactly 64 characters of key holding exactly 512 of value.
+    meta_exactly_on_the_limits = _with_meta({'k' * 64: 'x' * 512})
+    # The case a text-level check gets WRONG, and the reason this one looks at the values:
+    # escaped for transport, a real NUL and the six printable characters that spell one are
+    # the same six characters.
+    spelled_nul_in_meta = _with_meta({'n': '\\u0000'})
+
+    cases = (
+        (good, 0),
+        (no_facts_at_all, 0),
+        (spelled_nul_in_meta, 0),
+        (meta_exactly_on_the_limits, 0),
+        (bad_shape, 1),
+        (null_facts, 1),
+        (null_meta, 1),
+        (bad_key, 1),
+        (trailing_newline_key, 1),
+        (bad_value, 1),
+        (surrogate_value, 1),
+        (nested_object_in_meta, 1),
+        (nested_list_in_meta, 1),
+        (nul_in_meta_key, 1),
+        (nul_in_meta_value, 1),
+        (surrogate_in_meta_key, 1),
+        (surrogate_in_meta_value, 1),
+        (too_many_meta_keys, 1),
+        (infinite_meta, 1),
+        (empty_meta_key, 1),
+        (over_long_meta_key, 1),
+        (over_long_meta_value, 1),
+    )
+    for document, expected in cases:
+        findings: list = []
+        accepted = contract.validate_result(document, recommendations=findings)
+        assert accepted is document, 'a search fact must never cost the document that carries it'
+        assert len(findings) == expected, (
+            f'{document.get("facts")!r} produced {findings!r}, expecting {expected} finding(s)'
+        )
+        assert all(isinstance(finding, contract.Recommendation) for finding in findings)
+
+
+@harness_self_test
+@our_policy(
     'A harness that hands the node an invalid job description proves nothing about the node. This checks '
     'the harness\'s manifest against the harness\'s own copy of the contract — which is only worth '
     'anything because the test above measures that copy against the orchestrator\'s frozen documents. '
