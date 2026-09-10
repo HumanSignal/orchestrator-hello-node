@@ -16,8 +16,9 @@ which is what keeps a mistake in step 3 from being discovered in step 5.
 
 ### 1. Decide what your node consumes and produces
 
-**BEHAVIOUR.** Your node receives a list of input objects on a single port named `input`,
-and returns objects grouped into output ports you name yourself. Those port names become
+**BEHAVIOUR.** A job with upstream artifacts receives them on one port named `input`;
+a source-style job receives no input ports. Your node returns objects grouped into output
+ports you name yourself. Those port names become
 the artifact kinds downstream steps ask for
 ([PROTOCOL.md](PROTOCOL.md#41-where-your-output-goes)).
 
@@ -39,7 +40,7 @@ whole read, work, write, marker cycle correct here, offline, before anything els
 ### 3. Build the image
 
 **RULE.** The orchestrator only accepts an image pinned by digest, in one of two spellings
-(`external/contract.py:131-137`):
+(`external/contract.py`):
 
 * `registry/name@sha256:<64 lowercase hex>`, a repo digest, which any machine can pull;
 * `sha256:<64 lowercase hex>`, a bare image id, which only resolves on a machine that
@@ -50,7 +51,7 @@ on two different days.
 
 **BEHAVIOUR.** A bare image id is accepted deliberately, so that the first run of a
 freshly built node is possible before any registry exists. Registration prints a warning
-about it and refuses nothing (`noderegistry/services.py:458-476`). Nothing re-checks it
+about it and refuses nothing (`noderegistry/services.py`). Nothing re-checks it
 later, so a bare id on a pool with a second machine simply fails on whichever host does
 not hold the image, with a missing-image error.
 
@@ -77,38 +78,16 @@ See [OPERATIONS.md](OPERATIONS.md#registering-a-node).
 
 ### 5. Handle the hard parts
 
-**RECOMMENDATION.** Credential expiry, stopping cleanly, and inventory-on-failure. They
-are the three things a first version always omits and the three things that decide
-whether a real run survives. Not one of them is checked by anything. The skeleton below
-has all three. Be clear-eyed about what the second one buys today: **nothing your node
-writes on the way out of an externally imposed stop is reliably preserved.** An
-operator's Cancel delivers nothing and the runtime deadline delivers nothing; a
-**fence** delivers only what you had already written *and* inventoried at the instant of
-the kill, which under the write-the-marker-last discipline is almost always nothing —
-almost always rather than always, because writing the marker last fixes where in your
-program it happens and not that it disappears at the same instant your process does
-([PROTOCOL.md](PROTOCOL.md#71-fencing-the-stop-with-no-grace-period-at-all)). Handle the
-stop for a clean exit and for the day those gaps are fixed, and put your recovery hopes
-on the third item, the inventory you write when your own code decides the run is over.
+**RECOMMENDATION.** Implement credential refresh, a stop handler and inventory-on-failure.
+The runtime stop window now permits an accepted failure report to salvage verified
+objects, but operator cancellation of running work still does not collect outputs.
+A fence may give your process no warning. These are different paths; see
+[PROTOCOL.md](PROTOCOL.md#7-cancellation).
 
-**BEHAVIOUR, and read it once before you write any of the three.** **No interval on any
-stop path is guaranteed** — not the time before your process is signalled, not the time
-between that signal and the kill behind it, not how long anything you start afterwards has
-to finish in. The reasoning is set out in full at the top of section 7 of
-[PROTOCOL.md](PROTOCOL.md#7-cancellation). The consequence for the code below is concrete:
-nothing important is scheduled for after the SIGTERM, every network call is given a timeout
-short enough that a stop lands between calls rather than inside one, and the design never
-assumes there is time to do one more thing.
-
-This paragraph is **background**, about these documents rather than about the platform, and
-it matters here because the numbers in them are of three different kinds and are not
-interchangeable. A figure for **how long a stop takes** is a typical value, never a limit —
-that is the statement above. A figure that is a **setting** says how often something is
-attempted, and never how long it takes. Everything else — the values the platform **stamps
-or enforces** — is exact and is meant to be reasoned with: the runtime budget, the moment
-your upload credentials stop working, the lease stamped when your job is claimed, the 1 GiB
-ceiling on a single object, the 8 MiB ceiling on a document. Reading one of those as merely
-typical is how a node ends up with a refused upload and a marker the reader will not accept.
+**RECOMMENDATION.** Do useful work in bounded units, keep network waits interruptible
+where possible, and attempt the final receipt with fresh credentials. Nothing tells
+the container how much of the configured stop window remains. A receipt deadline is
+therefore your own best-effort limit, not proof that a stop will preserve the result.
 
 ---
 
@@ -234,7 +213,7 @@ class Credentials:
         if force or self._envelope is None or time.time() >= self._expires_at - self.MARGIN_S:
             with open(self.path, 'rb') as handle:
                 envelope = json.loads(handle.read())
-            if envelope.get('schema_version') != 1:
+            if type(envelope.get('schema_version')) is not int or envelope['schema_version'] != 1:
                 raise Permanent(f'credential envelope version {envelope.get("schema_version")} is not supported')
             self._envelope = envelope
             self._expires_at = _parse_iso8601(envelope.get('expires_at'))
@@ -256,6 +235,8 @@ def upload(creds, relpath, source_path, size, digest):
     (as bytes and as a request body) is an OOM kill, and an OOM kill leaves no
     chance to write a marker at all.
     """
+    # Record BEFORE the request: an unconfirmed upload may still have landed.
+    INVENTORY.append({'relpath': relpath, 'sha256': digest, 'size': size})
     for attempt in (1, 2):
         envelope = creds.get()
         staging = envelope['staging']
@@ -277,11 +258,10 @@ def upload(creds, relpath, source_path, size, digest):
             # retry on every refusal, including the ones where nothing changed.
             # `==` on the parsed document answers the question actually being
             # asked. Comparing `expires_at` alone is weaker, because the
-            # platform clamps that value to the run's deadline.
+            # platform clamps that value to the stop-window ceiling.
             before = envelope
             if creds.get(force=True) == before:
                 raise
-    INVENTORY.append({'relpath': relpath, 'sha256': digest, 'size': size})
 
 
 @contextlib.contextmanager
@@ -292,13 +272,14 @@ def fetched_and_verified(entry):
     you WROTE, never what you READ. This check is yours to make.
 
     RECOMMENDATION, and the reason this is a context manager rather than a
-    function returning a path. Inputs have NO size ceiling — not per object, not
-    in total, not in number — and the container is given no disk quota, so a node
+    function returning a path. Inputs have no per-object or total byte ceiling; their count
+    is indirectly bounded by the 8 MiB manifest. The container has no disk quota, so a node
     that downloads its inputs and leaves them in /tmp fills up somebody else's
     machine. One input at a time, deleted when its work is done.
     """
     if not entry.get('sha256'):
-        raise Permanent(f'input {entry.get("name")!r} arrived with no sha256 pin')
+        raise Permanent(f'input {entry.get("name")!r} arrived without a hash pin')
+    expected_size = entry.get('size')
     digest = hashlib.sha256()
     size = 0
     handle = tempfile.NamedTemporaryFile(delete=False, dir='/tmp')  # never $HOME
@@ -308,7 +289,8 @@ def fetched_and_verified(entry):
                 digest.update(chunk)
                 size += len(chunk)
                 handle.write(chunk)
-        if digest.hexdigest() != entry['sha256'] or size != entry.get('size', size):
+        wrong_size = type(expected_size) is int and size != expected_size
+        if digest.hexdigest() != entry['sha256'] or wrong_size:
             raise Permanent(f'input {entry.get("name")!r} is not the object this run was built from')
         yield handle.name
     finally:
@@ -347,8 +329,8 @@ def write_marker(creds, manifest, status, exit_code, error=None, ports=None):
     # its own. Those two go together: the moment nothing may abandon this
     # transfer, nothing but elapsed time can end it, and a socket timeout is not
     # elapsed time — it measures silence, so a peer sending one byte per window
-    # holds you open for as long as it likes. Size the deadline under whatever
-    # grace the platform gives a stopped container.
+    # holds you open for as long as it likes. Pick a best-effort deadline:
+    # the workload is not told its absolute remaining stop time.
     global WRITING_THE_RECEIPT
     WRITING_THE_RECEIPT = True
     with _elapsed_deadline(RECEIPT_DEADLINE_S):        # shuts IN_FLIGHT down when it fires
@@ -419,7 +401,7 @@ the obvious alternative fails on a real run, later, saying something unrelated:
 | Bootstrap in its own `try` | Before credentials exist there is nowhere to write a marker. That failure has to be reported on stderr and by exit code alone. |
 | Signal handler sets a flag, and abandons the transfer in flight | Doing work, and especially network work, inside a signal handler is how the cancellation path itself crashes — so nothing there decides anything, and its one further act cannot block: a socket shutdown starts nothing and waits for nothing. Without it the flag is unreadable for as long as your socket timeout, because the process is inside the call. |
 | Streaming everywhere | 1 GiB permitted per object against 2 GiB of container memory. An OOM kill leaves the process no chance to write a marker. |
-| Inputs fetched one at a time, and deleted | Nothing bounds the size, the total or the count of your inputs, and the container has no disk quota. Keeping them all is how a node fills the customer's disk. |
+| Inputs fetched one at a time, and deleted | Input bytes have no platform ceiling; count is indirectly bounded by the 8 MiB manifest. The container has no disk quota. Keeping them all is how a node fills the customer's disk. |
 | Comparing envelopes with `==`, not `is` | Each read parses a new object, so an identity test is always "changed" and the retry guard never fires. |
 | Exit code passed into the marker | So the marker and the process do not tell two different stories about one run. Not *cannot*: a SIGKILL landing after the marker commits and before your process returns leaves your `exit_code: 0` beside the 137 the runner observes, and no ordering of yours closes that. What this buys is that the two never differ because of a DECISION you made. |
 
@@ -438,12 +420,18 @@ everything the skeleton above shows: it reads `LSPO_CREDENTIALS_FILE`, re-reads 
 credentials, streams in both directions, keeps its inventory at module scope, handles a
 stop request, writes the marker last on every path with the exit code the process really
 returns, classifies transient and permanent failures apart, and redacts every URL before
-it reaches a log. The whole conformance suite is green against it.
+it reaches a log. The 2026-09-10 audit ran all 141 tests successfully, including the
+current-platform
+citation check; see [CONFORMANCE-BASELINE.md](../CONFORMANCE-BASELINE.md).
 
 **The defects it used to have are still worth reading**, because each one is a mistake a
 first version makes and the record says what each cost:
 [CONFORMANCE-BASELINE.md](../CONFORMANCE-BASELINE.md) has the measurement, the citation
 and the consequence for all twenty.
+
+The input check requires a hash pin and compares the byte count when `size` is a real
+integer, matching `node.py`. Normal platform-launched inputs carry both fields, but the
+reference does not independently reject a missing or non-integer size in the envelope.
 
 Two things in `node.py` are still worth pointing at rather than copying blindly:
 
@@ -451,9 +439,9 @@ Two things in `node.py` are still worth pointing at rather than copying blindly:
   multipart upload body in memory, so `files={'file': ...}` holds the whole object — the
   exact collision between a legal 1 GiB object and a 2 GiB container that
   [PROTOCOL.md](PROTOCOL.md#35-memory-two-defaults-that-collide) is about. Streaming an
-  upload with it needs a further dependency. The standard library does it in about sixty
-  lines. If you bring your own HTTP client, check what it does with a large body before
-  you trust it.
+  upload with it needs a further dependency. The standard-library implementation in
+  `node.py` also handles interrupted transfers and bounded connection setup. If you bring
+  your own HTTP client, check what it does with a large body before you trust it.
 * **Its two network timeouts differ on purpose, and neither of them is its stop latency.**
   That sentence used to read the other way round here — reads were given the longer
   timeout because a stop was said to be noticed "as soon as the next block arrives", and
@@ -466,11 +454,10 @@ Two things in `node.py` are still worth pointing at rather than copying blindly:
   committed the object — so waiting longer only buys a clearer answer about something that
   has already happened.
 
-One thing that is **not** a defect: `node.py` claims `result.json` under a `report` port
-rather than under `output`. Both are legal. The orchestrator's own test of its example
-expects `result.json` among the `output` port's paths, so if you are matching that example
-exactly, claim it there instead — but sending a metrics file to every downstream step is a
-poor idea, and this is a **RECOMMENDATION**, never a rule.
+`node.py` claims `result.json` under `report`, separately from the copied files under
+`output`. Both port names are the example's choices. The report echoes `params` while
+it fits within 1 MiB; if it would exceed that ceiling, it records a bounded description
+instead. The platform no longer vendors a second example node to compare against.
 
 ## The checklist
 
@@ -513,7 +500,7 @@ apart either treats advice as law or treats law as advice. Both are expensive.
 * [ ] **RECOMMENDATION.** Bounds its read of the job description, and refuses a
       `schema_version` it does not implement.
 * [ ] **RECOMMENDATION.** Deletes each input when it is done with it. Nothing bounds input
-      size or count and the container has no disk quota.
+      bytes; the manifest bounds count indirectly. The container has no disk quota.
 
 #### Work
 
@@ -523,9 +510,11 @@ apart either treats advice as law or treats law as advice. Both are expensive.
       container's user, so its home directory may not be writable.)
 * [ ] **RECOMMENDATION**, and treat it as non-negotiable. Prints no presigned URL, no
       token, no credential, on any path, including the text of HTTP errors. Container logs
-      are shipped unredacted; nothing will warn you.
+      are filtered for exact credentials held by the current agent, not every secret
+      your program may print; raw host Docker logs are outside that filter.
 * [ ] **RECOMMENDATION.** Says the important things in few lines, knowing that only a tail
-      of 1000 entries survives anywhere.
+      is kept in the live stream; the terminal file merges that tail with saved lines
+      and cannot reconstruct output already lost.
 
 #### Outputs
 
@@ -551,7 +540,8 @@ apart either treats advice as law or treats law as advice. Both are expensive.
 
 #### Marker
 
-* [ ] **RULE.** On a run that exits 0, a marker exists and its `status` is `"succeeded"`.
+* [ ] **RULE.** On a run the platform classifies as successful, a marker exists and its
+      `status` is `"succeeded"`. A deadline or cancellation takes precedence over exit 0.
 * [ ] **RULE.** `execution_id`, `attempt` and `generation` are copied from this job's
       description, never from a previous attempt. Collection refuses a mismatch.
 * [ ] **RULE.** Every relpath in `produced_ports` appears in `objects`.
@@ -620,39 +610,29 @@ apart either treats advice as law or treats law as advice. Both are expensive.
       The two go together: the moment nothing may abandon a transfer, nothing but a clock can
       end it — and a socket timeout is not a clock, it measures silence, so a peer sending one
       byte per window holds you open indefinitely while never being idle.
-* [ ] **BEHAVIOUR you must size that deadline against, and it is uncomfortable.** **Nothing
-      tells your container how long it has after a stop.** Not the injected variables, not the
-      credentials envelope (its `expires_at` is a signature's lifetime), not the job
-      description (`timeout_seconds` is a *requested* budget with no start time attached), and
-      not the stop object the orchestrator composes on its heartbeat — that reaches the agent
-      and stops there. The interval before the kill is the agent's to choose and can be
-      nothing at all. So a save deadline of your own is **best-effort by construction**: no
+* [ ] **BEHAVIOUR you must size that deadline against.** The envelope's `expires_at` is
+      limited by its own lifetime and the reporting-window ceiling, and signing can
+      understate it. Near the end it can reflect the reporting cutoff; earlier envelopes
+      can expire sooner and be refreshed. It does not identify the workload's earlier
+      kill cutoff. `timeout_seconds` is a requested budget with no start time attached,
+      and the heartbeat's stop instruction is not forwarded to the container. None of
+      these is a contract granting the workload a remaining stop interval. That interval
+      is controlled by the agent and can be nothing at all. So a save deadline of your own is **best-effort by construction**: no
       positive number can be honoured against a remaining grace of zero, and your alarm may be
       killed before it can log that it fired. Choose one anyway — long enough that a receipt
       lands on a store that is working, short enough that a step which will not land one stops
       trying while there may still be time to say so — and do not write down a justification
       that depends on a grace nobody gave you. The number worth wanting is the remaining stop
       deadline itself, which is an open platform task.
-* [ ] **BEHAVIOUR to know while you write that handler, because it decides what it is
-      worth.** **Neither of the two stops named here preserves what you write.** An
-      **operator pressing Cancel** usually does not reach your process at all — it normally
-      arrives as a SIGKILL — and on the rare occasion it arrives as a SIGTERM, nothing you
-      write is collected. The **runtime deadline** normally begins as a SIGTERM — normally,
-      not always — but whatever interval follows it is cut short by the platform's own
-      next heartbeat, your upload credentials
-      expired at the deadline, and the terminal
-      report that would have made a marker count is refused — so nothing is collected there
-      either, and a container stopped that way leaves its run parked at "Waiting for
-      runner" rather than failed, holding a quota slot until an operator cancels it
-      ([PROTOCOL.md](PROTOCOL.md#7-cancellation)). The third externally imposed stop, a
-      fence, is the last item in this section; it is the only one that can deliver
-      anything, and only a marker you had already finished writing. Write the handler for a clean exit
-      and for the day these gaps are fixed. Do not build a partial-output recovery story on
-      top of any of them.
-* [ ] **RECOMMENDATION.** Every network timeout is comfortably inside a handful of seconds.
-      There is no grace period to size them against: no interval on any stop path is
-      guaranteed, so the target is a stop landing *between* your calls rather than inside
-      one ([PROTOCOL.md](PROTOCOL.md#7-cancellation)).
+* [ ] **BEHAVIOUR.** Distinguishes runtime expiry from operator cancellation. A deadline
+      report accepted inside the stop window can salvage a marker as diagnostics.
+      Operator cancellation of a running launch still does not collect its objects.
+      A fence may prevent any marker or report. See
+      [PROTOCOL.md](PROTOCOL.md#7-cancellation).
+
+* [ ] **RECOMMENDATION.** Bounds connection setup and the final receipt, and makes
+      transfers interruptible. Timeouts should suit the service and workload while
+      avoiding an unbounded wait after a stop ([PROTOCOL.md](PROTOCOL.md#7-cancellation)).
 * [ ] **RECOMMENDATION.** Exit 1 for conditions a retry might survive, exit 10 for
       conditions no retry can fix. Nothing acts on the distinction today.
 * [ ] **BEHAVIOUR to accept rather than to satisfy.** A fence (a revoked job, an

@@ -11,11 +11,12 @@ Labels as elsewhere — **RULE**, **BEHAVIOUR**, **RECOMMENDATION** — and this
 ## Before anything
 
 **BEHAVIOUR.** External nodes are behind a feature flag that is **off by default**
-(`LSPO_EXTERNAL_NODES_ENABLED`, `lspo/settings/base.py:538`). On a deployment where it is
+(`LSPO_EXTERNAL_NODES_ENABLED`, `lspo/settings/base.py`). On a deployment where it is
 off, none of the registration endpoints answer and no external node runs.
 
-**BEHAVIOUR.** This is a dev and staging capability today. There is no sandbox around your
-container: it runs with the docker daemon's ordinary privileges on the machine hosting the
+**BEHAVIOUR.** The code supports customer-run nodes and hosted builds. Availability
+depends on the installation's flags; it is not restricted to dev or staging. There is no
+hostile-code sandbox around your container: it runs with the docker daemon's ordinary privileges on the machine hosting the
 agent, with `no-new-privileges` set and the resource ceilings in
 [PROTOCOL.md](PROTOCOL.md#32-what-your-container-may-reach), and the platform's own
 position is that this is the customer's trusted code rather than hostile code.
@@ -24,92 +25,50 @@ position is that this is the customer's trusted code rather than hostile code.
 
 ## Registering a node
 
-**BEHAVIOUR.** Two equivalent paths; both go through the same service layer, so they cannot
-drift.
+**BEHAVIOUR.** Settings → **External Nodes** → **Connect node** offers image
+registration and, when enabled, hosted builds. The image path takes a name and a
+digest-pinned image and creates or reuses a pool, deployment and revision. Registration
+does not start an agent or execute a pipeline.
 
 ### From the web interface
 
-**BEHAVIOUR.** Settings, then the **External Nodes** tab, then **Connect node**. Give the
-node a name, paste the digest, and it creates the same three database rows the command
-below does — a **pool**, a **deployment** and a **revision** — together with the
-`docker run` line for an agent.
+**BEHAVIOUR.** Image registration returns the agent start command and, only when it
+minted one, the pool's registration token. The token is shown once; only its hash is
+stored. Reusing a pool normally returns `PASTE_THE_POOL_TOKEN_HERE` in the command.
+Use the saved token or deliberately rotate it. The **Runners** column shows enrolled
+agents and whether they are online.
 
-**BEHAVIOUR, and it is the ordinary case rather than the exception.** Registering again
-does not duplicate anything: a pool of that name, a deployment of that name and a revision
-already pinning that exact digest are each **matched and reused**. So re-registering a
-rebuilt image is a normal act, not a mess to clean up.
-
-**BEHAVIOUR, and it is the first place somebody following this page gets stuck.** The
-reply shows the pool's registration token **only when that registration minted one**,
-which normally means only when it just created the pool. It is shown once, because only
-its hash is stored. Register a second node into a pool that already has a token and the
-reply comes back **with no token at all**, and a command carrying the literal placeholder
-`PASTE_THE_POOL_TOKEN_HERE` where the secret belongs. Nothing is broken. Either fill in
-the token saved when that pool was created, or rotate the pool's token from the node list
-and use the new one — rotating is safe, and what it does and does not affect is set out
-below.
-
-It does **not** create the agent. Nothing does: an agent comes into existence when
-somebody runs that `docker run` line on a machine, and it enrols itself using the
-registration token. Until then the deployment is registered and has nowhere to run, which
-the screen shows as "no agent yet".
-
-**BEHAVIOUR.** Once an agent has enrolled it appears against the node in the **Runners**
-column of the External Nodes page. **A node that will not run is answered by that column
-first**: no runner online means there is nothing to run it, and no amount of looking at
-the pipeline will show you that.
+**BEHAVIOUR.** Registering the same image under the same deployment reuses its immutable
+revision. Changing the requested timeout alone does not edit that revision. Moving a
+deployment away from a pool with enrolled agents requires explicit confirmation because
+those agents do not move with it (`noderegistry/services.py`, `noderegistry/serializers.py`).
 
 ### From a shell on the orchestrator
 
-**BEHAVIOUR.** The same three rows, from the command line:
+**BEHAVIOUR.** The management command uses the same image-registration service:
 
 ```bash
-python manage.py external_demo_setup --image '<registry>/my-node@sha256:...'
+python manage.py external_demo_setup \
+  --image '<registry>/my-node@sha256:<64 lowercase hex>' \
+  --api-base 'https://orchestrator.example.com' \
+  --organization '<organization slug or id>'
 ```
 
-It creates the same three rows (pool, deployment, revision) and prints three things: the
-pool's **registration token**, shown once because only its hash is stored; the exact
-`docker run` line for the agent, filled in with your orchestrator URL; and the
-**deployment id**, which is what a pipeline node points at.
+**BEHAVIOUR.** `--organization` can be omitted only when the command can resolve the
+single organization. Set `--api-base` to the address the agent can actually reach: the
+command's default is a local development address. The command prints the deployment id
+and agent start command; it prints a registration token only when newly minted.
+`--timeout-seconds` defaults to **900**. `--rotate-token` deliberately replaces the
+registration token; `--confirm-pool-move` permits moving away from an occupied pool.
 
-**BEHAVIOUR.** Both paths give the new revision a runtime budget of **900 seconds** when
-you do not name one (`--timeout-seconds` on the command,
-`noderegistry/management/commands/external_demo_setup.py:38`; the `timeout_seconds` field
-on the registration API, `noderegistry/serializers.py:26`). That number, not the
-platform's 3600-second fallback, is what your container actually gets — see
-[PROTOCOL.md](PROTOCOL.md#24-how-long-you-actually-get). A revision is immutable, so
-changing it later means either publishing a new revision or setting `timeout_seconds` on
-the pipeline node, which takes effect immediately and wins.
+**BEHAVIOUR.** The command's printed step 2 still says there is no user interface for
+external nodes. That instruction is stale: use the Settings registration tab and the
+pipeline editor's **Add node → External → External node** entry described below.
 
-**BEHAVIOUR.** The command is idempotent, and it deliberately does **not** re-mint the
-pool token on a second run. Pass `--rotate-token` when you actually mean it.
-
-**BEHAVIOUR, and three places in the platform say this wrongly.** Rotating the pool's
-registration token does **not** lock out the agents already enrolled. That token buys
-exactly one thing — permission to create a new agent identity in that pool — and each
-agent, once enrolled, authenticates with its own bearer token minted at enrolment
-(`runners/auth.py:21-33`, `noderegistry/views.py:262-270`). Rotating stops the old secret
-enrolling anything further and nothing else: every running agent keeps claiming,
-heartbeating and completing exactly as before. (The setup command's own module docstring
-and `noderegistry/services.py:12-15` both still say rotation "would lock all of them out".
-They are wrong; the Settings screen, which says the opposite, is right.)
-
-**BEHAVIOUR, and this is the third wrong sentence, so read it carefully.** Switching the
-pool's `registration_enabled` off does **not** stop an enrolled agent either. That flag is
-consulted in exactly one place — the enrolment endpoint, where it decides whether a *new*
-agent may join (`runners/enrollment.py:138`). Nothing on a live request looks at it. What a
-live request checks, on every claim, heartbeat, credential re-issue and completion, is
-three other things: that the runner is still active, that its **pool** is still active, and
-that the organization owning that pool is still active (`runners/auth.py:487-500`,
-`:353-360`). So the ways to actually stop an enrolled agent are: **retire the runner**,
-**deactivate the pool**, or deactivate the owning organization — and of those, retiring the
-runner is the one that stops a single machine rather than everything on the pool.
-(`noderegistry/views.py:262-270`, the rotate-token endpoint, tells the operator to "switch
-the pool's `registration_enabled` off" to stop an enrolled agent. That sentence is wrong in
-the same way the two above are.)
-
-**BEHAVIOUR.** The command's own printed instructions still say there is no user interface
-for external nodes. That sentence is out of date; the Settings tab exists.
+**BEHAVIOUR.** Rotating the pool token, or disabling new registrations, does not stop
+already enrolled agents. They authenticate using their own runner tokens. Retiring a
+runner, deactivating its pool, or deactivating the owning organization removes that
+authority (`runners/auth.py`, `runners/enrollment.py`, `noderegistry/services.py`).
 
 ### The image reference
 
@@ -118,10 +77,12 @@ for external nodes. That sentence is out of date; the Settings tab exists.
 
 ```bash
 # with a registry
+docker build -t <registry>/my-node:dev .
 docker push <registry>/my-node:dev
 docker inspect --format='{{index .RepoDigests 0}}' <registry>/my-node:dev
 
 # one machine, no registry
+docker build -t my-node:dev .
 docker image inspect --format='{{.Id}}' my-node:dev     # -> sha256:...
 ```
 
@@ -132,6 +93,45 @@ missing-image error rather than anything that names the real cause.
 
 ---
 
+## Hosted builds
+
+**BEHAVIOUR.** Hosted mode builds your repository with AWS CodeBuild, pushes the image
+to the installation's private ECR registry, and runs it on an existing managed pool.
+It requires both `LSPO_EXTERNAL_NODES_ENABLED=true` and
+`LSPO_HOSTED_BUILDS_ENABLED=true`. Unlike customer-run mode, the platform's build service
+reads and executes your repository's Dockerfile. The same workload contract applies
+(`noderegistry/building.py`, `noderegistry/hosted_views.py`).
+
+**BEHAVIOUR.** Choose the repository build path in **Connect node**, supply an approved
+HTTPS repository URL, choose a managed pool, and optionally select a branch or tag.
+A blank ref uses the repository's default branch. The build uses the root Dockerfile;
+the platform supplies its own build instructions, rather than running a repository
+`buildspec.yml`. A successful build records the resolved commit and publishes a
+digest-pinned revision. Until the first build succeeds there is no runnable revision;
+a failed rebuild leaves the previous revision selected.
+
+**RULE.** The repository URL must match `LSPO_HOSTED_REPO_ALLOWLIST`. URLs carrying
+credentials, query strings or fragments are refused. Private repository access belongs
+to the build project's connection, not to a token embedded in the URL
+(`noderegistry/building.py`, `validate_repo_url`).
+
+**RULE.** Raw 40-character commit hashes, pull-request refs (`pr/…`, `pull/…`) and
+`refs/…` namespaces are refused; use a plain branch or tag. The resolved commit is recorded
+on the build. Hosted builds also refuse a requested node runtime above **129,600 seconds**
+(`MAX_NODE_TIMEOUT_S`, 2160 minutes); the default is 900 seconds
+(`noderegistry/building.py`, `validate_requested_ref`, `_node_runtime_budget`).
+
+**BEHAVIOUR.** Managed pools must already exist and have usable capacity. This flow
+does not give the author a customer-agent enrollment command. Building and running are
+separate operations; a successful build does not prove that a runner is online.
+
+**RECOMMENDATION.** Use the platform's
+[hosted-node runbook](https://github.com/HumanSignal/orchestrator/blob/master/docs/hosted-nodes.md)
+for build infrastructure and managed-pool administration. Keep this template's
+Dockerfile at the repository root and test the image locally before requesting a build.
+
+---
+
 ## Starting the agent
 
 **BEHAVIOUR.** The **agent** is our process, running on your machine. It is the only thing
@@ -139,13 +139,10 @@ that talks to the orchestrator: it enrols once, polls for work, starts your cont
 streams its logs back and reports the result. It listens on no port; every connection is
 outbound.
 
-**BEHAVIOUR.** The agent image is published at **`ghcr.io/humansignal/lspo-agent:latest`**,
-and the package is **public**: an anonymous pull works and no `docker login` is needed. The
-block below fetches the image itself, before it starts or stops anything, so there is nothing
-to build and nothing to fetch by hand first. A standalone `docker logout ghcr.io && docker
-pull ghcr.io/humansignal/lspo-agent:latest` is worth keeping for a different job: it is how
-you establish that a machine can reach the registry at all, anonymously, which is the one
-question that separates "this host has no route to ghcr.io" from anything about your node.
+**BEHAVIOUR.** The generated command uses
+**`ghcr.io/humansignal/lspo-agent:latest`**. Its initial pull checks access from the
+agent's machine before replacing the existing container. Registry access and the
+installation's current image are operational facts to verify on that machine.
 
 Both the Connect reply and the setup command print the start line already filled in —
 prefer either of those, because they carry the real pool name and, when that registration
@@ -160,9 +157,10 @@ c=$(docker ps -aq -f 'name=^/?lspo-agent$') &&
 if [ -n "$c" ]; then docker stop -t 20 "$c" && docker rm "$c"; fi &&
 docker run -d --name lspo-agent \
   --user "$(id -u):$(id -g)" \
+  --security-opt label=disable \
   -v /var/run/docker.sock:/var/run/docker.sock \
   --group-add $(getent group docker | cut -d: -f3) \
-  -v "$HOME/lspo-agent:$HOME/lspo-agent" \
+  -v "$HOME/lspo-agent:$HOME/lspo-agent:z" \
   -e LSPO_AGENT_WORKDIR="$HOME/lspo-agent/state" \
   -e LSPO_AGENT_API_URL=https://orchestrator.example.com \
   -e LSPO_AGENT_POOL=self-hosted \
@@ -173,14 +171,22 @@ docker run -d --name lspo-agent \
   ghcr.io/humansignal/lspo-agent:latest
 ```
 
+**BEHAVIOUR.** On SELinux hosts, the shared `:z` label lets the agent and job
+containers reach the same state tree; `--security-opt label=disable` applies to the
+agent that controls the host Docker socket. The platform also labels workload mounts.
+These flags match `noderegistry/services.py` and `agent/executors/docker_exec.py`;
+do not substitute a private `:Z` label on this shared state directory.
+
 Three of those values are placeholders and the printed command has them filled in: the
 orchestrator's address, the pool name, and the token — see the registration section above
 for when the reply carries a token and when it does not.
 
-**BEHAVIOUR.** Paste it again whenever you like. That is the ordinary thing to do — after
-re-registering a node, after a new agent build, after any mistake — and the block is written
-for it: it fetches the image, stops and removes the agent that is already running, and starts
-a fresh one. On a machine that has never run it, the two middle lines find nothing and say
+**BEHAVIOUR.** The block supports repeat invocation: it fetches the image, stops and
+removes the agent that is already running, and starts a fresh one. With a job in flight,
+`docker stop -t 20` gives the old agent only 20 seconds before a forced kill. A surviving
+job container may need adoption by the replacement agent, subject to its current lease
+and authority; repeatability does not guarantee an uninterrupted job. Drain active jobs
+before a planned replacement. On a machine that has never run it, the two middle lines find nothing and say
 nothing. Before they existed, the second paste ended in `docker: Error response from daemon:
 Conflict. The container name "/lspo-agent" is already in use`, which is an error message about
 a machine that was working perfectly.
@@ -268,12 +274,12 @@ operator's, and they are here because your node is what visibly breaks:
 first successful start. The agent boots from the identity saved in its state directory,
 and the pool token is shared by every agent in the pool — leaving it on a machine leaves
 the ability to enrol more agents lying around on that machine
-(`agent/identity.py:14-27`).
+(`agent/identity.py`).
 
 ### Agent settings that change what your node sees
 
 **BEHAVIOUR, for the table below.** All are `LSPO_AGENT_*` and all are the agent operator's
-to set, not yours (`agent/config.py:113-137`, `:333-346`). The defaults are what your node
+to set, not yours (`agent/config.py`). The defaults are what your node
 gets unless somebody changed them. The time-valued ones are **settings, not guarantees**:
 they say how often something is attempted, never how long anything takes — least of all
 stopping a container ([PROTOCOL.md](PROTOCOL.md#7-cancellation)).
@@ -295,7 +301,7 @@ stopping a container ([PROTOCOL.md](PROTOCOL.md#7-cancellation)).
 
 There is **no** disk or storage setting here, and that is not an omission in the table: the
 agent applies a CPU, a memory and a process ceiling to your container and no storage
-ceiling at all (`agent/executors/docker_exec.py:248-274`).
+ceiling at all (`agent/executors/docker_exec.py`).
 
 ---
 
@@ -306,10 +312,10 @@ anything on the agent's side. Each job's credentials directory is created on the
 disk mode `0711` — anyone may walk through it, only the agent may list it — with the file
 inside it mode `0444`, readable by every uid and writable by none, and **both modes are
 re-applied on every write**, a mid-job credential refresh included
-(`agent/creds.py:79-106`, `CREDS_DIR_MODE` / `CREDS_FILE_MODE` /
+(`agent/creds.py`, `CREDS_DIR_MODE` / `CREDS_FILE_MODE` /
 `JobCredentials.write`). What keeps the credential off the rest of the machine is the
 agent's own working directory **above** the mounted leaf, which is owner-only and is
-bind-mounted into nothing (`agent/identity.py:74-75`, `ensure_private_workdir`) — not the
+bind-mounted into nothing (`agent/identity.py`, `ensure_private_workdir`) — not the
 file's own mode.
 
 **BEHAVIOUR.** In object-storage mode the agent does **not** force your container's user,
@@ -355,7 +361,7 @@ staging directory.
 
 ## Pointing a pipeline node at your deployment
 
-In the pipeline editor: **Add node → External → External node**, pick the deployment you
+**BEHAVIOUR.** In the pipeline editor: **Add node → External → External node**, pick the deployment you
 registered, and wire an edge into it from the step whose output it should read. That is
 the same thing as adding a script node with this configuration, which is what it stores
 and what an API caller writes directly:
@@ -374,7 +380,7 @@ under no port at all.
 **RULE for the "Required" column, BEHAVIOUR for the rest of the table below.** The
 configuration validator refuses a node whose `external_deployment_id` is missing or is not
 a positive integer; everything else in the table is what the platform does with a key you
-did set (`pipelines/config_schemas.py:475-513`).
+did set (`pipelines/config_schemas.py`).
 
 | Key | Type | Required | Meaning | Reaches your container |
 |---|---|---|---|---|
@@ -385,9 +391,11 @@ did set (`pipelines/config_schemas.py:475-513`).
 | `queue_timeout_seconds` | integer > 0 or null | no | how long the job stays claimable, default 3600 | no |
 | `input_payload_kind` | string or null | no | require an upstream artifact of this kind; absent means every upstream artifact, including none | indirectly |
 
-**BEHAVIOUR, and it costs people an afternoon.** Unknown configuration keys are **accepted
-and ignored**. A typo such as `timeout_second` validates cleanly, is stored on the node,
-and does nothing at all.
+**RULE.** New API writes reject unknown top-level external-step configuration keys.
+A typo such as `timeout_second` cannot be saved as a supported setting. Put the
+container's own options inside `params`, whose shape the platform does not validate.
+Older stored nodes with stray keys can still run; the handler ignores those keys
+(`pipelines/config_schemas.py`, `handlers/steps/external.py`).
 
 **BEHAVIOUR.** With `input_payload_kind` set and no matching upstream artifact, the step
 fails after exhausting the engine's ordinary retry ladder rather than immediately. With it
@@ -422,7 +430,7 @@ node's identity, and it is what makes an old run reproducible.
 
 **BEHAVIOUR.** A pool is either `managed` (operated by us, global) or `self_hosted`
 (operated by a customer, owned by one organization). Relevant defaults
-(`noderegistry/models.py:40-108`):
+(`noderegistry/models.py`):
 
 | Setting | Default | Effect |
 |---|---|---|
@@ -453,8 +461,8 @@ which you cannot change from a node.
   disappears after claiming it. The queue deadline only makes the claim scan skip the row.
   The execution stays parked at "Waiting for runner", holding its quota slot, until an
   operator cancels it. If you are testing "what if my machine dies mid-job", this is what
-  you will see — and it is also where a job that simply **ran out of time** ends up, see
-  the next bullet.
+  you will see — and a deadline stop whose agent cannot report can end up there too, as described
+  below.
 * **No bounded stop, on any path.** Nothing here guarantees how long it takes to stop a
   container: not the gap between a deadline passing and the first signal, not the time
   between that signal and the kill, not how soon a fence lands, not how long a container
@@ -471,33 +479,15 @@ which you cannot change from a node.
   [PROTOCOL.md](PROTOCOL.md#7-cancellation). For an operator the practical form is: never
   size a maintenance window, a drain or a redeploy on the assumption that a stop completes
   in a known time.
-* **Hitting the runtime budget leaves a running container's run parked, and collects
-  nothing.** The agent does stop the container when the budget runs out, but the
-  orchestrator refuses the terminal report that would normally finish the job: the last
-  heartbeat before the deadline shortened the lease to end at the deadline, and a report
-  on an expired lease is turned away. Nothing arms collection, so no marker is read and
-  nothing the step produced is published, and the execution stays at "Waiting for
-  runner" until somebody cancels it. The stop begins politely, but the grace the agent
-  asks docker for is cut short — the platform's own next heartbeat comes back refused and
-  the agent kills the container. When that lands is not something a node or an operator
-  can plan around; no interval on any stop path is bounded
-  ([PROTOCOL.md](PROTOCOL.md#7-cancellation)). The one job that ends differently is one
-  still being **prepared** when its budget runs out: the deadline is not being watched
-  yet, the claim's own five-minute
-  lease has not been shortened yet, and a failure there is reported and accepted, so the
-  run finishes as failed rather than parking. Whether that one collects anything depends
-  on where in preparation it died, and "it failed during preparation" does not answer
-  that: the container is created and started **before** the agent's own log and
-  heartbeat threads are. A failure in the earlier steps — an unreadable job description,
-  a failed image pull — leaves no container and nothing to collect; a failure starting
-  one of those threads, which a busy host really does produce, leaves the container
-  running and still sends the report that arms collection. The start itself is the
-  ambiguous middle: a `docker run` that raises may still have left a container running,
-  which is why the agent goes and takes one down by name before it reports. Full
-  derivation, and which half of it was executed rather than read, in
-  [PROTOCOL.md](PROTOCOL.md#7-cancellation). The practical consequence for an operator
-  is the same in both cases: give a step a budget it will comfortably finish inside; a
-  budget that is merely "close enough" does not degrade gracefully, it loses the run.
+* **Runtime expiry has a reporting window, not automatic recovery.** The default stop
+  window gives the workload a configured 180-second stop allowance and the agent a
+  further 60 seconds to report. A valid report accepted during that window fails the
+  run and can salvage a valid marker's objects as diagnostics. If the agent loses its
+  lease or cannot report before the window closes, the run can still remain parked.
+  The envelope expiry can be clamped to the reporting cutoff; it does not identify
+  the workload's earlier kill cutoff, and the stop instruction is not forwarded. See
+  [PROTOCOL.md](PROTOCOL.md#7-cancellation).
+
 * **No automatic retry.** Every failed external attempt is recorded as transient
   regardless of your exit code, and nothing re-attempts. An operator retries by hand.
 * **No aggregate upload quota.** One object is bounded at 1 GiB. Nothing caps the number of
@@ -505,23 +495,24 @@ which you cannot change from a node.
 * **No limit on the SIZE of inputs, and an indirect one on their number.** Nothing caps one
   input object or their total bytes. The count, however, is capped after all: every input
   and its metadata are written into the job description, and the writer refuses to publish
-  one over 8 MiB (`external/io.py:148-157`). Measured against the real models, that is
+  one over 8 MiB (`external/io.py`). Measured against the real models, that is
   roughly **25,000 inputs** with 95-character URIs, at about 330 bytes each. A step wired
   downstream of something that produced ten thousand files runs fine; one wired downstream
   of something that produced fifty thousand fails **before any container starts**, while
   the orchestrator is still writing the job description. See
   [PROTOCOL.md](PROTOCOL.md#23-reading-the-input-objects).
 * **No disk ceiling on the container.** The agent sets a CPU limit, a memory limit and a
-  process limit, and no storage limit (`agent/executors/docker_exec.py:248-274`). A node
+  process limit, and no storage limit (`agent/executors/docker_exec.py`). A node
   that downloads its inputs to `/tmp` and never deletes them can fill the disk of the
   machine hosting the agent — which is a customer's machine, running their other work.
   Nothing warns, and the first symptom is unrelated things failing on that host.
 * **Presigned reads can outlive their stated expiry.** A presigned GET can remain valid
   past the envelope's `expires_at` by up to the budget left when it was signed. The upload
   policy cannot. Treat `expires_at` as exact for writes, and as a lower bound for reads.
-* **Logs are tail-only, and so is the durable copy.** The last 1000 entries, live and in
-  the file written when the execution reaches a terminal state — the file is built from
-  the same buffer. There is no complete record of a chatty container's output anywhere.
+* **The terminal log is not a complete transcript.** The live stream retains 1000
+  entries. The durable file merges that tail with lines already saved on the execution;
+  it cannot recover lines neither source retained. A node can upload its own complete
+  log as an inventoried object.
 * **A fenced container is killed outright.** The runtime deadline normally begins with a
   SIGTERM, though it need not; the fencing path gives the container a SIGKILL and nothing
   else, always. It therefore
@@ -529,10 +520,9 @@ which you cannot change from a node.
   for that attempt had already recorded — under the recommended write-the-marker-last
   discipline, usually nothing. Usually and not always: the marker is written last, but
   it does not vanish at the instant the process does, and a fence landing between its
-  upload and the agent seeing the container go collects what it names. There are six
-  fencing triggers and they differ in whether the agent may even report the outcome; the
-  table in [PROTOCOL.md](PROTOCOL.md#71-fencing-the-stop-with-no-grace-period-at-all)
-  gives each one with its own consequence. Note that an ordinary agent shutdown is
+  upload and the agent seeing the container go collects what it names. Fencing triggers differ in whether the agent may even report the outcome; the
+  account in [PROTOCOL.md](PROTOCOL.md#71-fencing-the-stop-with-no-grace-period-at-all)
+  explains that report permission depends on the cause. Note that an ordinary agent shutdown is
   **not** one of them: it waits for your job, and a forced shutdown leaves your
   container running for the next agent to adopt.
 * **Pressing Cancel is usually a kill, not a polite stop, and it collects nothing.**
@@ -578,8 +568,8 @@ that has already exited can no longer show you.
 **BEHAVIOUR, and it decides which of the two journals to trust.** The same node output is
 shipped to the orchestrator and appears live in the run view, which is the only option when
 the agent is on somebody else's machine. It is not the same document: the platform keeps a
-tail of the last **1000 lines** and drops the oldest when a run is chattier than that, and
-the durable copy stored with the execution is built from that same trimmed buffer (see
+tail of the last **1000 entries** and drops the oldest when a run is chattier than that.
+The durable copy merges the retained tail with lines already saved on the execution (see
 [PROTOCOL.md](PROTOCOL.md#33-logging), which is also why a step should say the
 important things once, at the end, in few lines). The copy on the machine is the whole of
 it, for as long as the container lives.
@@ -616,18 +606,18 @@ two rows where that distinction bites are marked inline.
 | Container dies at once with a missing credentials file | the agent's state is in a docker volume rather than a host path, so the credentials directory the daemon mounted was an empty one it created | Unchecked — the docker daemon creates an empty directory rather than failing | mount a real host directory at the same path inside and outside, with the workdir a child of it |
 | Container dies with permission denied on its credentials | **not** a uid mismatch — the file is `0444` in a `0711` directory, so any user can open it. Either you listed the directory instead of opening the path (`0711` grants traversal, not enumeration), or your image makes `/lspo` itself non-traversable and has defeated its own mount, or the agent's state lives somewhere its modes are not enforced (a CIFS/SMB share, Docker Desktop file sharing, some NFS exports) | Unchecked in your container; the agent refuses at startup for the cases it can detect | open the exact path in `LSPO_CREDENTIALS_FILE` rather than listing its directory; check nothing in your image narrows `/lspo`. Do **not** rebuild as a particular uid — no uid is required, and do not "fix" it by running as root |
 | Node fails with "`LSPO_CREDENTIALS` is not set" | your code reads the wrong variable name | Unchecked — the platform sets `LSPO_CREDENTIALS_FILE` and cannot police how you read it | read `LSPO_CREDENTIALS_FILE` |
-| Run fails with "no completion marker" | your container exited 0 without writing `__lspo_complete.json` | RULE — a marker is required on a successful run | write one before exiting 0. (*RECOMMENDATION, not part of the rule*: write one on your own failure path too, so your `error` and your part-finished inventory survive. It will not save a run an operator stopped while it was still running, nor one whose running container was stopped by the runtime budget — neither of those collects anything today) |
+| Run fails with "no completion marker" | a successful report had no usable `__lspo_complete.json` | RULE — success requires a valid marker | write one before exiting successfully. Also attempt a marker on failure so accepted reports can salvage inventoried files |
 | Run fails naming a hash or size mismatch | the object changed after you hashed it, or the marker was written before the upload finished | RULE — every published object is re-read and held to the marker | hash the bytes you actually wrote. (*RECOMMENDATION, not part of the rule*: write the marker last — nothing observes write order, so this failure is the only symptom you will ever see of getting it wrong) |
-| Uploads start failing partway through a long run | the credentials envelope expired, roughly fifteen minutes in | BEHAVIOUR — normally visible only once somebody raises the node's `timeout_seconds` past 900, because on a default registration the credentials expire at the same moment the container is asked to stop. Not exclusively, though: when the stop arrives politely there is an interval after it, so a node that handles the stop and writes its marker on the way out hits the expiry inside that interval even on the default | re-read the credentials file at or near `expires_at` |
+| Uploads start failing partway through a long run | the workload cached an expired envelope, or the agent could not refresh it | BEHAVIOUR — envelopes have a default 900-second lifetime even when the runtime budget is longer | re-read the credentials file near `expires_at`; inspect the agent log if the file did not change |
 | Upload refused with a policy error | the object key does not start with `staging.post.key_prefix`, or the object is over 1 GiB | RULE — enforced by the storage service, so the refusal is an HTTP error | prefix the key explicitly; split the object |
-| The container is stopped at almost exactly fifteen minutes and the run then sits at "Waiting for runner" forever | the runtime budget the revision declared (900 seconds by default) ran out | BEHAVIOUR — a SIGTERM, then a SIGKILL once the platform's next heartbeat comes back refused, or docker's own kill at the end of the agent's 30 second stop timeout if no refusal arrives first. Which of the two lands, and when, is not bounded ([PROTOCOL.md](PROTOCOL.md#7-cancellation)). Then a terminal report the orchestrator refuses, because the lease was shortened to end at the deadline. Nothing is collected, and a run stopped this way is not marked failed either ([PROTOCOL.md](PROTOCOL.md#7-cancellation)) | set `timeout_seconds` on the pipeline node, or publish a revision declaring more, so the step finishes on its own; then cancel the parked run to release its quota slot. A SIGTERM handler makes the container exit cleanly, but it does not make this case recoverable |
-| The container is killed with no warning and nothing is collected | the job was fenced. Six triggers, listed in [PROTOCOL.md](PROTOCOL.md#71-fencing-the-stop-with-no-grace-period-at-all); the common two are an orchestrator the agent cannot reach for longer than the job's lease plus the agent's `LEASE_EXPIRY_GRACE_S`, and a job revoked while it ran. **An operator pressing Cancel produces this same symptom**, and is the commonest cause of it. A step running out of its runtime budget produces it too, by a different route: the stop starts politely, and the platform's next heartbeat comes back refused and turns it into a kill — or, when the agent cannot reach the orchestrator at all and no refusal ever arrives, docker's own kill at the end of the stop timeout does it instead. **None of those arrivals is bounded in time**, and none of the intervals above should be planned around ([PROTOCOL.md](PROTOCOL.md#7-cancellation)) | BEHAVIOUR — a SIGKILL with no grace period, so no further marker can be written. Three of the six leave the agent able to report, and where that report is accepted, collection runs and reads any valid marker that was already in staging — which under the write-the-marker-last discipline is usually, not certainly, none; on the other three the execution stays parked until an operator cancels it, and cancelling collects nothing either | check the agent's connectivity and the agent's own log for the fence reason; nothing in the node can prevent this |
-| A stopped run keeps going, then dies | no SIGTERM handler, so PID 1 discarded the signal and the grace ran out — or was cut short by the platform's next heartbeat | BEHAVIOUR (discarding the signal is a property of Linux, not of the platform) | install a handler that sets a flag |
+| The container stops near its runtime budget | the configured `timeout_seconds` elapsed | BEHAVIOUR — the default stop window permits a failure report and diagnostic salvage; a lost lease or closed window can still leave the run parked | give the node enough budget, inspect the agent log and failure reason; cancel a parked execution to release held quota |
+| The container is killed with no warning and nothing is collected | operator cancellation or a fence, such as a lost lease or refused agent identity | BEHAVIOUR — a SIGKILL offers no chance to write a marker; collection depends on an accepted report and an existing valid marker | check the agent log and connectivity; see [PROTOCOL.md](PROTOCOL.md#71-fencing-the-stop-with-no-grace-period-at-all) |
+| A stopped run keeps going, then dies | no SIGTERM handler, so PID 1 discarded the signal and the grace ran out, or was shortened by a later stop instruction | BEHAVIOUR (discarding the signal is a property of Linux, not of the platform) | install a handler that sets a flag |
 | A cancelled run's partial output does not reach anything downstream | nothing was collected, because cancelling a step whose container is **still running** does not read its marker | BEHAVIOUR — by design, on both branches of the cancellation race. One exception, and it is not about a running container: a cancellation arriving while collection is **already under way** lets that collection finish, and what it verified is attached to the cancelled run as diagnostics under no output port — visible in the artifact browser, readable by nobody downstream ([PROTOCOL.md](PROTOCOL.md#7-cancellation)) | nothing to fix in the node. If partial output matters, let the step finish or fail on its own rather than cancelling it |
-| Logs stop partway through | you exceeded the shipping rate, or a single line exceeded 64 KiB and its tail was discarded | BEHAVIOUR — the excess is dropped silently | fewer, shorter lines |
+| Logs stop partway through | you exceeded the shipping rate, or a single line exceeded 64 KiB and its tail was discarded | BEHAVIOUR — buffer overflow emits a warning with the dropped count; oversized stream lines carry `…[truncated]`. Later transport or retention loss can also lose those notices | fewer, shorter lines; check the agent log and upload an inventoried log file when a complete transcript matters |
 | Logs never appear at all | a logging library that defaults to WARNING and to stderr only, or a buffered stdout | Unchecked | configure the logger explicitly and set `PYTHONUNBUFFERED=1` |
-| A container's output is gone before you could read it | the agent removes a job's container when the job ends | BEHAVIOUR — nothing is retained locally afterwards | attach at the start instead: [Watching a run, live](#watching-a-run-live) |
+| A container's output is gone before you could read it | the agent removes a job's container when the job ends | BEHAVIOUR — exited containers are removed unless the agent enables `LSPO_AGENT_KEEP_CONTAINERS` | attach at the start instead: [Watching a run, live](#watching-a-run-live) |
 | Log lines arrive mangled, with stray `[31m` in them | you printed ANSI colour; the escape byte is stripped as a control character and the rest survives | BEHAVIOUR | print plain text |
 | The node runs but downstream steps see nothing | the objects were inventoried but claimed under no output port | BEHAVIOUR — an unclaimed object is verified and kept, but not offered downstream | claim them under a port; `produced_ports` is what becomes downstream artifacts |
-| A configuration key on the node seems to do nothing | unknown keys are accepted and ignored | BEHAVIOUR — validation ignores what it does not recognise | check the spelling against the configuration table above |
+| Saving external-node configuration rejects a key | unknown top-level configuration key | RULE — external configuration is closed at the API write boundary | check the table above; put container-specific options inside `params` |
 | The disk on the agent's machine fills up | inputs downloaded and never deleted; no storage limit exists | Unchecked | delete each input when done; see the residual limits above |

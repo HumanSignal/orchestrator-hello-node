@@ -1,17 +1,20 @@
 # orchestrator-hello-node
 
-A template for an **external node**: a pipeline step that runs as your container, on your
-machine, built from your own code. The orchestrator never sees the code. It sees an image
-digest, hands the container a job description and short-lived credentials, and collects
-whatever the container declares it produced.
+A template for an **external node**: a pipeline step implemented by your container.
+Run it on your machine with a customer agent, or have an enabled orchestrator build an
+approved Git repository and run it on a managed pool. Customer-run registration shares
+an image digest; hosted builds also give the build service access to your source. Both
+use the same job description, short-lived credentials and completion marker.
 
 ## Read this before you copy anything
 
-**`node.py` is safe to copy.** It passes the whole conformance suite: the harness in
-`conformance/` builds this repository's image, runs it as a real container and judges it
-from the outside only, and **all 141 of its tests are green**.
+**Start from `node.py`, then test your changes.** On 2026-09-10 the existing harness
+passed **141 tests** against this checkout in real Docker containers, including its
+citations checked against orchestrator `master` at `30b0950a`. This is evidence for the
+tested reference, not a guarantee about a modified node or a live installation. The
+verification and earlier repair history are in [CONFORMANCE-BASELINE.md](CONFORMANCE-BASELINE.md).
 
-That was not true until recently. Twenty tests used to be red, and
+Twenty tests failed before the original reference-node repair, and
 [CONFORMANCE-BASELINE.md](CONFORMANCE-BASELINE.md) is the measured record of what each one
 found and how it was repaired — worth reading, because every one of those defects is one a
 first version of a node makes, and the document says what each cost.
@@ -71,6 +74,7 @@ digest, hand it over.
 docker build -t hello-node:dev .
 
 # with a registry
+docker tag hello-node:dev <registry>/hello-node:dev
 docker push <registry>/hello-node:dev
 docker inspect --format='{{index .RepoDigests 0}}' <registry>/hello-node:dev
 

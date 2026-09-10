@@ -184,29 +184,23 @@ in production.
 the document is invalid. A single trailing slash is tolerated, since the check strips
 trailing slashes before comparing. This is the first thing that rejects a hand-made
 manifest, and it is not arbitrary: that suffix is the fence keeping a superseded runner
-out of the live attempt's area (`external/contract.py:476-492`).
+out of the live attempt's area (`external/contract.py`).
 
-Everything above is **background** about this document: it was all executed while these
-documents were written, at the commit named in [README.md](README.md#provenance). The
-fixture was built, **both** runs were performed, and the output shown for each — the four
-stdout lines and three files, identical for run A and run B, and the one stderr line and
-empty directory from the run whose credentials file was missing — is what they produced.
-The manifest and the credentials envelope shown here, the marker `node.py` wrote, and the
-marker shown in
-[PROTOCOL.md](PROTOCOL.md#5-the-completion-marker) were all parsed with the orchestrator's
-own `InvocationManifest` and `CompletionMarker`, and every refusal listed below was
-exercised against them one at a time. The input file's twelve bytes and its hash were
-computed from the file itself.
-
-What was **not** executed is everything else: no container, agent, orchestrator run or
-upload was exercised while writing this document set, so every statement about the agent's
-behaviour, the storage service and collection is read from the source and reasoned about
-rather than measured.
+The offline examples describe this repository's reference node, which copies inputs.
+They are not an output-shape requirement for a node that transforms its inputs. The
+historical parser/refusal measurements are described in
+[README.md](README.md#provenance). The original reference-node defect measurements and
+the current audit's verification are recorded separately in
+[CONFORMANCE-BASELINE.md](../CONFORMANCE-BASELINE.md). No production run or real S3 upload was performed for
+this update. Both documented commands (runs A and B) and the missing-envelope case
+were rerun on **2026-09-10** at hello-node commit `c768c02`, reproducing the transcripts,
+exit codes and output files shown here. Their manifest and marker also parsed with the
+platform at `30b0950a`.
 
 **What level 1 proves.** From run B: that your program finds its credentials through the
 one variable the platform sets. From either run: that it parses both documents, verifies
-input pins, writes objects, and writes a marker with a consistent inventory. Together that
-is most of the contract.
+input pins, writes objects, and writes a marker with a consistent inventory. Neither command alone proves every validation branch: changed input bytes, missing
+pins and malformed documents need separate negative cases in the harness.
 
 **What it does not prove.** Anything to do with expiry, cancellation, object-store
 refusals, or the collection side.
@@ -228,7 +222,7 @@ the model was left without one. See [README.md](README.md#provenance) for the co
 for what "exercised" means here.
 
 **RULE, for every item in the list that follows.** Each one is a refusal the marker parser
-really makes (`external/contract.py:519-636`), so a marker breaking any of them fails your
+really makes (`external/contract.py`), so a marker breaking any of them fails your
 run. **RECOMMENDATION**, separately and for the whole list: reproduce them in your own
 checker, since you do not have that parser.
 
@@ -380,7 +374,7 @@ blindly instead of re-reading its credentials.
 the **directory**, not the file, if you run this inside docker. A bind-mounted file keeps pointing at the replaced
 inode and will never appear to change, so a harness that mounts the file will report every
 node as broken. That is exactly why the platform mounts the directory
-(`agent/creds.py:10-16`).
+(`agent/creds.py`).
 
 ### Testing the stop path
 
@@ -416,13 +410,16 @@ that promise more body than it delivers stalls a **read mid-body**. Roughly fort
 no new dependency; `conformance/stalling.py` is the whole of it.
 
 **BEHAVIOUR, and it caps what any of these tests can prove.** A local SIGTERM followed by
-a kill after N seconds is your harness's number, not the platform's. The agent chooses what
-to pass to `docker stop`, a fence passes nothing at all, and — measured at the deployed
-commit — **no channel tells your container how much time it has left**: not the injected
-variables, not the credentials envelope, not the job description, and the stop object the
-orchestrator composes on its heartbeat reaches the agent and goes no further. So a timing
-test proves your node bounds ITSELF; it cannot prove the bound will be honoured, and a
-document that says otherwise is describing a promise nobody made.
+a kill after N seconds is your harness's number, not the platform's. The agent controls
+stopping, and a fence grants no grace. The envelope's `expires_at` is limited by its own
+lifetime and the reporting-window ceiling; near the end it can reflect that ceiling,
+with signing conservatively understating the expiry. It does not identify the workload
+kill cutoff, which precedes the reporting cutoff by the configured margin (60 seconds
+by default). Earlier envelopes can expire well before either cutoff and be refreshed.
+The heartbeat's stop instruction is not forwarded to the container, and the envelope
+is not a stop-timing contract. A timing test therefore proves your node bounds ITSELF;
+it cannot prove the platform will leave that much time
+(`runners/credentials.py`, `runners/jobs.py`, `agent/runner.py`).
 
 **RECOMMENDATION.** Assert that a marker exists **even when your step had produced nothing
 yet**. That case is easy to leave untested and it is where the hole hides: a step that
@@ -431,27 +428,12 @@ promptness and every assertion about not over-claiming. This suite had that hole
 release — a stop landing during the first download was measured for its speed and never for
 its account of itself.
 
-**BEHAVIOUR, and it decides what this test is evidence of.** A local SIGTERM models your
-node's own behaviour on a stop, and nothing more. It is not a model of what the platform
-then does with the result, on any of the three stop paths. An **operator pressing
-Cancel** usually arrives as a SIGKILL your process never sees, and even on the narrow
-path where it arrives as a SIGTERM, nothing the node writes is collected. The **runtime
-deadline** normally begins as a SIGTERM — normally, not always — but whatever interval
-follows it is cut short by the platform's own
-next heartbeat, the upload credentials expired at the deadline, and the terminal report
-that would have made a marker count is refused
-([PROTOCOL.md](PROTOCOL.md#7-cancellation)). So label this test for what it proves —
-that your node stops cleanly and promptly when asked — and do not let it stand as
-evidence that a stopped run delivers a partial result. Neither of those two stops
-delivers one today. The third, a **fence**, can: three of the six fences leave the agent
-able to report, and collection then reads whatever valid marker was already sitting in
-staging — which, if you write the marker last as recommended, is usually nothing.
-Usually and not always: writing it last says where in your program the marker is
-written, not that it appears and vanishes together with your process, and a fence
-landing in the interval between the marker's upload finishing and the agent noticing
-your container is gone reads it
-([PROTOCOL.md](PROTOCOL.md#71-fencing-the-stop-with-no-grace-period-at-all)). It is a
-race, not a delivery mechanism, and nothing you can test locally exercises it.
+**BEHAVIOUR.** A local SIGTERM tests whether this node stops and leaves a receipt.
+It does not test the deployed agent's lease, stop-window timing or collection.
+Runtime expiry now permits reporting within the configured window, so an accepted
+failure report can salvage a valid marker as diagnostics. Operator cancellation of
+running work still normally fences the container and does not collect its objects.
+See [PROTOCOL.md](PROTOCOL.md#7-cancellation) for those separate paths.
 
 **BEHAVIOUR to keep in mind while reading the result.** When the agent classifies at all, it
 calls the run cancelled regardless of your exit code, because it asks "was cancellation
@@ -480,14 +462,11 @@ work takes longer than fifteen minutes before you trust the node in production. 
 the single threshold that separates a node which reloads its credentials from one which
 does not, and nothing shorter will reveal the difference.
 
-**BEHAVIOUR, and it is why that test needs a setup step.** A node registered either
-documented way is given a runtime budget of **900 seconds**, and at that moment the agent
-begins stopping your container — a SIGTERM, then a SIGKILL, with no dependable interval
-between the two ([PROTOCOL.md](PROTOCOL.md#7-cancellation)). So a job "longer than fifteen
-minutes" is simply stopped, the run is ordinarily left parked at
-"Waiting for runner" rather than reported — until you cancel it yourself, which is also how
-you clear the quota slot the experiment is holding — and it proves nothing about
-credentials.
+**BEHAVIOUR.** Registration defaults the runtime budget to **900 seconds**. A test
+that needs more than fifteen minutes of useful work must increase that budget first.
+The default stop window permits an expired job to report and retain diagnostics; it
+does not turn the stop period into more processing time. A lost lease or unavailable
+agent can still leave a job parked; see [PROTOCOL.md](PROTOCOL.md#7-cancellation).
 
 **RECOMMENDATION, and nothing in the platform requires it — it is a precondition of the
 test, not a rule about your node.** Set `timeout_seconds` on the pipeline node (for example
@@ -507,7 +486,7 @@ of an hour, and it is the moment a node that reads its credentials once stops wo
 **BEHAVIOUR — write order.** Nothing can establish, after the fact, that you wrote the
 marker last. The platform does not try: it checks the **consequences**, by copying every object your
 marker names into a place your credentials cannot reach and re-reading it there
-(`pipelines/external_finalize.py:1103-1152`). A marker written too early shows up as a
+(`pipelines/external_finalize.py`). A marker written too early shows up as a
 size or hash mismatch, or as a missing object, and never as "you wrote things in the wrong
 order". A local test can record the order your program wrote things in, which is useful,
 but it is a statement about your test double and not about the contract. This is why
@@ -552,8 +531,7 @@ organised to avoid, and it is why every statement here carries a label.
 
 ## If a `conformance/` directory exists in this repository
 
-This section is **background**, about a directory that may or may not exist beside these
-documents. Read its own README first. It will say which of the three subjects above each
+This section is **background**, about the harness shipped beside these documents. Read its own README first. It will say which of the three subjects above each
 test has, and whether its fake endpoint is stricter or laxer than the storage service. A
 test in that suite that fails your node is a reason to read the check, not automatically a
 reason to change your node: check it against [PROTOCOL.md](PROTOCOL.md), and if the two
