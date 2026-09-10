@@ -180,12 +180,12 @@ UPLOAD_TIMEOUT_S = 10.0
 #: going QUIET, not a transfer taking long, and a peer that sends a byte every few seconds
 #: keeps a connection alive for as long as it likes.
 #:
-#: **Twenty seconds, against a grace of thirty that nobody promises.** Thirty is the
-#: agent's own constant, hardcoded as a default and passed by no caller, so it is the most
-#: the polite path can ever give (``agent/executors/docker_exec.py`` ``stop``); a fence
-#: gives zero, and a cancellation may not even be noticed until the next heartbeat. Twenty
-#: leaves the process room to exit and say why before the kill lands, and a receipt that
-#: cannot be written in twenty seconds was not going to be written.
+#: Twenty seconds is this node's best-effort budget, not the platform's stop allowance.
+#: The current agent can receive a runtime stop window (180 seconds plus 60 for reporting
+#: by default). The envelope expiry is clamped to the reporting cutoff, not a contract
+#: identifying the workload's earlier kill cutoff; the stop instruction is not forwarded.
+#: A late signal or a fence may leave no usable time. Keep this transfer bounded without
+#: claiming that its local deadline guarantees the receipt survives a stop.
 RECEIPT_DEADLINE_S = 20.0
 #: Every streaming copy moves this much at a time.
 CHUNK_BYTES = 1024 * 1024
@@ -236,8 +236,8 @@ class _StoppableTransport:
     * **Too late.** A response exists only once the store has begun to answer, so a stop
       landing while the step was still waiting for the first byte of a GET reached nothing
       at all, and was noticed only when the socket timed out — measured at the full length
-      of a held-open response, out of a grace that is nominally thirty seconds and
-      guaranteed to be nothing at all.
+      of a held-open response under the harness's thirty-second grace. That test
+      allowance is not the deployed platform's remaining stop time.
     * **Wrong call.** ``close()`` does not interrupt a read that is ALREADY blocked.
       Measured: mid-body it raises ``RuntimeError: reentrant call inside
       <_io.BufferedReader>`` from inside the handler — where the exception is swallowed —
@@ -1223,10 +1223,10 @@ def _write_result(creds: Credentials, manifest: dict, metrics: dict, scratch: st
     """The optional report document, kept inside the ceiling its reader is bound by.
 
     ``params`` is copied verbatim from whatever the pipeline author typed and is bounded
-    only by the 8 MiB manifest ceiling, so echoing it into a 1 MiB document is a way to
-    publish something the other side is forbidden to read. Its shape is described
-    instead of reproduced.
+    only by the 8 MiB manifest ceiling, so an unconditional echo could exceed the
+    result reader's 1 MiB ceiling.
 
+    It echoes params while the result fits; otherwise it records their bounded shape.
     It goes on its own port. Everything under a port is offered to every downstream step
     wired to it, and a metrics file delivered as if it were a result is a thing downstream
     steps have to learn to ignore.

@@ -17,8 +17,12 @@ python -m pytest --collect-only -q --print-labels   # every test's group, basis 
 LSPO_ORCHESTRATOR_SRC=/path/to/orchestrator LSPO_ORCHESTRATOR_REF=origin/master python -m pytest
 ```
 
-Docker is required. If there is no daemon the suite skips itself with a message rather
-than pretending, because a harness that fakes the container proves nothing.
+Docker is required. Tests needing an unavailable daemon skip with an explanation,
+and the session then **fails**: `tests/conftest.py` permits only the missing-source
+citation check to skip without making the run red. Other conditional skips, including
+unsupported swap accounting or a network that cannot produce the intended stall, also
+fail the session. See the dated verification in
+[CONFORMANCE-BASELINE.md](../CONFORMANCE-BASELINE.md).
 
 ## The one rule, and the rule about the rule
 
@@ -119,8 +123,9 @@ rules the rest of the suite leans on are written down with a citation a human ca
 one step — which is exactly how the "the agent injects exactly nine variables" error in
 this file was found. Two of them are not restatements and really do exercise the
 mechanism, with real containers: the bind-mounted-file test and the one that reads a
-job's credentials from inside the image as four different users, including a uid that
-exists in no passwd file. That second one is the closest this repository comes to a
+job's credentials from inside the image as three users, including a uid that
+exists in no passwd file, then again as that stranger after credential refresh.
+That second one is the closest this repository comes to a
 tripwire on the platform — it goes red if the credential modes are ever narrowed back to
 the shape that forced a customer's image to run as one particular uid.
 
@@ -175,9 +180,10 @@ sentence is out in the open where a reader can weigh it.
 Production credentials are presigned URLs with a deadline. The orchestrator re-signs a
 fresh envelope before the old one expires and the agent replaces `creds.json` atomically
 in the mounted directory — but **issuing a new envelope does not revoke the old one**.
-Nothing can: a signature over a deadline cannot be taken back.
+The fake models expiry and envelope replacement, not changes to AWS permissions or
+revocation of the underlying signing credentials.
 
-This endpoint models exactly that. A credential is refused when its own expiry has passed,
+This endpoint models exactly that. A credential is refused by this fake when its own expiry has passed,
 judged **once, when the request's HEADERS arrive — before its body has been read**, as S3
 authorizes the request it receives rather than re-checking a large upload on the way out.
 Never merely because a newer credential exists, and never after the request has already

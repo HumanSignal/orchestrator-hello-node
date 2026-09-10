@@ -8,9 +8,9 @@ Every statement is labelled **RULE** (the platform refuses or fails the run),
 **BEHAVIOUR** (what the platform does, which you must plan for) or **RECOMMENDATION**
 (what a good node does; the platform permits otherwise). Unlabelled text is background.
 
-Also **background**: values here are literal and were verified against the orchestrator at
-commit `6b2ff82c70f26d0ceaa1a841137f1b3cfb08186b`, and source paths appear after a value as
-provenance.
+Also **background**: code claims and citations were rechecked against the orchestrator at
+default-branch commit `30b0950a` (`master`, reviewed 2026-09-10). Historical measurements
+retain their original dates and commits; they were not all rerun. Source paths give provenance; [README.md](README.md#provenance) records the scope.
 
 ---
 
@@ -43,9 +43,9 @@ hash and size the marker promised
 
 **RULE for the names in the table below; BEHAVIOUR for the "Required" column.** Four
 documents live in the staging prefix and their names are fixed
-(`external/contract.py:56-59`). You locate them by name, never by configuration, and so
+(`external/contract.py`). You locate them by name, never by configuration, and so
 does the platform: collection joins your staging prefix to the literal string
-`__lspo_complete.json` and reads whatever is there (`external/io.py:221-229`). A receipt
+`__lspo_complete.json` and reads whatever is there (`external/io.py`). A receipt
 written under any other name therefore does not exist as far as the platform is concerned,
 and a run that exited 0 fails for having no marker.
 
@@ -63,9 +63,9 @@ and a run that exited 0 fails for having no marker.
 
 ### 1.1 Environment variables
 
-**BEHAVIOUR.** Every container receives exactly these nine variables, in addition to any
-variables the deployment declared and the agent's operator allowed
-(`agent/runner.py:2287-2299`):
+**BEHAVIOUR.** The agent injects these nine variables, in addition to the image's own
+environment and any variables the deployment declared and the agent's operator allowed
+(`agent/runner.py`):
 
 | Variable | Value | Use it for |
 |---|---|---|
@@ -80,7 +80,7 @@ variables the deployment declared and the agent's operator allowed
 | `LSPO_STAGING_PREFIX` | the true storage address of your staging area | **information only, see below** |
 
 **BEHAVIOUR.** The only credentials variable the agent sets is `LSPO_CREDENTIALS_FILE`
-(`agent/runner.py:2295`). There is no variable called `LSPO_CREDENTIALS`. The agent does
+(`agent/runner.py`). There is no variable called `LSPO_CREDENTIALS`. The agent does
 not set one, and no commit in the orchestrator's history ever added one to the agent — that
 second half is a search of the repository's history rather than a reading of one commit,
 and it is stated separately for that reason.
@@ -103,14 +103,14 @@ job description and write your outputs through the credentials envelope instead
 but valued by the machine the agent runs on, and the agent's operator keeps an allowlist
 (`LSPO_AGENT_ALLOWED_ENV`, exact names or glob patterns, empty by default which means
 nothing is passed). A declared name that is not on the allowlist **fails the job before
-your container starts**, naming the variable (`agent/runner.py:2274-2282`,
-`agent/config.py:209-227`). A name that is allowed but simply absent from the agent's
+your container starts**, naming the variable (`agent/runner.py`,
+`agent/config.py`). A name that is allowed but simply absent from the agent's
 environment produces a warning and the variable is not set
-(`agent/runner.py:2283-2286`).
+(`agent/runner.py`).
 
-**RECOMMENDATION.** Do not require secrets through this channel if you can avoid it. There
-is currently no way to give a container a third-party API key except by asking the agent's
-operator to put it in that machine's environment and allowlist the name.
+**RECOMMENDATION.** Arrange third-party credentials with the agent's operator through
+declared, allowlisted environment names. `params` is ordinary configuration copied into
+the manifest; it is not a protected secret store.
 
 ### 1.2 The credentials envelope
 
@@ -118,7 +118,7 @@ operator to put it in that machine's environment and allowlist the name.
 `LSPO_CREDENTIALS_FILE`. The **directory** containing it is bind-mounted read-only into
 your container; the file itself is not mounted, deliberately, so that the agent can
 replace it under a running container and you will see the new one
-(`agent/creds.py:10-16`, `agent/creds.py:88-98`).
+(`agent/creds.py`, credential writing and path validation).
 
 Two schemes exist. Object storage, which is what a real deployment uses:
 
@@ -168,8 +168,7 @@ And local paths, which exist only for a single-host demo:
 ```
 
 **BEHAVIOUR, for the table below.** This is what the agent writes, field by field
-(`runners/credentials.py:386-397` for the first, `runners/credentials.py:507-525` for the
-second, constants at `:63-71`). Nothing here is a duty on you; it is what you will find in
+(`runners/credentials.py`, the S3 and local envelope builders and their constants). Nothing here is a duty on you; it is what you will find in
 the file.
 
 | Field | Meaning |
@@ -196,8 +195,8 @@ first worked in every local test and failed on the first real object-storage lau
 the port's `layout`, its `cardinality` and, for a folder port, its whole-tree digest are
 all absent. A node that reads only its credentials therefore cannot verify a tree digest
 and cannot tell a folder port from a file port. Fetch the job description if you need any
-of that. (Compare `runners/credentials.py:378-383` with
-`external/contract.py:337-362`.)
+of that. (Compare `runners/credentials.py` with
+`external/contract.py`.)
 
 **RECOMMENDATION.** Validate the envelope before trusting it: the `schema_version` you
 implement, a `scheme` you support, a `staging.mode` you support, and the presence of the
@@ -207,7 +206,7 @@ frames deep.
 **RECOMMENDATION.** Ignore fields you do not recognise rather than rejecting the
 document. The orchestrator's own parsers are configured to ignore unknown fields
 precisely so that adding a field is not a breaking change
-(`external/contract.py:306-309`). Strict about the fields you know, tolerant about the
+(`external/contract.py`). Strict about the fields you know, tolerant about the
 ones you do not: both, at the same time.
 
 ### 1.3 Where the credentials live, and who may read them
@@ -218,12 +217,12 @@ listable by nobody but the agent — and the credentials file inside it is mode 
 readable by every uid and writable by none. **Both are re-applied on every write**, and
 that matters more than it sounds: a refresh replaces the file with a brand-new one, so a
 permission granted once and not re-granted would let a short job pass and kill a long one
-partway through (`agent/creds.py:79-106`, `CREDS_DIR_MODE`, `CREDS_FILE_MODE`,
+partway through (`agent/creds.py`, `CREDS_DIR_MODE`, `CREDS_FILE_MODE`,
 `JobCredentials.write`).
 
 **BEHAVIOUR.** What keeps that credential off the rest of the machine is not the file's
 mode but the agent's own working directory above the mount, which is owner-only and is
-bind-mounted into nothing (`agent/identity.py:74-75`, `ensure_private_workdir`). The
+bind-mounted into nothing (`agent/identity.py`, `ensure_private_workdir`). The
 protection is an ancestor nobody else can traverse; the leaf is deliberately open, and it
 is open so that your image's user is never the platform's business.
 
@@ -276,7 +275,7 @@ your image user's home directory. `/tmp` is writable by any uid; a home director
 
 **BEHAVIOUR.** `invocation.json` is written by the orchestrator before the job is
 queued, and the writer refuses to publish one larger than 8 MiB
-(`external/contract.py:76`, `external/io.py:148-159`). So it is bounded, and you may rely
+(`external/contract.py`, `external/io.py`). So it is bounded, and you may rely
 on that.
 
 **RECOMMENDATION.** Bound your read anyway: read at most 8 MiB and refuse a longer
@@ -285,9 +284,9 @@ something unexpected.
 
 **BEHAVIOUR.** The current contract version is `1`, and it is also given to you in
 `LSPO_CONTRACT_VERSION`. In the platform's own parsers a missing `schema_version` means
-version 1 (`external/versioning.py:102`), and a `schema_version` that is not a real
+version 1 (`external/versioning.py`), and a `schema_version` that is not a real
 integer, notably JSON `true`, is malformed rather than version 1
-(`external/versioning.py:105-108`). In Python `True == 1`, which is exactly the trap that
+(`external/versioning.py`). In Python `True == 1`, which is exactly the trap that
 check exists to close.
 
 **RECOMMENDATION.** Mirror that in your own reader: refuse a `schema_version` you do not
@@ -299,7 +298,7 @@ document under version 1 rules and produce plausible nonsense.
 
 **RULE, and it governs all three tables in this section.** Every "Type" and "Required" cell
 below is a check in the parser the orchestrator itself uses
-(`external/contract.py:407-492`): a document that breaks one is invalid, and the job does
+(`external/contract.py`): a document that breaks one is invalid, and the job does
 not run. "Required" means the document is invalid without that field. These are not
 descriptions of the usual shape — they are the refusals.
 
@@ -322,7 +321,7 @@ descriptions of the usual shape — they are the refusals.
 | `attempt` | integer >= 1 | **yes** | |
 | `generation` | integer >= 1 | **yes** | fencing token |
 
-An input port (`external/contract.py:337-401`):
+An input port (`external/contract.py`):
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
@@ -333,7 +332,7 @@ An input port (`external/contract.py:337-401`):
 | `objects` | array | no, defaults to `[]` | |
 | `prefix_digest` | 64 hex chars, or `null` | required when `layout` is `"prefix"` | |
 
-An input object (`external/contract.py:315-334`):
+An input object (`external/contract.py`):
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
@@ -345,7 +344,7 @@ An input object (`external/contract.py:315-334`):
 
 **BEHAVIOUR.** A step with no upstream artifacts gets `"inputs": []`, an empty list with
 **no ports at all**, rather than one port with no objects
-(`handlers/steps/external.py:336-337`). Your code must handle a job with no input port
+(`handlers/steps/external.py`). Your code must handle a job with no input port
 present, not merely a port that is empty. A step with no inputs is a legitimate
 source-style step and is not an error.
 
@@ -362,8 +361,9 @@ means somebody's assumption is wrong.
 
 **BEHAVIOUR.** The orchestrator hashed every input when it built the job and pinned the
 result. It never checks what you actually read. **The platform verifies what you wrote,
-never what you read** (`examples/hello-node/node.py:83-87` in the orchestrator says this
-in as many words).
+never what you read** (`handlers/steps/external.py` pins the objects; `pipelines/external_finalize.py`
+verifies the published output). The reference node is maintained in this repository; the
+orchestrator no longer vendors `examples/hello-node/node.py`.
 
 **RECOMMENDATION, and the single most valuable one in this document.** Verify each input
 against its pinned `sha256` and `size` before you act on it, and refuse an input that
@@ -375,12 +375,12 @@ what you wrote.
 
 **BEHAVIOUR.** Two inputs can arrive with the **same** `relpath` and the same `name`. The
 orchestrator sets an input's relpath to the last segment of its URI
-(`handlers/steps/external.py:381`), and nothing de-duplicates within a file-layout port;
-the uniqueness check exists only for folder ports (`external/contract.py:378-383`). Two
+(`handlers/steps/external.py`), and nothing de-duplicates within a file-layout port;
+the uniqueness check exists only for folder ports (`external/contract.py`). Two
 upstream steps that both produce `rows.csv` therefore collide.
 
 **RULE.** Your output relpaths must be unique within one marker
-(`external/contract.py:571-579`).
+(`external/contract.py`).
 
 **RECOMMENDATION.** Derive your output names rather than echoing input names: an index, a
 hash prefix, the port name, anything that cannot collide. A node that writes
@@ -394,7 +394,7 @@ for why holding one in memory is a real risk rather than a style preference.
 on their total. The 1 GiB ceiling in section 3.5 applies to what you **upload**, and the
 container is given no disk quota at all — the agent sets a memory limit, a CPU limit and a
 process limit when it starts your container, and no storage limit
-(`agent/executors/docker_exec.py:248-274`). A node that downloads every input to `/tmp` and
+(`agent/executors/docker_exec.py`). A node that downloads every input to `/tmp` and
 keeps it there can therefore fill the disk of the machine the agent runs on, which is
 somebody else's laptop or server. Delete each input when you are done with it, or stream it
 and never land it at all.
@@ -402,9 +402,9 @@ and never land it at all.
 **BEHAVIOUR, and there IS a ceiling on the NUMBER of them, indirectly.** Every input, with
 its URI, its hash, its size and its relpath, is written into the job description, and the
 writer refuses to publish one larger than **8 MiB** (section 2.1,
-`external/io.py:148-157`). So the input count is bounded after all, by a limit that depends
-on how long your URIs are. Measured against the real models at the commit these documents
-were verified at: about **330 bytes per pinned input object** with 95-character URIs, which
+`external/io.py`). So the input count is bounded after all, by a limit that depends
+on how long your URIs are. Measured against the real models at orchestrator commit
+`6b2ff82c70f26d0ceaa1a841137f1b3cfb08186b` on 2026-08-08 (not re-measured in this audit): about **330 bytes per pinned input object** with 95-character URIs, which
 puts the ceiling at roughly **25,000 inputs** — 25,445 fitted, 25,446 did not. Past it the
 step fails **before the job is created**, at the moment the orchestrator tries to write the
 job description, so no container ever starts and there is nothing for your node to handle.
@@ -413,61 +413,38 @@ downstream of something that produces tens of thousands of files.
 
 ### 2.4 How long you actually get
 
-**BEHAVIOUR.** `timeout_seconds` is what the node's configuration requested. The absolute
-deadline is stamped when a runner **claims** the job, not when the job description was
-written, because the wait for capacity is unbounded and is not the step's to spend. Your
-container cannot observe that deadline. Note also that pulling your image happens after
-the claim, so a slow pull is spent out of your budget.
+**BEHAVIOUR.** The requested runtime budget is `timeout_seconds`. The platform resolves
+it from the pipeline node first, then the revision, then
+`LSPO_EXTERNAL_DEFAULT_TIMEOUT_S` (3600 seconds). Image registration and hosted builds
+both default the revision's budget to **900 seconds**. Reusing an existing revision does
+not change its budget; a pipeline-node override takes precedence
+(`handlers/steps/external.py`, `runners/jobs.py`, `noderegistry/services.py`,
+`noderegistry/building.py`).
 
-**BEHAVIOUR, and the number that matters is 900, not 3600.** The budget is resolved in
-three steps: the pipeline node's own `timeout_seconds` if it sets one, otherwise the
-budget the registered revision declares, otherwise a platform fallback of 3600 seconds
-(`handlers/steps/external.py:221-239`, `runners/jobs.py:67-81`,
-`LSPO_EXTERNAL_DEFAULT_TIMEOUT_S` at `lspo/settings/base.py:562`). **The fallback is
-almost never reached**, because both ways of registering a node write a budget into the
-revision, and both write the same one: **900 seconds** (the setup command,
-`noderegistry/management/commands/external_demo_setup.py:38`, and the Settings screen's
-registration API, `noderegistry/serializers.py:26`). So unless somebody deliberately
-raised it, **the platform starts stopping your container fifteen minutes after the job was
-claimed** — that budget is a real ceiling on how long you may run, even though how long the
-stopping itself then takes is not bounded at all (section 7). The
-agent classifies that stop as a failure rather than a cancellation — but for a container
-that was running when the deadline passed, its report is refused, so the run does not
-become a failed run either: it stays parked at "Waiting for runner" until an operator
-cancels it, and nothing your container produced is collected (section 7, which also names
-the one job that ends differently).
+**BEHAVIOUR.** The deadline starts when the agent **claims** the job. Queueing does not
+consume the budget; preparation after claim, including pulling the image, does. The
+workload receives the requested duration, not the claim time or absolute deadline.
 
-**BEHAVIOUR, and it is why section 4.3 reads the way it does.** The credential
-envelope's own lifetime is also 900 seconds, and it is additionally clamped so that it
-can never outlive the run's deadline (`runners/credentials.py:216-219`). With both
-numbers at 900 the two coincide: on a default registration the first envelope you are
-handed already expires at the deadline, so a node that never re-reads its credentials
-will *usually* not fail visibly on that account — it will simply be terminated. Usually
-and not always, and the exception is worth knowing because it is the well-behaved node
-that meets it: the envelope expires at the moment your container is *asked* to stop, not
-at the moment it dies, and when the stop does arrive politely there is an interval between
-those two — of no guaranteed length, and possibly of none at all (section 7). A node
-that catches the SIGTERM and does what this document recommends — re-read the
-credentials, write the marker last, exit — is making its final upload inside exactly
-that window, and that upload is refused for expired credentials. So the coincidence
-hides the problem from a node that ignores the stop and shows it to a node that handles
-one. Raise the budget (a `timeout_seconds` on the pipeline node, which takes effect
-immediately) and the two come apart at once: credentials still last 900 seconds, the run
-lasts as long as you asked for, and a node that read its credentials once can no longer
-upload anything after the first fifteen minutes. **That is the case worth writing your
-node for**, because it is the one an operator creates the first time a real job needs
-more than a quarter of an hour.
+**BEHAVIOUR.** With the default stop-window settings, reaching the runtime deadline
+starts stopping the workload without immediately withdrawing the agent's permission to
+report. The configured allowances are **180 seconds for stopping** and **60 seconds
+for reporting**. The window ends at the original deadline plus those allowances;
+discovering the deadline late does not restart it. A report accepted inside the window
+can fail the run and salvage a valid marker's objects as diagnostics. This replaces the
+older behavior where the lease ended at the runtime deadline and normal deadline reports
+were refused. See [section 7](#7-cancellation) for the remaining failure cases.
 
-**RECOMMENDATION.** Measure your own elapsed time from process start and aim to finish,
-including uploads and the marker, comfortably inside `timeout_seconds` — the value in the
-job description is the real answer for this run, whatever the defaults are. **Comfortably**
-is doing work in that sentence. The lease that authorises your agent's terminal report is
-shortened to end exactly at the deadline (`runners/reports.py:186`, `:220-222`), and the
-agent still has to join its log threads, confirm your container has stopped and flush your
-last log lines before it reports — so a run that exits a moment before its deadline can
-have its report, and with it its whole delivery, refused for a lease that expired in the
-meantime. The size of that window was not measured; the mechanism is read from the source
-above.
+**BEHAVIOUR.** Credential lifetime is still at most the configured 900-second envelope
+budget, but its upper limit is now the end of the possible stop window, rather than the
+runtime deadline alone (`runners/credentials.py`, `runners/jobs.py`). The agent refreshes
+the file while the job is running. A workload that caches its first envelope can still
+lose upload access after fifteen minutes, including during its final receipt.
+
+**RECOMMENDATION.** Finish work, uploads and the marker comfortably within the requested
+budget. Re-read credentials near their stated expiry and before the marker. The stop
+window is recovery time, not extra work time. The credential expiry can reflect the
+reporting cutoff, but it does not identify the workload's kill cutoff; see
+[section 7](#7-cancellation).
 
 ---
 
@@ -476,10 +453,11 @@ above.
 ### 3.1 Your configuration
 
 **BEHAVIOUR.** `params` in the job description is the only part of the node's
-configuration that ever reaches your code. It is copied verbatim from what the pipeline
+arbitrary configuration that reaches your code. It is copied verbatim from what the pipeline
 author typed, with no filtering and no redaction
-(`external/contract.py:425-426` and `:457`, `pipelines/config_schemas.py`). Everything else about the
-node, including which deployment it points at, stays on the orchestrator's side.
+(`external/contract.py` and `pipelines/config_schemas.py`). Everything else about the
+node is not copied wholesale. The manifest separately includes the identity fields,
+deployment/revision ids and timeout listed in section 2.2.
 
 **RECOMMENDATION.** Validate `params` yourself and fail with a readable message. Nothing
 between the pipeline author and your code checks its shape.
@@ -494,82 +472,60 @@ the daemon's default network).
 are given is what the envelope carries (`agent/README.md`, "Least privilege").
 
 **BEHAVIOUR.** Resource ceilings, applied by the agent to every workload container and
-configurable by its operator (`agent/config.py:123-136`,
-`agent/executors/docker_exec.py:250-262`): 2 CPUs (`LSPO_AGENT_CPUS`), **2 GiB of memory**
+configurable by its operator (`agent/config.py`,
+`agent/executors/docker_exec.py`): 2 CPUs (`LSPO_AGENT_CPUS`), **2 GiB of memory**
 (`LSPO_AGENT_MEMORY`, default `2g`), 512 processes (`LSPO_AGENT_PIDS_LIMIT`), and
 `no-new-privileges`.
 
 ### 3.3 Logging
 
-**BEHAVIOUR.** Your stdout and stderr are merged into one stream, split on newlines, and
-shipped to the orchestrator by the agent (`agent/executors/docker_exec.py:321-363`). They
-appear live in the run view and are written into a durable log file stored with the
-execution when the run ends (`orchestrator.ndjsonl`, attached to the execution as an
-artifact — `pipelines/external_finalize.py:2203-2212`).
+**BEHAVIOUR.** The agent merges stdout and stderr, splits on newlines, and sends the
+result through runner heartbeats. The run view shows those lines live. At termination,
+the collector merges the retained stream with the log already on the execution and
+writes `orchestrator.ndjsonl`; the execution row receives a separately bounded copy
+(`agent/executors/docker_exec.py`, `pipelines/external_finalize.py`).
 
-**BEHAVIOUR, and each of these loses data:**
+**BEHAVIOUR.** These limits can discard output:
 
-* A line longer than **64 KiB** is flushed with a visible truncation marker and **the rest
-  of that line is discarded** (`agent/executors/docker_exec.py:95-99`, `:328-335`). One
-  giant JSON blob on a single line loses its tail.
-* The agent holds at most **2000 lines** per job between heartbeats; when it overflows the
-  **oldest** are dropped and a warning line records how many
-  (`agent/logbuf.py:38-119`, capacity from `LSPO_AGENT_LOG_BUFFER_LINES`).
-* Heartbeats are sent no more often than every **20 seconds** and carry at most **100
-  lines** each. That is a ceiling of five lines a second sustained — a ceiling, not an
-  allowance: a slow beat lowers it, and nothing raises it for longer than a single
-  catch-up beat. Produce more than that on average and you are losing the excess.
-* Each line is cut to **4096 characters** on the way through the agent, and the server
-  **refuses** rather than trims a batch that breaches its own ceilings: at most 100 lines,
-  4096 bytes per line, 128 KiB per batch, 256 KiB per request body
-  (`runners/serializers.py:38-53`, `runners/auth.py:71`). A refused heartbeat costs the
-  lease renewal it was carrying, not just the log lines.
-* The live view keeps only the last **1000** entries — and **so does the durable file**.
-  The lines are held in a buffer that is trimmed to its most recent 1000 entries every
-  time one arrives (`pipelines/log_stream.py:38`, `:329-355`), and the file written at the
-  end of the run is built from that same buffer
-  (`pipelines/external_finalize.py:2173-2200`). A container that prints a hundred thousand
-  lines has lost ninety-nine thousand of them before anything durable is written. **There
-  is no complete copy of your output anywhere.**
-* The copy kept on the execution row itself is smaller again, bounded by both a line count
-  and a byte count, and it keeps the **first** few lines plus the newest that fit, with a
-  marker at the cut saying how many went (`pipelines/external_finalize.py:2215-2300`).
+| Stage | Default limit and result |
+|---|---|
+| Container stream | A line over 64 KiB is truncated and its remaining bytes discarded |
+| Agent buffer | 2000 lines; old entries are evicted, with a warning reporting the gap |
+| Undelivered queue | 1000 entries per job, including the loss warning; when reports are not accepted, oldest pending lines are dropped (`agent/runner.py`, `_retain`) |
+| Normal heartbeat | Every 20 seconds, at most 100 lines; sustained output above about five lines per second can exceed this rate |
+| Agent line | 4096 characters before sending; server limits are measured in bytes |
+| Server request | 100 lines, 4096 bytes per line, 128 KiB of logs, 256 KiB request body |
+| Live stream | Last 1000 entries; earlier entries not already saved elsewhere cannot be recovered by the terminal log writer |
 
-**RECOMMENDATION.** Say the important things once, at the end, in few lines. A step that
-prints one line per record will lose its beginning and will not notice.
+**BEHAVIOUR.** The agent retains pending lines after transport or general API failures,
+checks for lease expiry and retries with at most 1000 pending entries per job. A heartbeat rejected as a bad
+request or oversized payload loses the batch it carried and its progress sample, with an
+explanation in the agent log. **That refused request earns no lease renewal**; dropping
+its payload lets later heartbeats try again without repeating the same refusal. Repeated
+failures can still lose the lease and fence the job. A stale sequence response also earns
+no renewal, but keeps the payload while the agent resynchronizes its counter. Final log
+flushing attempts at most five heartbeats. The durable file receives the whole
+**retained merge**, not a fixed 1000-line file and not a complete transcript.
+Loss notices explain dropped or unavailable lines. Neither a successful log write nor a
+green run proves that every line printed by the workload survived
+(`agent/runner.py`, `pipelines/log_stream.py`, `pipelines/external_finalize.py`).
 
-**BEHAVIOUR.** Your lines are stored as **text**, and control characters are removed from
-them on arrival — every C0 character except tab and newline
-(`runners/reports.py:575-599`, `external/text.py:44` and `:67-81`). The removal is silent and
-nothing is replaced in their place. The practical consequence is colour: an ANSI escape
-sequence loses its leading escape byte and keeps the rest, so a line you meant to print in
-red is stored as `[31mfailed[0m`.
+**BEHAVIOUR.** Control characters other than tab and newline are removed. ANSI color
+escapes therefore leave stray text such as `[31m`; use plain text.
 
-**RECOMMENDATION.** Print plain text with no terminal control of any kind — no colour, no
-progress bar that redraws itself with carriage returns, no spinner. None of it survives,
-and what is left of it is noise in a log somebody is reading to find out what your step
-did.
+**BEHAVIOUR.** The current agent removes exact credential values it holds from workload
+log lines before buffering them (`agent/logbuf.py`, `agent/redact.py`). This is not a
+general filter for arbitrary third-party secrets or every transformed spelling of a
+credential, and the raw Docker log on the host is outside that filter.
 
-**BEHAVIOUR, and it surprises everyone.** Your container's log lines are shipped
-**unredacted**. The agent redacts URLs in messages it composes itself and in the
-completion report's error text (`agent/redact.py`, `agent/runner.py:2111`, `:2129`,
-`:2161`), but the workload's own stdout goes straight into the buffer with no redaction at
-all (`agent/runner.py:2164-2166`).
-
-**RECOMMENDATION, and treat it as non-negotiable even though nothing enforces it: never
-print a presigned URL, a token or a credential.** A presigned URL's query string **is** a
-read credential for that object, and these logs are durable, shown to everyone who can see
-the run, and searchable. Nothing in the platform will stop you or warn you.
-
-**RECOMMENDATION.** This is easier to get wrong than it sounds. Popular HTTP clients put
-the full URL, signature included, into the text of an HTTP error. Catch transport
-exceptions and log your own sentence, with the URL removed or reduced to scheme, host and
-path.
+**RECOMMENDATION.** Never print credentials, presigned URLs or secrets from `params` or
+the environment. Redact HTTP exceptions yourself. Say important things in a few lines;
+upload a structured log file and inventory it when the full account must be retained.
 
 ### 3.4 Progress
 
 **BEHAVIOUR, opt-in.** A single stdout line of exactly this shape is consumed by the agent
-and reported as progress on the next heartbeat (`agent/logbuf.py:34`, `:65-92`):
+and reported as progress on the next heartbeat (`agent/logbuf.py`):
 
 ```
 @lspo:progress {"fraction": 0.4, "phase": "encoding"}
@@ -579,7 +535,7 @@ and reported as progress on the next heartbeat (`agent/logbuf.py:34`, `:65-92`):
 * The rest of the line must be a JSON object with a `fraction` that converts to a float
   between `0.0` and `1.0` inclusive.
 * `phase` is optional, coerced to a string, stripped of control characters and cut to 64
-  characters (`agent/logbuf.py:81-91`, `runners/serializers.py:56-73`).
+  characters (`agent/logbuf.py`, `runners/serializers.py`).
 * A malformed progress line is **not** consumed: it appears in your log as an ordinary
   line. That is deliberate, so a typo is visible rather than silent.
 * Only the most recent sample is reported per heartbeat.
@@ -593,7 +549,7 @@ is the only signal an operator has that a long step is alive.
 ### 3.5 Memory: two defaults that collide
 
 **BEHAVIOUR.** The largest single object you may upload is **1 GiB**
-(`LSPO_EXTERNAL_MAX_OBJECT_BYTES`, default `1024*1024*1024`, `lspo/settings/base.py:581`),
+(`LSPO_EXTERNAL_MAX_OBJECT_BYTES`, default `1024*1024*1024`, `lspo/settings/base.py`),
 enforced by the upload policy itself and re-checked at collection. The default memory
 limit for your container is **2 GiB** (`LSPO_AGENT_MEMORY`, default `2g`).
 
@@ -638,9 +594,9 @@ difference is who was holding the bytes.
 staging prefix. The staging prefix is scoped to this execution, this attempt and this
 generation, and ends in `attempts/<attempt>/gen-<generation>` for exactly that reason: a
 superseded runner physically cannot write into the live attempt's area
-(`external/contract.py:476-492`).
+(`external/contract.py`).
 
-**RULE.** A relpath must be canonical (`external/contract.py:236-283`):
+**RULE.** A relpath must be canonical (`external/contract.py`):
 
 * non-empty, and never starting with `/`;
 * no backslashes;
@@ -663,7 +619,7 @@ document is treated the opposite way; see the note on `error` in section 5.
 
 **RULE.** An **output port name** must be a real name: not empty and not only whitespace
 once trimmed, and free of control characters, by the same definition as above
-(`external/contract.py:218-233`). A port name is an identifier twice over — a downstream
+(`external/contract.py`). A port name is an identifier twice over — a downstream
 step selects its input by matching that string, and the delivered artifact is stored under
 it — so it is held to the same standard as a path.
 
@@ -673,16 +629,16 @@ as the artifact kind a downstream step has to match exactly. This was exercised 
 parser. Trim your own port names.
 
 **RULE.** Relpaths listed under `produced_ports` are held to the full canonical-relpath
-rule as well, not merely to "is it in the inventory" (`external/contract.py:567`). There
+rule as well, not merely to "is it in the inventory" (`external/contract.py`). There
 is no spelling that is legal in one place and not the other.
 
 **RULE.** A relpath is checked twice: once when your marker is parsed, and again when
 collection resolves it against the staging prefix
-(`pipelines/external_finalize.py:1384-1416`). Both refuse traversal.
+(`pipelines/external_finalize.py`). Both refuse traversal.
 
 **BEHAVIOUR.** A relpath containing a `%` or a space behaves differently on the two
 storage backends. Object-store keys are joined raw; local file URIs are percent-quoted per
-segment (`pipelines/external_finalize.py:1363-1381`). This was a real bug: a file named
+segment (`pipelines/external_finalize.py`). This was a real bug: a file named
 `rate%20.csv` was looked for at `rate .csv`.
 
 **RECOMMENDATION.** Keep relpaths to unaccented letters, digits, `-`, `_`, `.` and `/`.
@@ -691,7 +647,7 @@ You gain nothing from an exotic name and you inherit two backends' disagreements
 ### 4.2 Uploading, in object-storage mode
 
 **BEHAVIOUR.** `staging.post` is a presigned form POST policy. Its conditions are
-(`runners/credentials.py:462-472`):
+(`runners/credentials.py`):
 
 * `["starts-with", "$key", "<key_prefix>"]`, so the storage service itself refuses any key
   outside your generation's prefix, and
@@ -718,62 +674,32 @@ the local mode genuinely testable.
 
 ### 4.3 Credentials expire during your run
 
-**BEHAVIOUR.** An envelope is valid for `LSPO_RUNNER_CREDS_TTL_S`, **default 900 seconds**
-(`lspo/settings/base.py:575`), clamped so that it never outlives the job's own runtime
-deadline (`runners/credentials.py:216-219`).
+**BEHAVIOUR.** `LSPO_RUNNER_CREDS_TTL_S` defaults to **900 seconds**. Each envelope is
+limited by that budget and by the launch's stop-window ceiling: the recorded stop
+deadline when there is one, otherwise the runtime deadline plus the configured stop
+allowances. With both stop allowances set to zero, the runtime deadline is again the
+ceiling (`runners/credentials.py`, `runners/jobs.py`).
 
-**BEHAVIOUR, and it is the failure this whole section exists for. A node that reads its
-credentials once cannot upload its outputs, or its own completion marker, after about
-fifteen minutes.** This is the most common way a working node fails on its first long
-job — but only on a job that is *allowed* to be long. Section 2.4 has the arithmetic: a
-node registered the default way is given a 900-second runtime budget, the same 900
-seconds the credentials last, so the two run out together and the container is *asked to
-stop* at the moment its credentials die. That coincidence hides the failure from most
-nodes but not from all of them: being asked to stop is not being dead, and a node that
-handles the stop and writes its marker on the way out is doing that upload *after* the
-deadline, with credentials that expired as it passed (section 2.4, section 7).
-Otherwise the failure appears the first time an operator raises the budget, which is
-exactly when the node is finally being asked to do something substantial. Write for that
-case now; it is not a hypothetical, it is the second week.
+**BEHAVIOUR.** The agent asks for a new envelope within 60 seconds of expiry by default,
+then atomically replaces `creds.json` in its mounted directory. It sends no signal to
+the workload. A process that keeps an old file descriptor or cached document does not
+automatically receive the replacement (`agent/creds.py`, `agent/runner.py`).
 
-**BEHAVIOUR.** The agent asks the orchestrator for a fresh envelope when the current one
-is within 60 seconds of expiring (`LSPO_AGENT_CREDS_REFRESH_MARGIN_S`,
-`agent/creds.py:107-115`) and replaces `creds.json` atomically underneath you, by writing
-a new file and renaming it over the old one (`agent/creds.py:90-98`). **You are not
-signalled.** The directory is mounted rather than the file precisely so that the
-replacement is visible to a process that reads the path again.
+**BEHAVIOUR.** Replacing the envelope does not revoke its previously issued URLs. Reads
+can outlive the envelope's conservative expiry because the signer dates them after
+resolving credentials; the POST policy's expiry is computed before signing. This is not
+a reason to extend a workload's own cached lifetime (`runners/credentials.py`).
 
-**BEHAVIOUR.** Installing a refreshed envelope does **not** revoke the URLs from the old
-one. A presigned URL stays valid until its own expiry, whatever happens to the file it
-came from.
+**RECOMMENDATION.** Reopen `LSPO_CREDENTIALS_FILE` at or near `expires_at`, and before
+the final marker. On an unambiguous expiry refusal, reload and retry once **only if the
+envelope's contents changed**. Object identity is not a useful comparison: every JSON
+parse creates a new object. A transport failure after an upload began is ambiguous;
+blindly retrying may overwrite a write the store already accepted.
 
-**RECOMMENDATION.** Respect the envelope's stated `expires_at`: re-read the credentials
-file when you are at or near it, and before writing the marker at the end of a long run.
-Re-reading before literally every transfer is legal but unnecessary, and a caching
-implementation that watches `expires_at` is perfectly correct.
-
-**RECOMMENDATION.** Recover from a refusal. On an unambiguous expiry or authorization
-rejection, re-read the credentials file and retry **once, only if the envelope actually
-changed**. If it did not change, fail transiently rather than looping. Never blindly
-retry an ambiguous POST transport failure: the upload may already have been accepted.
-
-**RECOMMENDATION, and it is where the obvious implementation goes wrong.** "Did the
-envelope change?" is a question about the document's **contents**, not about the object
-your program is holding. Re-reading the file parses fresh objects every time, so a
-comparison by object identity — Python's `is`, JavaScript's `===` on the parsed result —
-is always "different", and the guard you thought you wrote never fires: it retries on
-every refusal, including the ones where nothing changed. Compare the documents themselves,
-or the part of them that actually grants access (`staging.post.fields`, which carries the
-signature). `expires_at` alone is the weakest of the three, because it is clamped to the
-run's deadline (section 2.4) and two envelopes issued near the end of a run can state
-almost the same moment.
-
-**BEHAVIOUR, worth knowing when you debug a clock problem.** A presigned **GET** can
-outlive the `expires_at` the envelope states, by up to the budget that was left when it
-was signed, because credentials resolve inside the signer before the expiry date is
-stamped. The upload **POST** policy cannot: its expiry is computed before signing
-(`runners/credentials.py:187-210`). So treat `expires_at` as exact for writes and as a
-lower bound for reads.
+**BEHAVIOUR.** The runtime stop window permits credential refresh while the same agent
+still holds a valid lease, but it does not revive a lost lease or let an operator-cancelled
+launch regain authority. Read [section 7](#7-cancellation) before relying on uploads
+after a stop.
 
 ### 4.4 `result.json`
 
@@ -781,7 +707,7 @@ lower bound for reads.
 the contract's own `read_result` anywhere outside the contract package. The run's metrics
 come from the completion marker and the objects that were actually published: the
 execution records `objects_published`, `bytes_published` and `exit_code`
-(`pipelines/external_finalize.py:2112-2118`).
+(`pipelines/external_finalize.py`).
 
 **BEHAVIOUR.** Because nothing reads it, the contract's 1 MiB ceiling for this document is
 not enforced against you. It becomes an ordinary object of yours, subject to the 1 GiB
@@ -789,8 +715,7 @@ per-object ceiling like any other.
 
 **BEHAVIOUR.** If you list `result.json` in the marker's `objects` it is copied and
 verified like any other object. If you also claim it under an output port, it becomes a
-downstream artifact under that port's name. Both are legal. The orchestrator's own test of
-the example node expects exactly that.
+downstream artifact under that port's name. Both are legal. This repository's reference node claims it under `report`.
 
 **RECOMMENDATION.** If you write one, claim it under a deliberately separate port, for
 example `report`, rather than under the port your real output goes to. Multiple output
@@ -804,12 +729,13 @@ downstream step receives it as if it were a delivery.
 the marker's `objects`, and it is published under the name you chose. The orchestrator
 writes its own record of the run to a **sibling** prefix under a different filename
 (`orchestrator.ndjsonl`), so it cannot collide with yours
-(`pipelines/external_finalize.py:2678-2699`). Nothing requires you to write one.
+(`pipelines/external_finalize.py`). Nothing requires you to write one.
 
 **RECOMMENDATION.** If your step's own output matters, write it as a file and inventory
-it. The platform's record of your stdout is a tail of the last 1000 lines and nothing more
-(section 3.3); a file you upload and claim under a port is kept whole, verified, and
-delivered.
+it. The platform's record merges the retained live tail with saved execution lines and
+collection findings; it is not a complete stdout transcript (section 3.3). A file you upload
+and inventory can be kept whole and verified when collection runs; claim it under a port
+to offer it downstream on success.
 
 ---
 
@@ -817,7 +743,7 @@ delivered.
 
 **BEHAVIOUR.** The marker is `__lspo_complete.json`, read from the **root** of your staging
 prefix — collection joins that prefix to the literal filename and reads whatever is there
-(`external/io.py:221-229`). It is the terminal receipt for the attempt.
+(`external/io.py`). It is the terminal receipt for the attempt.
 
 ```json
 {
@@ -837,7 +763,7 @@ prefix — collection joins that prefix to the literal filename and reads whatev
 ```
 
 **RULE, for the table below.** Every "Type" and "Required" cell is a refusal the marker
-parser makes (`external/contract.py:519-568`); a marker that breaks one is not read at all.
+parser makes (`external/contract.py`); a marker that breaks one is not read at all.
 [CONFORMANCE.md](CONFORMANCE.md#validating-your-own-marker) lists every one of those
 refusals individually, enumerated by exercising the parser.
 
@@ -852,50 +778,50 @@ refusals individually, enumerated by exercising the parser.
 | `exit_code` | integer, may be negative | **no** | a diagnostic echo |
 | `objects` | array of `{relpath, sha256, size}` | no, defaults to `[]` | relpaths unique |
 | `produced_ports` | object mapping port name to array of relpaths | no, defaults to `{}` | names and relpaths are both validated; see 4.1 |
-| `error` | string or `null` | **no** | quoted into the failure reason, cut at 500 characters (`pipelines/external_finalize.py:181`, `:1618-1629`). Control characters are removed from it |
+| `error` | string or `null` | **no** | quoted into the failure reason, cut at 500 characters (`pipelines/external_finalize.py`). Control characters are removed from it |
 
 **RULE.** On a run the platform classifies as **succeeded**, which normally means your
 process exited 0 and nothing cancelled or timed it out, a marker is **required**. A missing
 marker after a reported success fails the execution: there is no inventory, so there is
-nothing to publish and nothing to verify (`pipelines/external_finalize.py:1083-1087`).
+nothing to publish and nothing to verify (`pipelines/external_finalize.py`).
 
 **RULE.** On such a run the marker's own `status` must be `"succeeded"`. A process that
 exits 0 while its marker says `failed` fails the execution
-(`pipelines/external_finalize.py:1088-1092`).
+(`pipelines/external_finalize.py`).
 
 **RULE.** `execution_id`, `attempt` and `generation` must equal the launch the platform
-believes it is collecting (`pipelines/external_finalize.py:1093-1099`). Copy them from the
+believes it is collecting (`pipelines/external_finalize.py`). Copy them from the
 job description, not from memory of an earlier attempt. A mismatch is refused with "a
 receipt from a superseded or unrelated run must never be collected as this one".
 
 **RULE.** Every relpath in `produced_ports` must appear in `objects`
-(`external/contract.py:582-606`). The inventory is what carries the hash and the size.
+(`external/contract.py`). The inventory is what carries the hash and the size.
 
 **RULE.** Within one port a relpath may appear only once; the parser refuses a repeat
-(`external/contract.py:594-605`). The **same relpath in two different ports is legal** and
+(`external/contract.py`). The **same relpath in two different ports is legal** and
 is sometimes what you want.
 
 **RULE.** Relpaths in `objects` are globally unique across the whole inventory
-(`external/contract.py:571-579`). One file, one entry.
+(`external/contract.py`). One file, one entry.
 
 **RULE.** Every port name is non-empty after trimming and carries no control characters,
 and every relpath under a port is canonical — the same rules as section 4.1
-(`external/contract.py:218-233`, `:567`).
+(`external/contract.py`).
 
 **RULE.** The marker document must be at most **8 MiB**; the reader refuses a larger one
-(`external/contract.py:77`, `external/io.py:162-172`). For a very wide batch, that bounds
+(`external/contract.py`, `external/io.py`). For a very wide batch, that bounds
 how many objects one attempt can inventory.
 
 **RULE.** Every `sha256` is exactly 64 lowercase hexadecimal characters, with no `sha256:`
-prefix, no uppercase and no trailing newline (`external/contract.py:129`, matched with
+prefix, no uppercase and no trailing newline (`external/contract.py`, matched with
 `fullmatch` because in Python a `$` anchor also matches before a trailing newline).
 
 **RULE.** Every integer is a real JSON integer. `"1"`, `true` and `1.0` are all rejected,
-and every id and counter must be at least 1 (`external/contract.py:297-303`).
+and every id and counter must be at least 1 (`external/contract.py`).
 
 **BEHAVIOUR.** `error` is **cleaned, not refused**: control characters other than tab and
 newline are removed from it as the document is parsed
-(`external/contract.py:608-636`). The asymmetry with names (section 4.1) is deliberate.
+(`external/contract.py`). The asymmetry with names (section 4.1) is deliberate.
 Nothing resolves anything by your error message, so cleaning it keeps your account of the
 failure, which is the most useful thing anybody reads; cleaning a *name* would point at a
 different file. Note the practical reason it is cleaned at all: the text is written into a
@@ -910,16 +836,15 @@ already exited, so the platform never observes the order in which you wrote anyt
 node that writes the marker first, then finishes every object it named before exiting,
 succeeds exactly like a well-behaved one. What collection does instead is check the
 **consequences** — it copies every object the marker names and re-reads it, holding it to
-the hash and size you promised (`pipelines/external_finalize.py:1103-1152`, `:1297-1323`).
+the hash and size you promised (`pipelines/external_finalize.py`).
 A marker written before its objects were finished fails there, as a size or hash mismatch.
 
 The reason to do it anyway is what the invariant buys: **the marker's existence is the
 only thing that distinguishes a half-finished run from a complete one.** Write it last and
 that whole class of failure is impossible rather than merely detected. The contract module
 itself states it as an instruction to you — "the step writes it **strictly last**"
-(`external/contract.py:519-526`) — and the orchestrator's test suite even asserts the
-order for the one node it ships (`tests/test_hello_node_example.py:107-115`). Neither of
-those is a check on *your* node.
+(`external/contract.py`) — and this repository's harness records the upload order for the reference node
+(`tests/test_marker_and_ordering.py`). Neither is a check on an arbitrary deployed node.
 
 **A general lesson, worth more than this one rule — and it is background, about how to read
 these documents rather than about the platform.** An instruction written in a source file,
@@ -933,7 +858,7 @@ behind it.
 **BEHAVIOUR.** An object you inventory but claim under no port is copied and verified, and
 then **not offered downstream** on a successful run. It is not lost, but the execution's
 artifact list is built from `produced_ports` alone
-(`pipelines/external_finalize.py:2043-2065`), so an unclaimed object does not appear
+(`pipelines/external_finalize.py`), so an unclaimed object does not appear
 there. If you want it retrievable through the normal path, claim it under a port.
 
 **RECOMMENDATION.** Set `exit_code` in the marker to the code your process is actually
@@ -947,33 +872,22 @@ reason, and every object you inventoried is salvaged through the same verified p
 (`external/README.md`, "A failed or cancelled marker is read, not discarded"). It is not
 required, and a failing node that writes nothing loses all of that.
 
-**BEHAVIOUR, and it decides when the recommendation above actually pays.** That marker
-is read on the paths where a terminal report for the job goes out **and is accepted**,
-and those are narrower than they look. Two of them are yours: a failure of your own, and
-a cancellation your node declared itself by exiting 20 without being asked. A third is
-not yours at all — three of the six fences leave the agent able to report, and where
-such a report is accepted, collection reads whatever valid marker was already in staging
-(section 7.1). It is **not** read when an **operator** cancels a step whose container is
-still running, and it is **not** read when a running container is stopped by the
-**runtime deadline** — on both of those the report that would have armed collection is
-refused, for two different reasons set out in section 7. Write the marker anyway; it
-costs one document, it is what makes the two recoverable cases recoverable, and it is
-what those other two paths will read once they are fixed.
+**BEHAVIOUR.** Salvage requires a terminal report that actually arms collection. Your
+own failure or exit 20 can do that, as can a runtime-deadline stop whose report is
+accepted inside the configured stop window. Operator cancellation of a running launch
+still does not collect its output. Fencing may prevent reporting entirely; see section 7.
 
-**BEHAVIOUR, and a quiet way to lose everything.** A failed or cancelled marker is held to
-the same identity check and the same document rules. "Best effort" applies to which objects
-survive, not to whether the document is valid. But on this path an unreadable, invalid or
-mismatched marker is **ignored silently** rather than reported
-(`pipelines/external_finalize.py:1487-1520`): the run fails with a generic reason, your
-`error` text never appears, and nothing you produced is salvaged. So a malformed failure
-marker costs you exactly the information it existed to carry, and says nothing about
-itself.
+**BEHAVIOUR.** Failure and cancellation markers must still parse and match this
+execution, attempt and generation. The collector now distinguishes an absent marker,
+a storage read failure, an invalid document and a marker from another run, and records
+the explanation in the failure reason and log. A document that cannot be verified
+publishes nothing (`pipelines/external_finalize.py`, `_look_for_this_attempts_marker`).
 
 ---
 
 ## 6. Exit codes
 
-**BEHAVIOUR.** The classes (`external/contract.py:86-120`):
+**BEHAVIOUR.** The classes (`external/contract.py`):
 
 | Code | Class | Meaning |
 |---|---|---|
@@ -990,7 +904,7 @@ crash is far more often an accident than a decision.
 **BEHAVIOUR, and you must hear both halves of this.** Exit code 10 declares permanent,
 do-not-retry intent, and **nothing acts on it today**. There is no automatic retry engine
 for external jobs; every failed attempt is recorded as transient regardless of the code
-your process returned (`pipelines/external_finalize.py:1645-1649`, `:1675`), and an
+your process returned (`pipelines/external_finalize.py`), and an
 operator retries by hand from the run view. A future automatic retry path may honour exit
 10 without any change to your node.
 
@@ -1001,8 +915,8 @@ that is wrong. Treating 1 and 10 as interchangeable produces images that misbeha
 day retries land.
 
 **RECOMMENDATION.** In-node retry of a transient storage failure is optional. The
-contract's own mechanism for "try this again" is exit code 1, which asks the platform to
-retry the attempt. What is genuinely wrong is misclassifying: reporting a transient
+contract's exit code 1 records retryable intent; the current platform still requires an
+operator to retry the attempt. What is genuinely wrong is misclassifying: reporting a transient
 storage condition as permanent tells the platform never to retry something that would
 have worked.
 
@@ -1010,537 +924,134 @@ have worked.
 
 ## 7. Cancellation
 
-**BEHAVIOUR, and it governs the whole of this section, section 7.1, and every statement
-about stop timing anywhere in these documents. No interval on any stop path is
-guaranteed.** Not the gap between your deadline passing and your container being signalled.
-Not the time between a SIGTERM and the SIGKILL behind it. Not how much of a grace period is
-left by the time you can use it. Not how soon a fence arrives. Not how long two writers can
-overlap on one staging area. Each of those is a timer of ours plus an unknown quantity of
-everything we do not control: an inner poll that has to come round again before anything is
-noticed; a call into the docker daemon that takes as long as the daemon takes; an HTTP
-request that can sit inside its own timeout and then be retried; a periodic pass that can
-fail and simply be tried again next time, with nothing capping how often that repeats; and
-a kill that can fail outright and leave your container running. The timers are real, and
-each is written down below where it is a setting of ours. **What none of them is, is a
-bound.**
+**BEHAVIOUR.** Runtime expiry, an operator pressing Cancel, and loss of authority
+(fencing) have different paths. A local SIGTERM test exercises the node's handler; it
+does not establish which path a deployed platform takes or what collection retains.
 
-**RECOMMENDATION, and it is what that statement is for.** Design for a stop whose warning
-may be **arbitrarily short — no usable warning at all — or arbitrarily long**. In practice:
-schedule nothing important for after the SIGTERM; give every network call a timeout short
-enough that a stop lands *between* calls rather than inside one; and never assume that a
-container which has been asked to stop has stopped.
+### Runtime deadline
 
-This paragraph is **background**, about these documents rather than about the platform.
-The statement above is about **how long something takes**, and every figure of that kind
-in these documents is typical rather than bounded. It is not about **values the platform
-stamps or enforces**, which are exact and are meant to be reasoned with: the runtime budget
-(section 2.4), the deadline after which your upload credentials stop working (section 4.3),
-the lease stamped when your job is claimed (below), the ceiling on how many inputs fit in
-one job description (section 2.3). The rest are **settings**, quoted so that you can find
-them and an operator can change them — how often a heartbeat is attempted, how often the
-agent reconciles. A setting tells you how often something is tried, never how long it
-takes. Earlier drafts quoted figures for the durations too; each review round falsified
-another one, so they have been removed rather than hedged, and the passages below inherit
-this statement instead of repeating it.
+**BEHAVIOUR.** The default runtime stop window is **180 seconds for the workload to
+stop plus 60 seconds for the agent to report** (`LSPO_EXTERNAL_STOP_GRACE_S` and
+`LSPO_EXTERNAL_STOP_MARGIN_S`). It ends at the original runtime deadline plus those
+durations, even if the first heartbeat notices expiry late. Heartbeat renewal, signing
+and terminal reporting are allowed within that window while the same lease remains
+valid (`runners/jobs.py`, `runners/reports.py`, `runners/credentials.py`).
 
-**BEHAVIOUR, and it is the next thing to know, because the natural guess is wrong.**
-Two different events stop a container that has not finished, and **neither of them reliably
-preserves anything your node writes on the way out**. An **operator pressing Cancel**
-usually does not reach your process at all: in the ordinary case your container is killed
-outright, with no signal it can catch. The **runtime deadline** does normally begin as a
-polite stop — but the grace it advertises is cut short by the platform's own next
-heartbeat, and the terminal report that would have made your marker count is refused. Both
-are set out below; a third way to be stopped, fencing, is section 7.1.
+**BEHAVIOUR.** The agent watches the runtime deadline locally after preparation and also
+receives stop instructions through heartbeats. It sends SIGTERM, keeps the heartbeat
+thread running, and sends a kill when the remaining workload grace is exhausted.
+New instructions can shorten an already running grace. They cannot restart it or extend
+it past the recorded cutoff (`agent/runner.py`, `_await_exit`, `_signal_the_container`,
+`_enforce_the_grace`, `_remaining_grace`). Older servers, or a server advertising no
+window, use the executor's 30-second blocking stop fallback.
 
-**BEHAVIOUR, the local half of the deadline.** The agent watches the clock itself, in the
-same loop that waits for your container, and when it notices the deadline has passed it
-asks docker to stop the container: SIGTERM, then a SIGKILL from docker when the stop
-timeout runs out. That timeout is **30 seconds**, and it is the agent's own constant rather
-than anything docker chose — the agent's stop helper defaults to it and both callers pass
-nothing (`agent/executors/docker_exec.py:405-415`, called from `agent/runner.py:2314` and
-`:2324`). Read it as the **ceiling on the polite phase, not as a grace you are given**:
-everything below is about how much of it you actually get, and the answer is that nothing
-guarantees you any of it. Nothing has to arrive from anywhere for the stop itself to
-happen, so it fires even when the
-orchestrator is unreachable. *When* it notices is a different question, and the answer is
-the one at the top of this section: the check happens between slices of a poll, and each
-slice asks the docker daemon about your container and waits for the daemon's answer
-(`agent/executors/docker_exec.py:365-401`). This was **verified by running the agent**
-against a fake daemon: the container was politely stopped rather than killed, and the run
-was then classified `failed`.
+**BEHAVIOUR.** A deadline stop is classified as **failed**, before the process exit
+code is considered. If the report is accepted, collection reads a valid marker and
+salvages verified objects as diagnostics, with no downstream output port. If the agent
+cannot report before its authority expires, the run may remain at **Waiting for runner**:
+there is still no general queue/lease watchdog to finish it. Disabling both stop
+allowances restores the older behavior where deadline reports lose that extra window.
 
-**BEHAVIOUR, and it is the boundary of that watch, which everything said about the deadline
-below inherits.** The loop holding that clock check is entered only after the agent has
-finished getting the job ready. Writing your credentials file, fetching the job
-description, pulling your image and creating the container all happen first, and nothing in
-that stretch consults the deadline at all (`agent/runner.py:2093-2094`: preparation, and
-then the wait). So what follows is an account of a job whose **container was already
-running** when the deadline passed. A job still being prepared when its budget runs out ends
-differently, and that case is set out below, once the ordinary one has been described.
+**BEHAVIOUR.** Preparation consumes the budget after claim, and the normal local
+deadline loop begins only after preparation. A slow image pull or preparation failure
+can therefore exhaust the lease or reporting window before ordinary stop handling
+begins. The stop window does not make an unavailable agent or daemon recover automatically.
 
-**BEHAVIOUR.** A container stopped for its deadline is classified `failed`, not
-`cancelled`, and that question is asked before your exit code is looked at
-(`agent/runner.py:2332-2333`), so nothing your process exits with can turn it into a
-cancellation. On a default registration the deadline is the fifteen-minute mark; see
-section 2.4.
+### Operator cancellation
 
-**BEHAVIOUR, and this is where the grace goes.** The agent's heartbeat thread
-keeps beating while that stop is in progress — every **20 seconds** by default
-(`agent/config.py:123`). The orchestrator refuses the first heartbeat sent after the
-deadline, with a code of its own that means exactly "stop the container and report the job
-as finished" (`runners/reports.py:80-85`, `:183-185`). The agent cannot tell that code
-apart from having lost the job altogether: its client turns **every** 409 answer but one
-into the same "lease lost" error (`agent/client.py:532-537`), and the agent's response to a
-lost lease on a heartbeat is to **fence** the job — an immediate SIGKILL, and no terminal
-report at all (`agent/runner.py:2465-2466`, `:2739-2746`, `:2810-2815`). **Verified by
-running the agent** against a fake orchestrator answering heartbeats that way: the
-container was killed outright, never politely stopped, and no completion was ever sent.
+**BEHAVIOUR.** Pressing Cancel on a running external execution still sets its cancel
+flag and terminalizes its launch in the same transaction. It does **not** open the
+runtime stop window (`pipelines/cancellation.py`, `_cancel_external_work`). The next
+heartbeat ordinarily receives a lost-lease answer, so the agent fences the container.
+Only a heartbeat that renewed before the cancellation transaction and read the flag
+after it can request a polite stop.
 
-**BEHAVIOUR, so the grace is not the stop timeout the agent asked docker for — it ends at
-the next heartbeat.** A heartbeat that lands before the agent's watch loop has noticed the
-deadline kills your container with **no SIGTERM at all**. One that lands after it leaves you
-however much of the interval happens to remain, which is not a quantity anything guarantees
-you (top of this section). The one case in which the whole of the stop timeout really is
-yours is an orchestrator the agent cannot reach — and that is precisely the case in which
-nothing you write can be reported or collected either.
+**BEHAVIOUR.** Neither branch collects the running workload's marker or objects. A
+later terminal report is acknowledged as already finished and does not arm collection.
+The cancellation path persists the log it has received. If collection was **already in
+progress** when cancellation arrived, it may finish and attach verified objects as
+diagnostics; it never sends them downstream (`pipelines/cancellation.py`,
+`runners/reports.py`, `pipelines/external_finalize.py`).
 
-**BEHAVIOUR, and it is why the marker often cannot even be written.** Your upload
-credentials expire at the deadline, not at their own stated lifetime: the envelope is
-clamped so that nothing in it outlives the run's budget (`runners/credentials.py:213-219`),
-and asking for a fresh one past the deadline is refused outright (`runners/reports.py:712`,
-`runners/credentials.py:303-309`). So an object — or a marker — that you first try to
-upload *after* the SIGTERM is generally rejected by the storage service, and the handler's
-last step fails with an expiry error. See section 4.3.
+### What your handler can do
 
-**BEHAVIOUR, and it is the part that decides whether any of this pays.** Even if your
-process wins the race, exits cleanly inside the grace and does get a valid marker into
-staging, **the marker is not collected**. Collection is armed by an accepted terminal
-report and by nothing else. The last heartbeat before the deadline shortened the job's
-lease to end exactly at the deadline (`runners/reports.py:186`, `:220-222`), and the
-completion endpoint refuses a report whose lease has run out
-(`runners/reports.py:396-403`) — so the report that would have armed collection is turned
-away. The agent also tries to flush its last log lines through a heartbeat before reporting
-(`agent/runner.py:2739-2740`, `:2787-2794`), and if it has any left, that flush is refused
-the same way and fences the job before the report is even attempted. **Verified against the
-orchestrator's own API**: a heartbeat near the
-deadline came back with the lease shortened to exactly the deadline; the next one was
-refused; the completion after it was refused too; the platform's record of the job was left
-in a live state, and the field that arms collection was never stamped.
+**BEHAVIOUR.** An exec-form `ENTRYPOINT` normally makes your program **PID 1** inside
+the container: the agent overrides neither the entrypoint nor command and requests no init
+helper (`agent/executors/docker_exec.py`, container creation options). Linux treats the
+PID namespace's init process specially: a SIGTERM with the default disposition is ignored
+unless the program installs a handler. A node without one can continue its batch until
+the grace expires and it is killed. The original 2026-08-08 documentation recorded that
+adding a handler to the example made it exit on SIGTERM; that historical experiment was
+not repeated for this audit. The current Docker conformance suite separately exercises
+the reference node's signal handling.
 
-**BEHAVIOUR, and it is what an operator sees.** Nothing else finishes the job either. The
-sweep that rescues interrupted collections only looks at attempts that were already armed,
-and there is no lease or runtime watchdog at all (`runners/reports.py:156-160`). So a run
-whose container was stopped by its deadline stays parked at **"Waiting for runner"** until
-somebody cancels it — and cancelling collects nothing either. That is the outcome to plan
-for; it is what a step whose container overruns its budget actually gets.
+**RECOMMENDATION.** Install a SIGTERM handler, stop accepting new work, keep the object
+inventory available to the failure path, reload credentials, and attempt one final
+`cancelled` marker before exiting 20. Register each object before its upload starts:
+the store may accept the bytes even if the client never receives an acknowledgement.
+A failed or absent object is skipped during salvage; an unlisted object is never examined.
 
-**BEHAVIOUR, the exception, and it is a race rather than a way out.** "Parked" describes a
-container that was running when the deadline passed. It is not what happens to every job
-that outlives its budget, because three separate things have to be in place before the
-refusal above can bite, and each of them arrives only after preparation. The deadline is
-watched only once the agent is waiting on your container (above). The lease handed out when
-the job was claimed runs **300 seconds** from the claim and is **not** shortened to a
-smaller runtime budget — only a heartbeat does that, and the heartbeat thread is started by
-the last line of preparation (`runners/claim.py:713` with `runners/jobs.py:44-46`;
-`runners/reports.py:186`; `agent/runner.py:2170-2174`). And the endpoint that accepts a
-terminal report tests the lease and never the deadline (`runners/reports.py:396-403`). So a
-job with a budget under five minutes that spends longer than its whole budget getting ready
-— a slow image pull is the realistic way — and then fails there, before its first
-heartbeat, sends a terminal report that **is accepted**: the run finishes as failed instead
-of parking, and collection is armed (`runners/reports.py:433`). That holds only while the
-claim's own lease is still alive. Preparation that drags past the lease itself, rather than
-merely past a smaller budget, is refused like any other expired-lease report
-(`runners/reports.py:396-403`) and parks like the ordinary case. Note what the arithmetic
-requires: on a **default** registration the budget is 900 seconds, which is longer than the
-lease, so this cannot arise at all — it needs a node whose `timeout_seconds` was
-deliberately set low. This one is read from the source rather than executed, and it is not a
-behaviour to build on. It is here because "a deadline never reports and always parks" would
-be a false description of the platform, and because it is why the paragraph above says "a
-container that was running" rather than "a job that ran out of time".
+**BEHAVIOUR.** The agent sets the nine bootstrap variables in section 1.1; none gives
+the workload its absolute kill cutoff. The heartbeat's stop instruction reaches the
+agent and is not forwarded into the credentials or invocation. The envelope's
+`expires_at` is clamped to the earlier of its own lifetime and the reporting-window
+ceiling; signing may conservatively understate it. Near the end it can therefore
+reflect the reporting cutoff, while earlier envelopes expire sooner and can be
+refreshed. That value does not identify the workload's kill cutoff, which is earlier
+than the reporting cutoff by the configured margin (60 seconds by default), and it is
+not a stop-timing contract (`runners/credentials.py`, `runners/jobs.py`).
 
-**BEHAVIOUR, and it is wider than the exception above — it holds for every job that
-fails in preparation, whatever the budget.** What an armed collection then finds is not
-"nothing" by default; it depends on where in preparation the job died, and "it failed
-while getting ready" does not settle whether a container of yours was running, because
-preparation spans both sides of the container's existence. (The budget arithmetic above
-decides only whether the *deadline* can be involved. A preparation failure needs no
-deadline to be reported and accepted — it is the ordinary way a job that cannot run is
-written down.) The order is: check the contract version, write your credentials file,
-read the job description, **start the container**, then start the agent's log thread,
-then start its heartbeat thread (`agent/runner.py:2144-2174`, with the container start
-itself at `:2235`). Fail in the first three — an unsupported contract version, a
-credentials refusal, an unreadable job description — and on a job this agent started
-itself there genuinely is nothing to read: no container of yours ever ran, and no marker
-exists. Fail in the last two and the container is **already running**. The step between
-those two groups, starting the container, belongs to neither: a failed image pull leaves
-nothing behind, but a start that *raises* may still have left a container created and
-running. The agent knows that and says so in its own code — it records that it tried
-**before** it calls the daemon, precisely so that the terminal report goes and makes sure
-(`agent/runner.py:2216`, `:2778-2779`). That teardown usually settles it; it is not
-certain to, because a kill the agent cannot confirm ends nothing and goes into the ledger
-described further down. Starting a thread is an ordinary operation that fails on a busy
-host, and the agent treats that as a real state rather than a theoretical one, in its
-own words "a state a busy agent host genuinely reaches" (`agent/runner.py:1084`,
-`:1825`). Such a failure lands before the first heartbeat, so the claim's own
-five-minute lease has not been shortened and the report is accepted; the agent stops the
-container first and reports afterwards (`agent/runner.py:2741-2746`), and the collection
-that report arms reads any valid marker for this attempt that is already in your staging
-area. **Do not assume there is nothing there because the container had only just been
-started.** The single call the agent makes both creates your container and starts it, so it
-returns a handle to something that is **already running** (`agent/executors/docker_exec.py:223`),
-and it goes on running through everything the agent does afterwards. A short job can finish, and write its marker, in that stretch. A
-container the agent **picked back up** rather than started is the same situation with more
-of it visible: a forced agent shutdown deliberately leaves your container running for the
-next agent to adopt (section 7.1), and that container may be minutes into its work and may
-already have written its marker.
+**BEHAVIOUR.** The configured 180 seconds is not a fresh allowance every workload can
+assume at SIGTERM. Late delivery, lost authority, a daemon failure or a hard kill can
+leave less time or none. No wall-clock completion bound is guaranteed by those settings.
 
-**BEHAVIOUR, and it is the sharpest edge of the previous paragraph.** On a job the agent
-picked back up, the container is running for the *whole* of preparation, including the
-first three steps. A failure there that the agent can still report from where it stands is
-written down as a job that could not run, and there are more of those than the obvious
-list suggests: an unsupported contract version, an unreadable job description, the one
-credentials refusal that names the **tenant** rather than the agent — and, in addition,
-**any unexpected error at all in that stretch**, because the job thread ends in a catch-all
-whose own comment is "a crashed job thread must still report"
-(`agent/runner.py:2125-2133`). Writing your credentials file is the clearest instance: it
-is an ordinary file write on the agent's disk, it fails on a full disk like any other, and
-that failure is nobody's special case — it lands in the catch-all and is reported. Because
-the agent stops a container only when it recorded an attempt to
-get hold of one, and that record is written inside the very step this failure happened
-before (`agent/runner.py:2216`, `:2778-2779`), yours is not stopped. The run is declared
-over, collection is armed, and your process is still running and still writing into the
-same staging area. It is here so that "the job failed before anything started" is not read
-as a guarantee that nothing of yours was running. Read from the source, not executed.
-
-**BEHAVIOUR, and it is what narrows that overlap.** Two things make it rarer and one makes
-it visible. It needs an adopted container that is still **running**: adoption picks up the
-container of that name whatever state it is in (`agent/executors/docker_exec.py:276-300`),
-and one that had already exited collides with nothing. It needs a failure of the reportable
-kind above: a lost lease, or a refusal aimed at the **agent's own identity**, fences instead
-— and a fence addresses the container **by name** rather than by the handle this job happens
-to hold, so it stops yours even though nothing had been recorded about it
-(`agent/runner.py:2113-2116` and `:2553-2589`; `:1690-1767` for the identity case, which
-does the same for every container on the machine). Your node is also not blind to it:
-finishing a job is followed by the agent deleting that job's credentials directory
-(`agent/runner.py:2749`, `agent/creds.py:117-130`), so the file at `LSPO_CREDENTIALS_FILE`
-disappears underneath a container that is still running. A refresh replaces that file by
-renaming a new one over it and never leaves it missing (section 4.3), so "it is not there"
-is not a refresh caught half-way — it is this.
-
-**BEHAVIOUR, and it is what ends the overlap — which is not a clock.** What finally stops
-the abandoned container is the agent's periodic **reconciliation**: it re-reads the
-orchestrator's list of the jobs it holds, and a container this agent owns that a complete
-list does not name is killed (`agent/config.py:124`, `agent/runner.py:1019-1035`,
-`:1285-1295`). The interval between passes is a setting. The terminator, though, is not the
-next pass — it is **the next pass that both succeeds and takes the container down**, and
-nothing bounds how long that takes. A list the agent cannot read, and a list that came back
-truncated, sweep nothing and are simply tried again (`agent/runner.py:999-1030`); a job the
-agent could not pick back up does the same (`:1036-1050`). And a kill that cannot be
-confirmed ends nothing either: it goes into the agent's ledger of unconfirmed teardowns,
-which stops that agent claiming new work but leaves your process exactly where it was
-(`agent/runner.py:1349-1400`, `:1500-1532`). So the overlap is not open by design, and it
-is also not closed by any deadline: **design as though a second writer may share your
-staging area for as long as it takes**, rather than for a stated number of minutes. Read
-from the source, like the paragraph before it: none of this was executed either.
-
-**BEHAVIOUR, and it is worth stating plainly, because the shape of this section invites
-you to hunt for the exception.** The endings that reliably deliver something are the
-ones where your process finishes and reports on its own: success, a failure you exit
-with, or a cancellation you declare yourself by exiting 20 without being asked. Of the
-stops imposed from outside, an operator's cancellation and the runtime deadline each
-deliver nothing when they land on a container that was still running — which is the
-ordinary case for both, and both gaps are recorded as platform defects to be fixed.
-(Both have one narrow branch that behaves otherwise: a deadline reached while the job
-was still being prepared, set out above, and a cancellation arriving after
-your container had already exited and reported, set out further down this section.) A
-**fence** is the one that is not categorical: three of the six leave the agent able to
-report, and where that report is also *accepted* — the agent's heartbeat thread dying is
-the clearest case, because the job itself is still live and its lease still valid —
-collection is armed and reads whatever valid marker was already sitting in your staging
-area (section 7.1). That is a real path rather than a loophole: it delivers only what
-you had already written **and** inventoried at the instant the kill landed, and if you
-follow this document's strongest recommendation and write the marker last there is
-*usually* nothing there to read. Usually and not always — writing the marker last
-decides where in your program it happens, not that it vanishes at the same instant your
-process does, and a fence landing in the interval between the marker's upload and the
-agent seeing your container go finds it there. How long that interval is is mostly your
-own program's business, and the end of section 7.1 says why no figure for it is given.
-So design as though no externally imposed stop delivers anything; just do not write down
-that it is impossible for one to.
-
-**BEHAVIOUR, and this one is measured rather than assumed.** Your program almost certainly
-runs as **PID 1** inside its container: the agent overrides neither the entrypoint nor the
-command and does not ask docker for an init helper
-(`agent/executors/docker_exec.py:248-274` contains no `entrypoint`, `command` or `init`
-key), so an exec-form `ENTRYPOINT` makes your process number 1. This is where an operating
-system property bites: Linux gives process 1 no default signal dispositions, so SIGTERM is
-discarded unless you installed a handler for it. That is a kernel rule rather than
-something the platform does, so it is stated here as a fact about Linux and not as a
-citation of our code. A node that installs no handler does not die when it is asked to
-stop. It **ignores the request entirely**, finishes the whole batch, and tries to write a
-`succeeded` marker after the platform asked it to stop — an upload that will usually be
-refused, for the credential reason above — unless the work outlasts the grace, at which
-point it is killed outright. This was measured by adding a one-line handler to the example
-image, after which it exited at once.
-
-**BEHAVIOUR.** The platform's classification is authoritative and it asks "was
-cancellation requested?" **before** it looks at your exit code
-(`agent/runner.py:2326-2340`). So once the three questions ahead of it have been answered
-no, a cancelled run stays cancelled whatever you exit with, and exit code 20 is **not
-required** for that. The order of questions is: was this job
-fenced, was the agent forced to exit without waiting, did the runtime deadline pass, was
-cancellation requested or was the exit code 20, was the exit code 0, did the container
-vanish, and only then the exit code's own class. (The second of those is a special case: on
-a forced agent exit nothing is reported at all, because the agent leaves your container
-running for its successor to adopt rather than ending the job — see section 7.1.)
-
-**BEHAVIOUR, and here is why operator cancellation is different from the deadline.** When
-an operator presses Cancel on a step that is running on a runner, the orchestrator does not
-merely ask your container to stop. In **one database transaction** it raises a cancel flag
-the agent can read, moves the **launch** — the platform's record that this agent holds this
-job — to a terminal state, and finishes the execution as cancelled
-(`pipelines/cancellation.py:87-119`, `:299-350`). All three land together, so there is no
-moment at which the flag is visible and the job is still live.
-
-**BEHAVIOUR.** The only channel that can ask a process on somebody else's machine to stop
-**politely** is the answer to the agent's **heartbeat**, which carries a `cancel` flag
-(`runners/reports.py:210-217`); on seeing it the agent asks docker for the same polite stop
-the deadline uses (`agent/runner.py:2500`, `:2528-2536`). There is a second channel by
-which the agent learns a job is gone — it periodically re-reads the list of work assigned
-to it — but that one only ever kills; it is the "second, slower route" described below. A
-heartbeat is answered at
-all only if it can first renew the job's lease, and a lease cannot be renewed on a launch
-that has gone terminal — such a heartbeat is refused with `lease_lost`
-(`runners/reports.py:188`, `:294-316`).
-
-**BEHAVIOUR, and this is the consequence.** The agent's response to `lease_lost` on a
-heartbeat is not a polite stop. It **fences** the job: one SIGKILL, no SIGTERM, no grace
-period, and no terminal report at all (`agent/runner.py:2465-2466`, then `:2553-2589`
-calling `agent/executors/docker_exec.py:417-440` — it is the last row of the table in
-section 7.1).
-
-**BEHAVIOUR, so cancellation is a race, and the odds are against the polite path.** For the
-cooperative stop to happen, a single heartbeat has to straddle the cancelling transaction
-exactly: renew its lease **before** that transaction commits and read the cancel flag
-**after** it, which is possible only because the flag is read after the renewal and outside
-its transaction (`runners/reports.py:188-212`). A heartbeat that begins a moment later is
-refused and fences instead. A heartbeat that finishes a moment earlier is answered `cancel:
-false`, and then the *next* one — up to a full interval later — is the one that gets
-refused. Heartbeats are at least **20 seconds** apart (`agent/config.py:123`) and the
-straddle has to happen inside the handling of one request, so the window that produces a
-polite stop is a vanishing fraction of the interval that does not. **The ordinary outcome
-of pressing Cancel is that your container is killed outright.**
-
-**BEHAVIOUR.** There is a second, slower route to the same kill. The agent periodically
-re-reads the orchestrator's list of jobs assigned to it and fences everything the list does
-not name (`agent/runner.py:1112-1163`), and a cancelled launch has already dropped off that
-list (`runners/claim.py:804-817`). That fence is also a SIGKILL, though it keeps permission
-to report. It runs on a **120 second** timer by default (`agent/config.py:124`), so it
-normally arrives long after the heartbeat has fenced the job.
-
-**RECOMMENDATION, worth building even though it is not guaranteed to run.** Handle a stop
-request, in this shape:
-
-1. Install a SIGTERM handler that sets a flag. Do not do the work in the handler.
-2. Have your normal control flow check the flag between units of work, and stop.
-3. Keep the inventory of what you already uploaded (see the next point).
-4. Re-read your credentials, write a `cancelled` marker **last**, and exit 20.
-
-**BEHAVIOUR, and it is what that handler is actually worth — which is not a guarantee about
-your output.** On neither of the two stops this section is about is what you write
-collected: not on an operator's cancellation (see the next statement), and not on a
-deadline that stopped a running container (see above). What
-the handler buys is real but smaller: your process exits cleanly instead of being killed
-part-way through a write; it stops burning a customer's machine on work nobody will accept;
-it stops adding objects to a staging area the platform has already given up on; you keep
-your node correct the day these two gaps are fixed, at which point the marker you already
-write becomes the thing that recovers the run. Build it for those reasons. Do not build a
-partial-output recovery story on top of either stop.
-
-**BEHAVIOUR, and it is the second surprise in this section.** Cancelling a step whose
-container is still running **collects neither your marker nor your objects**, on either
-branch of the race above. (Cancelling one whose container has already finished and reported
-is a different thing, and it is the exception set out at the end of this run of statements.)
-Collection is armed by the agent's terminal report, and only when that report is the thing
-that ends the launch (`runners/reports.py:428-436`). After a cancellation the launch is
-already terminal, so a report arriving afterwards is answered "already finished" and arms
-nothing (`runners/reports.py:389-390`, `:482-499`). The periodic sweep that rescues
-interrupted collections does not reach this case either: its scans skip a terminal attempt
-and require a non-terminal execution, and the cancelling transaction makes both terminal at
-once (`pipelines/external_finalize.py:513-540`). The collector's own source says it in as
-many words — "A direct cancellation never reaches collection"
-(`pipelines/external_finalize.py:2488-2497`).
-
-**BEHAVIOUR.** So a node that receives the SIGTERM in the narrow window, stops cleanly,
-writes a valid `cancelled` marker inventorying everything it had uploaded, and exits 20,
-has that marker read by nobody. Its objects stay in a staging area that expires.
-
-**BEHAVIOUR.** What an operator cancellation does keep is your **log**. The lines your
-container streamed are written to durable storage and onto the execution before the live
-buffer is dropped (`pipelines/external_finalize.py:2488-2537`, called from
-`pipelines/cancellation.py:180-189`). For a container that was still running when Cancel
-was pressed, that is the whole of what survives.
-
-**BEHAVIOUR, the one exception, and it is not about a running node.** If the cancellation
-arrives while collection is **already under way** — your container has exited and reported,
-and the platform is part-way through copying its objects — the collection is deliberately
-allowed to finish, and what it verified is attached to the cancelled execution as
-diagnostics carrying no output port (`pipelines/cancellation.py:313-318`,
-`pipelines/external_finalize.py:1932-1999`). Nothing downstream receives it. Your process is
-long gone by then, so there is nothing here for your node to do.
-
-**RECOMMENDATION.** Assume a stop reaches you with very little time behind it, and make
-sure your network calls cannot swallow what there is before step 4 gets to run. A
-cooperative flag cannot be checked while you are blocked in a socket
-read, so a read timeout measured in minutes — this repository's `node.py` had one of 120
-seconds until it was rewritten, and now reads with 25 seconds and uploads with 10 — means
-a stop landing during a transfer never reaches your handler at all, and
-your process is killed mid-write. There is no grace period to size those timeouts against
-(top of this section), so the only workable design is timeouts and chunk sizes short enough
-that a stop lands *between* calls: seconds, not minutes.
-
-**RECOMMENDATION, and this one decides whether partial work survives at all.** Accumulate
-your object inventory somewhere the failure and stop paths can still see it, not in a local
-variable of the function that does the work. On every path where salvage happens — your own
-failure, and a cancellation you declared yourself by exiting 20 — it publishes **only what
-the marker inventories** (`pipelines/external_finalize.py:1523-1581`). A node that
-uploads three objects, fails on the fourth, and then writes a marker with an empty
-inventory has left those three objects in a staging area that expires, and nothing will
-ever collect them.
+**RECOMMENDATION.** Make network operations interruptible where possible and bound the
+rest. The reference gives DNS resolution and all TCP connection attempts one elapsed
+budget of `CONNECT_DEADLINE_S = 10.0`. TLS receives the remaining time as its socket
+timeout; `_connect_within` therefore describes the bound as the deadline plus one
+handshake operation. The final receipt has its own elapsed deadline,
+`RECEIPT_DEADLINE_S = 20.0` in `node.py`. Its separate socket timeouts are 25 seconds
+for reads and 10 seconds for uploads. These are local choices, not platform guarantees. A signal handler that
+only sets a flag cannot make a blocked network call return. SIGKILL cannot be handled.
 
 ### 7.1 Fencing: the stop with no grace period at all
 
-**BEHAVIOUR.** The runtime deadline begins politely, and cancellation sometimes does. There
-is a third way your container is stopped, and it is never polite — and it is also how both
-of the others usually end.
+**BEHAVIOUR.** Fencing means the agent tries to kill the workload immediately because it
+has lost authority or can no longer keep watching it. No SIGTERM grace is provided.
+The causes include an expired lease while the API is unreachable, work no longer
+assigned to the agent, a deactivated tenant, a refused agent identity, a failed heartbeat
+thread, and lost-lease/job-not-found responses (`agent/runner.py`).
 
-**BEHAVIOUR.** On the second path your container is **killed outright** — one SIGKILL, no
-SIGTERM first, no grace of any length, no opportunity to write anything
-(`agent/executors/docker_exec.py:417-440`, called from `agent/runner.py:2553-2589`). The
-agent calls this **fencing**, and it does it whenever it concludes that it no longer speaks
-for your job, because the one thing the design will not tolerate is two processes writing
-into one output area.
+**BEHAVIOUR.** Some fences retain permission to **attempt** a terminal report, including
+an internal heartbeat-thread failure. Others cannot report with their lost credentials
+or lease. Only an accepted report that arms collection can salvage a valid marker
+already in staging. With no marker, uploaded objects are not discovered by listing the
+directory. With no accepted report, there is no general watchdog to collect them later.
 
-**BEHAVIOUR.** There are six triggers, and they do **not** all have the same consequence.
-What separates them is whether the agent still has the standing to say how the job ended:
-some fences take the *work* away while leaving the agent's own credential valid, and on
-those the agent still sends a terminal report, which is what lets collection run at all.
+**BEHAVIOUR.** A marker written last can still be present before the agent observes the
+container's exit. A fence in that interval may leave a complete marker available for
+salvage. That possibility is not a recovery mechanism a workload can schedule around.
 
-**BEHAVIOUR, and read the last column literally.** "Yes" means only that the agent
-**retains permission to attempt a report**. It does not mean the report is accepted, and it
-does not by itself mean anything is collected. The completion endpoint is fenced by lease
-id and session epoch and answers 409 to an agent that has been superseded
-(`runners/reports.py:391-403`), and a report arriving after the launch has already gone
-terminal by some other route is answered "already finished" and arms no collection at all
-(`runners/reports.py:389-390`, `:482-499`). "No" is unambiguous; "Yes" is a permission
-rather than an outcome.
+**BEHAVIOUR.** An ordinary agent shutdown is different: its first signal stops new
+claims and waits for running jobs. A forced subsequent signal deliberately leaves job
+containers for the next agent to adopt. This does not grant the jobs a new runtime
+budget or prevent their credentials and leases from expiring.
 
-| What happened | Container | May the agent still report? |
-|---|---|---|
-| The orchestrator became unreachable and the job's lease ran out (`agent/runner.py:2538-2551`) | SIGKILL | **No.** There is nobody reachable to tell |
-| The job stopped being listed as assigned to this agent — revoked, or its launch already went terminal elsewhere (`agent/runner.py:1112-1163`) | SIGKILL, delivered by the sweep that matches containers by name — on whichever reconciliation pass notices, not at the instant the job stopped being listed — or by the start path if no container exists yet | **Yes**, deliberately: the report is what frees the job's capacity slot |
-| The organization that owns the job was switched off, arriving as a 403 (`agent/runner.py:2661-2677`) | SIGKILL | **Yes**, for the same reason. Other jobs on the same agent are untouched |
-| The agent's own identity was refused — a rotated or retired runner, a drained pool (`agent/runner.py:1690-1767`) | SIGKILL, for **every** job it holds, then the agent exits | **No.** The credential it would report with is exactly what stopped being recognised |
-| The agent's heartbeat thread failed — the measured case was its disk filling up while writing your refreshed credentials (`agent/runner.py:2376-2393`) | SIGKILL | **Yes**, carrying the real reason: "the disk was full", not a blank failure |
-| A lease-lost or job-not-found answer to one of the agent's own calls — starting the job, a heartbeat, a credential re-issue, the final report (`agent/runner.py:2116`, `:2466`, `:2687`, `:2824`) | SIGKILL | **No** |
+**BEHAVIOUR.** After a restart, the agent records an adopted job's container as possibly
+present before preparation can fail. It attempts to confirm that container has stopped
+before sending a terminal report. If Docker cannot confirm teardown, the report can
+still fail the job while the container may continue running and writing to staging.
+The agent records that uncertainty, stops claiming new work and retries teardown during
+reconciliation; repeated failures have no guaranteed completion time
+(`agent/runner.py`, `_prepare`, `_finish`, `_settle_container`, `_reconcile_if_due`).
+A terminal run status alone is therefore not proof that its former writer has stopped.
 
-**BEHAVIOUR, and it is worth stating because the opposite is the natural guess.** An
-ordinary agent shutdown is **not** a fence. The first signal to the agent means "finish
-what you are doing": it stops claiming new work and then waits for the jobs it holds, with
-no deadline at all, because a step may legitimately run for hours
-(`agent/runner.py:776-814`, `:847-880`). A forced second signal makes the agent exit at
-once and **deliberately leaves your container running**, addressed by a name the next agent
-will recognise, so that agent adopts it and the work is not thrown away. Your container is
-neither killed nor signalled on either path.
+**RECOMMENDATION.** Do not assume exclusive access to staging merely because an earlier
+run is terminal; design as though another writer may still be present.
 
-**BEHAVIOUR, and this is the part to plan around.** A SIGKILL cannot be caught, handled or
-delayed, so a fenced container writes nothing further — no marker, no last object, not a
-line of log. What is collected afterwards is therefore exactly what a **valid marker for
-this attempt had already recorded**, if one was in the staging area when the kill landed,
-and nothing else: collection reads that marker, checks that its `execution_id`, `attempt` and
-`generation` name this attempt and not a superseded one, and then copies and verifies every
-object it inventories, keeping what verifies (`pipelines/external_finalize.py:1459-1482`,
-`:1523-1581`). Where the agent's report is not merely permitted but **accepted** — the
-distinction the table above insists on — that collection is armed there and then, and runs
-when the platform gets to it: the report stamps the attempt as due and queues the work
-after its transaction commits (`runners/reports.py:428-436`).
-
-**BEHAVIOUR, and it is worse than the previous paragraph sounds.** On the fences that
-report nothing, **nothing is ever collected**. There is no watchdog
-([OPERATIONS.md](OPERATIONS.md#residual-limits-stated-plainly)), so the execution simply
-stays parked at "Waiting for runner" until an operator cancels it — and cancelling does not
-run collection either (section 7): it writes the log down and finishes the run. Whatever
-your container had already uploaded, and any marker it had already written, are left in a
-staging area that expires.
-
-**BEHAVIOUR, so the summary is narrower than "everything is lost", and for a well-behaved
-node it usually amounts to the same thing.** If you follow the strongest recommendation in
-this document and write your marker last, then a fence landing while there is still work to
-do finds no marker, and nothing you produced is collected. The salvage path is not dead code
-— it is what recovers the work of a node that failed on its own, or stopped itself by
-exiting 20, and wrote a marker on the way out (section 5) — it usually has nothing to read
-after a SIGKILL that arrived first. What is never true is that a fence gives your process a
-chance to react.
-
-**BEHAVIOUR, and it is why the paragraph above says "usually" rather than "always". This
-is the one paragraph the rest of the set points at for this point.** Writing the marker
-last makes "there is nothing to collect" the ordinary outcome; it does not make it
-certain. Writing it last says *when in your program* it is written. It does not say that
-it appears and disappears together with your process, and the two are separated by a
-real interval: after the marker's upload has finished, your process still has to return
-from whatever it was doing and exit, and only then can the agent's poll of the docker
-daemon see it go (`agent/runner.py:2304-2308`, `agent/executors/docker_exec.py:377-386`).
-**No length is quoted for that interval, and none should be assumed** — as for every
-interval on every stop path (top of section 7). The platform's
-share of it is one poll of the daemon. The rest is your own program between the upload
-returning and the process exiting — unwinding, flushing, whatever your runtime does on
-the way out — which is bounded by nothing the platform controls and is known only to
-whoever wrote it. Through the whole of it a valid marker for
-this attempt is sitting in your staging area — written last, and still there. A fence
-landing inside it kills a container that has already done its writing, and where that
-fence is one whose terminal report is not merely permitted but **accepted** — the agent's
-own heartbeat thread failing is the clear case, because the job itself is untouched and
-its lease still valid — collection runs and reads that marker. Nothing about this is a
-mechanism to use: you cannot choose when a fence arrives, you cannot arrange to be inside
-that interval when one does, and the recommendation is unchanged. It is stated because
-"write the marker last, therefore nothing can be collected" is a claim about *timing*
-wearing the clothes of a claim about *design*, and
-the difference matters to anyone looking at a cancelled-looking run that delivered
-output nobody expected. Read from the source; none of the runs behind these documents
-exercised a fence.
-
-**RECOMMENDATION.** Do not design a node whose entire output appears in its last minute.
-Finish and upload work in units, hold the inventory of what you uploaded where every exit
-path can reach it (section 7), keep runs comfortably inside their budget, and emit progress
-(section 3.4) so that an operator watching a long step can see it is alive rather than
-cancelling it on suspicion.
-
-**BEHAVIOUR, and it is here so that the recommendation above is not read as insurance
-against a fence.** Working in units pays on the endings **you** report: your own failure,
-or a stop you take yourself by exiting 20. On those you write a marker on the way out, it
-inventories everything already uploaded, and salvage publishes exactly that (section 5).
-Against a **fence** it buys nothing by itself. A SIGKILL ends your writing where it stands,
-and collection publishes only what a marker *already in staging* names — so under the
-write-the-marker-last discipline, every object you uploaded before the kill is unreachable
-no matter how neatly it was staged, because the document naming it was never written. Nor
-does a rerun pick that work up: a retried attempt is a new attempt with its own staging
-area, and a marker is only ever read for the attempt that wrote it (section 5). So working
-in units buys you the endings you report yourself, a smaller memory footprint and a visible
-progress trail — not protection from a fence.
-
-**RECOMMENDATION, against a strategy this document deliberately does not adopt.** There is
-one way to make partial output survive a fence: write an intermediate marker after each
-unit, each one naming only objects whose upload has finished, so that whenever a kill lands
-some marker is already there. Nothing in the platform forbids it. It is not recommended
-here, for three reasons. It rests on being able to replace the marker at its one fixed key
-as often as you like, which nothing in these documents has tested. It multiplies the number
-of times you can get the ordering wrong, and the penalty for
-naming an object that is still being written is not a partial delivery but the loss of the
-**whole** one (section 8). And what it recovers arrives as diagnostics carrying no output
-port, which no downstream step can read (section 8) — so it buys an operator something to
-look at, not a delivery. If you adopt it anyway, treat every marker write as the strict
-"after all its objects" case, and do not let it tempt you into treating a fence as a
-recoverable ending.
+**RECOMMENDATION.** Work in units, stream data and keep the inventory outside the work
+function. That limits memory and preserves partial work on endings where a marker and
+report survive. It cannot guarantee recovery after a kill or operator cancellation.
 
 ---
 
@@ -1555,32 +1066,32 @@ the orchestrator reads your marker, checks its identity, and then for every obje
 
 1. copies it from staging into a **published** area your credentials cannot reach;
 2. re-reads it **there** and holds it to the size and hash your marker promised
-   (`pipelines/external_finalize.py:1103-1152`, `:1297-1323`).
+   (`pipelines/external_finalize.py`).
 
 Copy first, verify second, because your upload policy is still live and a hash taken in
 staging is a statement about the past.
 
 **BEHAVIOUR, on a successful run.** Any single object that fails verification causes
 **everything this collection published to be deleted** and the execution to fail
-(`pipelines/external_finalize.py:1002-1007`, `:1326-1348`). A partial delivery is worse
+(`pipelines/external_finalize.py`). A partial delivery is worse
 than a failed one, because nothing downstream can tell which it got.
 
 **BEHAVIOUR, on a failed or cancelled run — when collection runs at all.** The same copy
 and verify runs per object, and whatever verifies is kept while the rest is dropped with a
-log line (`pipelines/external_finalize.py:1523-1581`). Salvaged objects are attached to the
+log line (`pipelines/external_finalize.py`). Salvaged objects are attached to the
 execution as diagnostics: they carry no output port and are not offered to any downstream
-step. Section 7 says which endings reach this path, and the list of endings that do **not**
-is longer than the list that does: an operator's cancellation does not, the runtime deadline
-does not, and neither do three of the six fences.
+step. Section 7 distinguishes the endings: a runtime-deadline report can now reach this
+path inside the stop window; operator cancellation of running work and fences that
+cannot report still do not.
 
 **BEHAVIOUR.** Each delivered object becomes one downstream artifact whose kind is the
-**output port name** you delivered it through (`pipelines/external_finalize.py:2057`). A
+**output port name** you delivered it through (`pipelines/external_finalize.py`). A
 downstream step configured to read `output` finds exactly what you published under
 `output`.
 
 **BEHAVIOUR.** The published location contains an identifier of the collection that won,
 which you cannot predict. Never construct a published URI by hand; follow the URIs in the
-execution's result (`pipelines/external_finalize.py:2640-2675`).
+execution's result (`pipelines/external_finalize.py`).
 
 **BEHAVIOUR.** The run's metrics are `objects_published`, `bytes_published` and
 `exit_code`, taken from what was actually published and from your marker's echo of the

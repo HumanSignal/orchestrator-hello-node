@@ -1,10 +1,11 @@
 # Writing an external node
 
-**BEHAVIOUR, and it is the whole shape of the thing.** An **external node** is a pipeline
-step that runs as **your container, on your machine**. The orchestrator never sees your
-code. It sees an image digest, writes a job description and short-lived credentials where
-your container can read them, starts the container through an agent process you run, and
-then collects whatever the container says it produced.
+**BEHAVIOUR.** An **external node** is a pipeline step implemented by a container image.
+In customer-run mode, you build the image and run an agent on your machine; the
+orchestrator receives the image digest rather than your source. In hosted mode, the
+orchestrator builds an approved Git repository and runs the image on a managed pool.
+Both use the same job description, short-lived credentials and completion marker.
+See [OPERATIONS.md](OPERATIONS.md#hosted-builds) for the hosted setup.
 
 These four documents are everything you need to write one correctly. They are written for
 someone (or something) that has only this repository and cannot read the orchestrator's
@@ -36,8 +37,8 @@ checkable rather than aspirational.
 is only ever true of two things: prose about *these documents* (what was verified, how to
 read them, where to go next), and prose about *this repository's example files*. Every
 statement about the **platform** — what it does, what it refuses, what a good node does
-about it — carries a label. That claim was checked mechanically over all five documents
-rather than by eye; see [Provenance](#provenance).
+about it — should carry a label. The current review scope is recorded in
+[Provenance](#provenance); the older mechanical labelling pass is historical evidence.
 
 One kind of statement needed a phrase of its own. A few are marked
 "**RECOMMENDATION**, with no working alternative": no check refuses you, and the
@@ -140,183 +141,78 @@ reports it.
 | `result.json` as metrics | Yes, `ResultDoc` with `metrics` and `summary` | not applicable | **No. Nothing ever reads it.** Run metrics come from the marker inventory |
 | `logs.ndjsonl` written by your step | Invited by the contract | not applicable | Published only if you also list it in the marker's `objects` |
 | Progress reporting | Yes, one stdout line per sample | not applicable | **Yes**, shown live in the run view |
-| Cancellation with exit code 20 | Yes | not applicable | **Only sometimes.** A `cancelled` marker is read and salvaged when your own report is what ends the job. When an **operator** cancels a step that is still running, nothing you wrote is collected — see [PROTOCOL.md](PROTOCOL.md#7-cancellation) |
+| Cancellation with exit code 20 | Yes | not applicable | A self-reported cancellation can salvage a valid marker as diagnostics. Operator cancellation of running work still does not collect its outputs; see [PROTOCOL.md](PROTOCOL.md#7-cancellation) |
+| Runtime deadline stop window | Agent API | **Yes**, enabled by default: 180 seconds to stop plus 60 seconds to report | An accepted failure report can collect the marker and salvage verified objects as diagnostics |
+| Hosted builds | Same container contract | Available when both external-node and hosted-build flags are enabled | Approved repository, managed pool, digest-pinned revision; same collection |
 | Automatic retry of a failed attempt | Exit code 1 means "retry me" | not applicable | **No.** Nothing re-attempts an external job automatically. An operator retries by hand |
 
 ---
 
 ## Provenance
 
-Everything in this section is **background**: it is about these documents — where their
-values came from and what was checked — and imposes nothing on your node.
+This section is **background**. The documentation was reviewed on **2026-09-10** against
+the fetched default branches: this repository's `main` at
+`c768c02f4ef734d1571133adae076f7c78900b4a`, and the orchestrator's **`master`** at
+`30b0950a`. The orchestrator also has an older branch named `main`; it is not the
+default branch and does not contain the external-node implementation.
 
-Every value in these documents was read from the orchestrator's source at commit
-**`6b2ff82c70f26d0ceaa1a841137f1b3cfb08186b`** (2026-08-08) and checked by hand. The
-files read were `external/contract.py`, `external/io.py`, `external/versioning.py`,
-`external/text.py`, `external/README.md`, `runners/credentials.py`,
-`runners/serializers.py`, `runners/reports.py`, `runners/auth.py`,
-`runners/enrollment.py`, `runners/jobs.py`, `runners/claim.py`, `runners/views.py`,
-`agent/creds.py`, `agent/runner.py`, `agent/config.py`, `agent/logbuf.py`,
-`agent/redact.py`, `agent/client.py`, `agent/executors/docker_exec.py`,
-`agent/identity.py`, `handlers/steps/external.py`, `pipelines/external_finalize.py`,
-`pipelines/cancellation.py`, `pipelines/external_state.py`, `pipelines/log_stream.py`,
-`pipelines/config_schemas.py`, `noderegistry/models.py`, `noderegistry/services.py`,
-`noderegistry/serializers.py`, `noderegistry/views.py`,
-`noderegistry/management/commands/external_demo_setup.py`,
-`frontend/src/pages/ExternalNodesPage.tsx`, `lspo/settings/base.py`, and the two
-Dockerfiles that fix the container user.
+All twelve tracked Markdown files were read. The current reference was checked against
+`node.py`, its Dockerfile, the harness, tests and CI workflow, and against these platform
+sources:
 
-**What was executed rather than read.** Five things, all at the commit above:
+| Area | Sources in the orchestrator |
+|---|---|
+| Wire documents and validation | `external/contract.py`, `external/io.py`, `external/versioning.py`, `external/text.py` |
+| Inputs and configuration | `handlers/steps/external.py`, `pipelines/config_schemas.py` |
+| Credentials, runtime and stop window | `runners/credentials.py`, `runners/jobs.py`, `runners/reports.py`, `runners/claim.py` |
+| Container environment, permissions and signals | `agent/runner.py`, `agent/creds.py`, `agent/config.py`, `agent/executors/docker_exec.py`, `agent/identity.py` |
+| Logs and publication | `agent/logbuf.py`, `agent/redact.py`, `pipelines/log_stream.py`, `pipelines/external_finalize.py`, `pipelines/cancellation.py` |
+| Registration and hosted builds | `noderegistry/services.py`, `noderegistry/serializers.py`, `noderegistry/building.py`, `noderegistry/hosted_views.py`, `noderegistry/models.py`, `noderegistry/management/commands/external_demo_setup.py`, `frontend/src/pages/ExternalNodesPage.tsx`, `lspo/settings/base.py` |
 
-1. **The offline example was run, both ways.** The fixture in
-   [CONFORMANCE.md](CONFORMANCE.md#level-1-run-it-with-a-hand-written-envelope) was built,
-   and the two commands there were each run against this repository's `node.py`. Both
-   complete the cycle — the lines shown, exit 0, exactly the three files shown — and both
-   transcripts in that document are verbatim. That is only true since `node.py` was
-   repaired: the run that sets only the credentials variable the platform really sets used
-   to end in an uncaught traceback and exit 1 with an empty staging directory, because the
-   file read a name nothing sets. What that defect cost, and the nineteen measured beside
-   it, is in [CONFORMANCE-BASELINE.md](../CONFORMANCE-BASELINE.md).
-2. **Every marker refusal was enumerated by exercising the parser**, not written from
-   memory. A harness read the parser's own model definition, listed every field it declares
-   and every cross-field check it runs, then fed it about ninety mutated markers one at a
-   time and recorded each verdict. Every field and every check came back with at least one
-   refusal. That is what "exercised" means wherever these documents use the word, and it is
-   what the completeness claim in
-   [CONFORMANCE.md](CONFORMANCE.md#validating-your-own-marker) rests on.
-3. **The manifest, the envelope and the markers shown here were parsed** with the
-   orchestrator's own `InvocationManifest` and `CompletionMarker`. The input file's size and
-   hash were computed from the file.
-4. **The input-count ceiling was measured**, by building manifests of increasing width with
-   the real models until the writer's 8 MiB limit refused one
-   ([PROTOCOL.md](PROTOCOL.md#23-reading-the-input-objects)).
-5. **The runtime-deadline path was run on both sides**, because the account of it in an
-   earlier draft was wrong in a way no amount of re-reading had caught. The agent's own
-   loop was driven against a stand-in docker daemon and a stand-in orchestrator, and the
-   orchestrator's runner API was driven through its own test client. Four things were
-   observed rather than argued: the deadline reaches the container as a **polite** docker
-   stop rather than a kill, after which the agent classifies the run `failed`; a
-   heartbeat refused with the orchestrator's own "past your deadline" code arrives inside
-   the agent as its ordinary **lost-lease** error, indistinguishable from having lost the
-   job to somebody else; on that answer the agent **kills the container outright and sends
-   no terminal report at all**; and on the orchestrator's side the last heartbeat before
-   the deadline shortens the lease to end exactly at the deadline, after which the terminal
-   report is refused, the job's record is left in a live state, and the field that arms
-   collection is never stamped. The platform's own test file for deadlines was also run at
-   this commit and passes. This is what [PROTOCOL.md](PROTOCOL.md#7-cancellation) rests on.
+**Historical parser evidence (2026-08-08).** At orchestrator commit
+`6b2ff82c70f26d0ceaa1a841137f1b3cfb08186b`, the original audit read the parser's model
+definitions, listed every declared field and cross-field check, and fed about ninety
+mutated markers to the parser one at a time, recording accepted and refused cases. Every
+field and cross-field check had at least one refusal exercised. This is what **"exercised"**
+means in the marker-refusal lists in PROTOCOL and CONFORMANCE. It is a record of that audit,
+not a claim that the enumeration was rerun in September. The same audit measured the
+input-count illustration by widening real manifests until the 8 MiB writer limit refused
+one. Its old deadline experiment predates the stop-window implementation and is superseded
+by the current source-based account in PROTOCOL section 7.
 
-**Which path those runs actually covered, because it is narrower than the section they
-support.** Every one of them exercised a job whose **container was already running** when
-its deadline passed. Nothing was exercised about a job still being prepared when its budget
-runs out, about any of the six fences, or about collection — and the first two of those do
-not behave like the path that was run. Where section 7 states an outcome that the runs did
-not cover, it says so in the sentence itself and cites the source it was read from instead.
-That distinction is the correction this round exists for: an execution proves the path it
-took, and writing its result up as a universal is the same class of mistake as writing up a
-guess.
+**Historical label coverage (2026-08-08, the same `6b2ff82c` platform snapshot).**
+The original audit recorded a checker over all five guides for label coverage, labels
+opening their blocks, and the distinction between rules, behavior and recommendations.
+It reported zero uncovered blocks, mislabelled blocks and inherited bold ledes. A mutation
+check caught four of five injected gaps; deleting a label from a legitimate continuation
+remained undetectable. This historical checker was not rerun for the September update.
 
-**Two later corrections rest on reading alone, and both are named where they are made.**
-Neither was executed, and both are consequences of *timing* rather than of the platform's
-design, which is exactly the shape a single run cannot settle. The first is the interval
-between a completion marker's upload finishing and the agent seeing the container gone,
-during which a marker written last is nonetheless sitting in the staging area
-([PROTOCOL.md](PROTOCOL.md#71-fencing-the-stop-with-no-grace-period-at-all)). The second is
-the boundary inside preparation: the container is created and started before the agent's own
-log and heartbeat threads are, so a failure "during preparation" may or may not have left a
-container of yours running ([PROTOCOL.md](PROTOCOL.md#7-cancellation)). Both were derived
-from `agent/runner.py` at the commit above.
+The frozen wire-document examples remain byte-identical to the platform's fixtures.
+Current verification results are recorded in the opening note of
+[CONFORMANCE-BASELINE.md](../CONFORMANCE-BASELINE.md). That file preserves the older
+measurements, including claims about platform behavior that were true only at their
+recorded commits. The archived README is also historical, not an operator guide.
 
-That is all. **No real container, no deployed orchestrator, no object storage and no
-collection run were exercised** — the runs in item 5 used stand-ins for the docker daemon
-and, on the agent's side, for the orchestrator. So section 7's account of *how much* of a
-grace period survives is read from the shipped intervals and reasoned about, not timed —
-which is one of the reasons it now states plainly that no such interval is guaranteed at
-all. What was observed is which of the two stops happens and whether a report is sent.
-Everything about the storage service and about collection remains read from source.
-Where a statement rests on a measurement somebody made earlier, it says so at the point it
-is made.
+This audit does not establish which flags, images or settings a live installation uses.
+The current runtime-deadline account comes from the code and its existing tests; older
+measurements of a deadline rejecting every terminal report do not describe the default
+stop-window implementation now. No production run or real S3 transfer was performed for
+this documentation update.
 
-**The boundary of the evidence, and the one investment that would move it.** Everything in
-[section 7 of PROTOCOL.md](PROTOCOL.md#7-cancellation) other than the runtime-deadline path
-— an operator's Cancel, all six fences, what a stopped container's staging area is worth
-afterwards, and the overlap between an abandoned container and the run that has already been
-declared over — is derived from **reading** the source rather than from running it. **No
-forced kill was ever executed, and no collection run was ever executed**, at any point in the
-preparation of these documents. That is not a hedge about wording; it is where the evidence
-stops. The highest-value next investment in this document set is executing one of those two
-paths — an operator cancelling a step whose container is still running and observing what
-survives, or a collection over a staging area a real container wrote — because either one
-would confirm or falsify a paragraph that today rests on reading alone, and the last time a
-stop path was actually run it falsified the draft's account of it.
-
-**The labelling was checked mechanically, not by eye — and the checker itself had to be
-rewritten first.** The earlier version reported zero while four real gaps sat in the
-documents, because it only looked for a label when a paragraph contained a modal verb
-("must", "never", "should"). That exempted every imperative ("Build in this order") and
-every plain statement of fact about the platform ("Your node receives a list of input
-objects on a single port"), which are the two commonest shapes a normative sentence takes
-here. The replacement runs three checks over all five documents:
-
-* **coverage** — every paragraph, list and table must either open with a label or sit under
-  one, with a heading resetting the scope. The only escape is saying, in the text, that the
-  block or its section is background. Nothing is exempted for lacking a modal verb;
-* **the label must open the block**, so that prose merely mentioning the word
-  "RECOMMENDATION" no longer opens a scope over everything after it;
-* **the label must be the right one.** A **RULE** has to name a check — a source citation or
-  an explicit refusal — somewhere in the statement it governs. What the platform *accepts*
-  is BEHAVIOUR, not RULE, and what your *test* has to do is a RECOMMENDATION. Both were
-  being written as rules.
-
-A fourth report is advisory: a paragraph that inherits a label from the one before it while
-opening with its own bold lede, which is how a stale label came to govern a run of
-checklist section headings.
-
-**What it still cannot see, stated plainly.** A label carries until the next label or the
-next heading, so a paragraph that directly continues a labelled statement is legitimately
-covered — and a label deleted from such a paragraph produces a document that still passes.
-Narrowing the carry to lists and tables was tried and rejected: it flagged 56 blocks, nearly
-all of them genuine continuations, and a check nobody reads is not a check.
-
-**The checker was itself mutation-tested**, because a labelling checker that cannot fail is
-the same defect it exists to find. Five defects were injected into the corrected documents,
-which otherwise score zero on every count: four were caught, and the fifth is the residual
-named above. Run against the documents *before* this round's corrections, it reproduces all
-four of the gaps that round found by hand.
-
-The finished set reports **zero** uncovered blocks, **zero** mislabelled ones and **zero**
-inherited ledes.
-
-There is no generated reference bundle yet, so there is no `REFERENCE.md`. The tables in
-[PROTOCOL.md](PROTOCOL.md) are hand-verified against the commit above and nothing checks
-them automatically. Line numbers in particular go stale on any edit to the file they point
-into; the surrounding sentence is the claim, and the line number is only where to look.
-When these documents and the orchestrator disagree, the orchestrator is right. If you find
-a disagreement, that is a bug in this document set, and it is worth reporting.
-
-**A standing rule for whoever edits these documents next.** Never write down an **interval**,
-an **ordering** or an **exclusivity** that no check in the platform enforces. Two of the
-three were written wrong here, and each read as a fact rather than as the guess it was:
-intervals, where a grace period was written as though it were guaranteed and the overlap
-between two writers was bounded at about two minutes by a periodic pass that can simply fail
-and be tried again; and ordering, where "write the marker strictly last" was written down as
-a rule when no component ever observes the order a container wrote things in. Exclusivity is
-the third shape, and it is why these documents now tell you to design as though a second
-writer may share your staging area rather than asserting that one cannot. If you cannot
-**name the check** — a specific refusal, with the source it lives in — do not state the
-conclusion at all: describe the mechanism, cite where you read it, and let the reader draw
-the conclusion themselves. A sentence that sounds normative only because a source file sounds
-normative is the specific failure mode; see
-[How to read this](#how-to-read-this-three-kinds-of-statement).
+Source paths are provenance, not generated documentation. When these pages disagree
+with the referenced source, the source is authoritative and the discrepancy is a
+documentation defect. Keep enforced rules separate from recommendations, and distinguish
+configured timers from a guarantee that a machine or network responds within them.
 
 ## The code in this repository
 
 This section is **background**, about one file in this repository. `node.py` at the
 repository root implements what these documents describe, and the conformance suite in
-`conformance/` is green against it, so it is safe to copy and edit. It was not always: it
+`conformance/` exercises it in real Docker containers. See the current verification note
+before treating a past green run as evidence about this checkout. It was not always: it
 shipped with twenty documented defects, every one of them a mistake a first version of a
 node makes, and [CONFORMANCE-BASELINE.md](../CONFORMANCE-BASELINE.md) keeps the measurement
 of what each one cost — which makes it the most useful thing here to read before writing
 your own. Where `node.py` makes a choice rather than following a rule,
-[AUTHORING.md](AUTHORING.md#nodepy-and-this-skeleton) says which choice and why. These
-documents remain the authority: if the two ever disagree, these documents are the correct
-one and the difference is a bug worth reporting.
+[AUTHORING.md](AUTHORING.md#nodepy-and-this-skeleton) says which choice and why. The platform source remains the authority for platform behavior. The local source is
+the authority for what this example implements; report any disagreement with these pages.

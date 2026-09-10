@@ -1,4 +1,35 @@
-# Conformance baseline — what this node does today
+# Conformance baseline — current verification and historical measurements
+
+## Verification on 2026-09-10
+
+The unchanged reference implementation at `main` commit `c768c02` was exercised in
+real Docker containers with the existing harness. Platform citations were read from
+orchestrator **`master` at `30b0950a`**, its fetched default branch:
+
+```text
+LSPO_ORCHESTRATOR_SRC=/path/to/orchestrator LSPO_ORCHESTRATOR_REF=30b0950a python3 -m pytest -q
+141 passed in 236.85s
+```
+
+Collection reports 52 `conforms_today`, 67 `subject_is_platform`, and 22
+`harness_self_test` tests, with no `expected_red_until_fixed`. Bases remain 82 contract,
+35 reference-quality and 24 repository-policy tests. The old header below said 50
+reference tests; that historical count is not the current collection count.
+
+The platform's three golden wire documents were compared with the checked-in fixtures.
+The local example is checked separately from the Docker suite, which exercises the
+S3-shaped fake. No real S3 transfer, production execution or mutation campaign was run
+for this documentation update. CI mode and `--red-for-real` have identical marker
+handling while the expected-red group is empty.
+
+## Historical record (August 2026)
+
+Everything below is preserved as the report written during the original repair rounds.
+Its counts, timings and platform assertions belong to those rounds, not to today's
+installation. In particular, runtime expiry now has a configurable stop window;
+failure-marker diagnostics and exact-credential log redaction also changed. Consult
+[docs/PROTOCOL.md](docs/PROTOCOL.md) for current behavior. The old measured outcomes
+are retained rather than rewritten to look as though newer behavior was measured then.
 
 > ## Status: all twenty defects below are FIXED
 >
