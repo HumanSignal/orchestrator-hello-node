@@ -176,12 +176,17 @@ production since 2026-10-13. Two things were done, and nothing beyond them is cl
    below, the history and the diff between `30b0950a` and `86461801` were read. 29 of them
    changed and 26 did not. For every behavioural change in those diffs that these
    documents describe, the statement was found and held against the file at `86461801`.
+   Three groups of statements written after 2026-09-10 rest on files that did not change,
+   so no diff covers them, and they were held against the files themselves at `86461801`:
+   the upload size cap and what deleting an upload removes (`pipelines/asset_views.py`),
+   how a search term finds a fact (`pipelines/run_search.py`), and what an operator's
+   retry carries over (`pipelines/retry.py`).
 
 It was not a second full review. The Markdown files were not all re-read on that date, and
-a statement about a file that did not change between the two commits rests on the
-2026-09-10 review. The passages written since then — a Data Source's uploaded file as a
-node's input, and search facts — describe the two orchestrator changes that introduced
-them, `9fdafaa8` and `86461801`, and those are among the diffs step 2 read.
+a statement that already stood on 2026-09-10 about a file that did not change between the
+two commits rests on that review. The passages written since then — a Data Source's
+uploaded file as a node's input, and search facts — describe the two orchestrator changes
+that introduced them, `9fdafaa8` and `86461801`, and those are among the diffs step 2 read.
 
 Step 2 corrected three statements, each of which had been true at `30b0950a`:
 

@@ -39,10 +39,10 @@ in `tests/test_failures.py`, one in `tests/test_cancellation.py` and one in
 `tests/test_harness_self.py`. Nine of them are `conforms_today` on a reference-quality
 basis and the tenth is a harness self-test on a repository-policy basis.
 
-Why each of those ten exists is the pull request's own account of its review rounds,
-written between August and October 2026. It is kept here as that account; none of it was
-re-measured on this date. THREE came when the feature was built — the node's own report
-document on the successful path and on the failed one, and the harness's new
+Why each of those ten exists is the pull request's own account of its review rounds, as
+its first commit (`813cc68`, 2026-08-28) has it. It is kept here as that account; none of
+it was re-measured on this date. THREE came when the feature was built — the node's own
+report document on the successful path and on the failed one, and the harness's new
 report-rather-than-refuse channel held to being both — and SEVEN across three rounds of
 review, each round finding something the one before it had not. A cancelled run that
 reported a failure of its own making (measured then: every stopped run printed `could not
@@ -72,9 +72,11 @@ accepted.
 
 **What was not done on this date.** `--red-for-real` was not run; the flag only changes how
 a test in the `expected_red_until_fixed` group is reported, and the collection above has
-none. No real S3 transfer was made and nothing was run against a live orchestrator: the
-Docker suite exercises the S3-shaped fake. The documents themselves were not all re-read;
-what was rechecked on the orchestrator's side, file by file, and what that corrected is in
+none. The GitHub workflow itself was not run: all three commands above ran on one machine
+with Python 3.13.3, and the workflow installs Python 3.12. No real S3 transfer was made
+and nothing was run against a live orchestrator: the Docker suite exercises the S3-shaped
+fake. The documents themselves were not all re-read; what was rechecked on the
+orchestrator's side, file by file, and what that corrected is in
 [docs/README.md](docs/README.md#provenance).
 
 ## Verification on 2026-09-10
