@@ -785,13 +785,16 @@ per-object ceiling like any other.
 **BEHAVIOUR — search facts, which are what makes a finished run findable.** Each entry in
 the `facts` list is recorded against the execution and becomes a search term in the Runs
 panel: an entry `{"key": "task", "value": "41"}` makes the run answer to `task:41`, and any
-other key answers to `<key>:<value>` with no change needed anywhere. The list is read when
+other key answers to `<key>:<value>` with no change needed anywhere — except the search
+box's own field names `node`, `log`, `status`, `initiator` and `id`. Those prefixes always
+mean the built-in field, so a fact stored under one of them is recorded but cannot be found
+by its prefix: do not use them as keys. The list is read when
 the orchestrator accepts **this attempt's** completion marker, so it is recorded whether
 that marker says `succeeded`, `failed` or `cancelled` — a failed run that touched task 41
 is exactly the run somebody goes looking for. A receipt belonging to a different attempt
 or generation is not accepted, and nothing is read from beside it. Whether a cancelled run
 still has a document there to be read is a separate question, and the answer is usually no
-— see the second recommendation below.
+— see the third recommendation below.
 
 ```json
 {"schema_version": 1,
@@ -821,6 +824,10 @@ description of what it did. Label Studio task and annotation ids under the keys 
 theirs — and the names of the objects you consumed or produced under a key of your own. A
 value somebody would plausibly paste into a search box is worth a fact; a sentence is not,
 and a value nobody can know in advance (a timestamp, a random id of yours) buys nothing.
+`node.py` records each input it copied under the key `input`, with the input's `relpath` as
+the value. For a file uploaded to a Data Source that is the **cleaned** name (section 2.2),
+so such a run answers to `input:sample_100.zip` and not to `sample 100.zip`, the name the
+file was uploaded under.
 
 **RECOMMENDATION.** Write them on the failure path too, for what you had already done. A
 step that reports its facts only after everything worked answers "which run touched this
@@ -830,7 +837,9 @@ for this reason.
 
 **BEHAVIOUR.** A `cancelled` receipt is read for its facts exactly like any other: the
 orchestrator's gate is the marker's identity and never its status, so a document sitting
-beside a cancelled marker is recorded in full.
+beside a cancelled marker is recorded in full. That holds for a receipt the collector
+reads. After an operator's Cancel of running work it normally reads none (section 7), and
+then no facts are recorded for the run, however early the document was written.
 
 **RECOMMENDATION.** The cancellation path is nevertheless the one place NOT to write that
 document — in a node built the way this one is. `node.py` answers a stop by ABANDONING its

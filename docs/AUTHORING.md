@@ -111,7 +111,8 @@ entry is held to, and the fact that a bad entry costs itself and nothing else ar
 somebody types it from memory or pastes it from a ticket: an id, a filename, a batch name.
 Use `task` and `annotation` for Label Studio ids, because those are the keys the platform's
 own steps write and a search for one finds your run beside theirs; invent your own key for
-anything else.
+anything else, avoiding the search box's own field names
+([PROTOCOL.md](PROTOCOL.md#44-resultjson) lists them).
 
 **RECOMMENDATION.** Write the document on your **failure** path too, carrying the facts
 you had collected by then, and write it **before** the completion marker. The run somebody
@@ -129,7 +130,10 @@ own making on a run that was stopped deliberately. **BEHAVIOUR.** What survives 
 cancellation is whatever was written **before** the stop: the orchestrator reads a document
 found beside a `cancelled` marker exactly as it reads one beside a successful marker, so a
 step that reports as it goes keeps its facts and one that would only have written them on
-the way out keeps none. `node.py` says so in one plain line and writes nothing.
+the way out keeps none. That is when a marker is read at all: after an operator's Cancel of
+running work none is, and no facts are recorded
+([PROTOCOL.md](PROTOCOL.md#7-cancellation)). `node.py` says so in one plain line and writes
+nothing.
 
 ---
 

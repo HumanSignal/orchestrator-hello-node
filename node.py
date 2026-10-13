@@ -1318,8 +1318,10 @@ def process(creds: Credentials, manifest: dict, scratch: str) -> dict:
             # The INPUT's own name, not the copy's path. ``relpath`` is a name only this
             # step ever chose, and it would send anyone searching for the run that touched
             # ``data.csv`` looking for ``outputs/data.csv`` instead; the envelope's name is
-            # what the rest of the pipeline calls that object. Recorded after the copy came
-            # back accepted, so a fact is a claim about something that really happened.
+            # what the platform calls that object (for a file uploaded to a Data Source, the
+            # cleaned name it is stored under, not the one it was uploaded as). Recorded after
+            # the copy came back accepted, so a fact is a claim about something that really
+            # happened.
             claim('input', name)
             METRICS['files'] = len(INVENTORY)
             METRICS['total_bytes'] += size
