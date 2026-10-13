@@ -120,6 +120,8 @@ own label.
 | How to register my node and start the agent | [OPERATIONS.md](OPERATIONS.md#registering-a-node) |
 | Which user my image should run as (any of them — here is why) | [OPERATIONS.md](OPERATIONS.md#which-user-your-image-runs-as) |
 | Limits, quotas, and things that do not exist yet | [OPERATIONS.md](OPERATIONS.md#residual-limits-stated-plainly) |
+| How to hand my node a file I uploaded in the orchestrator | [OPERATIONS.md](OPERATIONS.md#giving-the-node-a-file-you-uploaded) |
+| Why my node started with no inputs, or has no Run button | [OPERATIONS.md](OPERATIONS.md#troubleshooting) |
 | Why my run is stuck at "Waiting for runner" | [OPERATIONS.md](OPERATIONS.md#troubleshooting) |
 
 ---
@@ -133,9 +135,10 @@ reports it.
 
 | Capability | In the contract | Sent by the orchestrator today | Collected today |
 |---|---|---|---|
-| Multiple input ports | Yes, `inputs` is a list with unique names | **No.** Exactly one port, always named `input` | not applicable |
+| Multiple input ports | Yes, `inputs` is a list with unique names | **No.** At most one port, always named `input`; a job with nothing to read has none | not applicable |
 | Prefix (folder) input ports | Yes, `layout: "prefix"` with a tree digest | **No.** A folder artifact upstream is refused with a configuration error before the job is created | not applicable |
-| Empty input set | Yes, `inputs` defaults to `[]` | **Yes.** A step with no upstream artifacts gets `"inputs": []` | not applicable |
+| Empty input set | Yes, `inputs` defaults to `[]` | **Yes.** A step with nothing to read — no upstream artifacts, and no uploaded file on a Data Source wired in front of it — gets `"inputs": []` | not applicable |
+| An operator's uploaded file as the input | Yes, an ordinary input object; no field was added to version 1 for it | **Yes.** A node wired directly after a Data Source node receives that node's uploaded file as one object on `input`, when the run carries no upstream artifacts. Uploaded files only, one file per run; see [PROTOCOL.md](PROTOCOL.md#22-invocationjson-field-by-field) | not applicable |
 | Multiple output ports | Yes, `produced_ports` is a name to relpath map | not applicable | **Yes.** Every port becomes a downstream artifact kind |
 | Objects claimed by no port | Yes | not applicable | Copied and verified, but **not offered downstream** on a successful run |
 | `result.json` as metrics | Yes, `ResultDoc` with `metrics` and `summary` | not applicable | **No. Nothing ever reads it.** Run metrics come from the marker inventory |

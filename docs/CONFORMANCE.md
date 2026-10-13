@@ -447,7 +447,10 @@ that ignores SIGTERM completely. Assert the marker and the timing.
 ## Level 3: the real thing
 
 **RECOMMENDATION.** Register the node, start an agent, run the pipeline. See
-[OPERATIONS.md](OPERATIONS.md#registering-a-node).
+[OPERATIONS.md](OPERATIONS.md#registering-a-node). A first run needs no upstream step:
+upload a test file to a Data Source node, wire that node straight into yours and start the
+run with **Run node** on your node
+([OPERATIONS.md](OPERATIONS.md#giving-the-node-a-file-you-uploaded)).
 
 **What only level 3 proves.** That your container can read the credentials a **real** agent
 wrote — which is not a question about your image's uid (any uid can open them) but about

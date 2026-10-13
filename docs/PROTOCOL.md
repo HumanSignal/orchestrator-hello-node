@@ -326,7 +326,7 @@ An input port (`external/contract.py`):
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `name` | string | **yes** | the port name your code refers to. Today this is always `input` |
-| `payload_kind` | string | **yes** | logical content type. Taken from the **first** upstream artifact's own kind, or the literal string `file` when that artifact carries no kind at all. It is not the node's `input_payload_kind` setting, which only selects which artifact gets pinned |
+| `payload_kind` | string | **yes** | logical content type: a label, which nothing checks the bytes against. For the artifacts of an upstream step it is taken from the **first** artifact's own kind, or is the literal string `file` when that artifact carries no kind at all. For a file uploaded to a Data Source (below) it is the last extension of the file's cleaned stored name, lower-cased and without the dot (`batch.zip` gives `zip`, `rows.CSV` gives `csv`, `x.tar.gz` gives `gz`), or `file` when that name has no extension, has its only dot as the first character (`.env`; `.data.csv` still gives `csv`), or ends in a dot. It is not the node's `input_payload_kind` setting, which only decides what is required: which upstream artifact gets pinned, or the kind an uploaded file must have |
 | `layout` | `"file"` or `"prefix"` | **yes** | today always `"file"` |
 | `cardinality` | `"one"`, `"at_least_one"` or `"many"` | **yes** | today always `"many"`, and it is enforced by the parser |
 | `objects` | array | no, defaults to `[]` | |
@@ -340,13 +340,59 @@ An input object (`external/contract.py`):
 | `sha256` | 64 lowercase hex characters | **yes** | |
 | `size` | integer >= 0 | **yes** | |
 | `relpath` | canonical relative path, or `null` | no for a file port, **yes** for every object of a prefix port | |
-| `upstream_execution_id` | integer >= 1, or `null` | no | which execution produced this object |
+| `upstream_execution_id` | integer >= 1, or `null` | no | which execution produced this object. It is `null` whenever no execution id is known: a Data Source upload, or a run of this step that was started by hand rather than by an upstream step completing. Both are ordinary runs, so `null` is a normal value and not a fault |
 
-**BEHAVIOUR.** A step with no upstream artifacts gets `"inputs": []`, an empty list with
+**BEHAVIOUR.** A step with nothing to read gets `"inputs": []`, an empty list with
 **no ports at all**, rather than one port with no objects
-(`handlers/steps/external.py`). Your code must handle a job with no input port
-present, not merely a port that is empty. A step with no inputs is a legitimate
-source-style step and is not an error.
+(`handlers/steps/external.py`). That is a step whose run carries no upstream artifacts
+and which is handed no uploaded file either (next paragraph). Your code must handle a job
+with no input port present, not merely a port that is empty. A step with no inputs is a
+legitimate source-style step and is not an error.
+
+**BEHAVIOUR.** The objects on `input` come from one of two places, never both in one run,
+and nothing in their shape says which. Normally they are the artifacts of the step your
+node is wired after. When your node is wired directly after a **Data Source** node — a
+pipeline node that holds files an operator uploads in the editor — and the run carries no
+upstream artifacts, the input is that Data Source's uploaded file instead: **one** object
+on the same `input` port, pinned by `sha256` and `size` like any other input and
+downloaded through the same kind of presigned link in the credentials envelope
+(`handlers/steps/external.py`). Your reading code does not change. What is particular to
+that object:
+
+* **Which file it is.** The one that was Active on the Data Source when Run was clicked
+  (it is pinned at that moment), if it is still an uploaded file of that Data Source;
+  otherwise the Data Source's active file, which is the one explicitly made Active, else
+  the newest upload (`pipelines/source_assets.py`). While the upload pinned at the click
+  still exists, a file uploaded afterwards does not replace it for that run; when nothing
+  was pinned (the Data Source held no file at the click) or the pinned upload was deleted,
+  the run reads the file that is active when it is launched or retried.
+* **Its name.** `relpath` is the file's **cleaned** stored name, which is not necessarily
+  the name the operator sees: every run of characters outside `A-Za-z0-9._-` became one
+  `_` when the file was uploaded, so `sample 100.zip` arrives as `sample_100.zip`.
+* **Its kind.** The port's `payload_kind` is read from that same cleaned name, by the rule
+  in the port table above — so the name and the kind your container sees always agree.
+* **Its provenance.** `upstream_execution_id` is `null`, as it is whenever no execution id
+  is known: a Data Source upload, or a run of this step that was started by hand rather
+  than by an upstream step completing.
+* **Nothing unpacks it.** The file arrives as it was uploaded. An archive is one object.
+
+**BEHAVIOUR, and these are the limits of it.** Uploaded files only: an S3 address typed
+into the Data Source's settings is not delivered. External nodes only: no other kind of
+step is handed the file this way. One file per run, and never alongside upstream artifacts
+— when the run does carry upstream artifacts they are the inputs, handled exactly as for
+any other source, and the uploaded file is not added. A Data Source holding no uploaded
+file hands over nothing, and the job is then the zero-input job described above — unless
+the node's `input_payload_kind` setting requires a kind, in which case the run fails
+before any job exists and your container never starts
+([OPERATIONS.md](OPERATIONS.md#giving-the-node-a-file-you-uploaded)). The wire contract is
+unchanged: this is still version 1, and no field was added to it.
+
+**RECOMMENDATION.** Take whatever arrives on the port. Do not look an uploaded file up by a
+name agreed out of band, because the name your container sees is the cleaned one; do not
+treat `payload_kind` as proof of what the bytes are, because for an upload it is only part
+of a file name; and do not require `upstream_execution_id` to be an integer. Nothing
+checks any of the three, so a node that leans on one of them fails on a perfectly
+ordinary upload, with no refusal to explain why.
 
 **BEHAVIOUR.** `credentials_file` in the job description is an echo, not a discovery
 mechanism. It cannot be one: you needed the credentials to fetch this document. The
@@ -379,6 +425,14 @@ orchestrator sets an input's relpath to the last segment of its URI
 the uniqueness check exists only for folder ports (`external/contract.py`). Two
 upstream steps that both produce `rows.csv` therefore collide.
 
+**BEHAVIOUR.** For a file uploaded to a Data Source (section 2.2) that last segment is the
+**cleaned** stored name, which is not necessarily the name the operator chose. Every run
+of characters outside `A-Za-z0-9._-` was replaced by one `_` when the file was uploaded
+(`storage_connectors/services.py`), so `My Data (final).zip` arrives as
+`My_Data_final_.zip` and `résumé.zip` as `r_sum_.zip`. The run's log shows the name as it
+was uploaded; your container sees the cleaned one, and the port's kind is read from the
+cleaned one too.
+
 **RULE.** Your output relpaths must be unique within one marker
 (`external/contract.py`).
 
@@ -390,10 +444,14 @@ end of the run, after all the work.
 **RECOMMENDATION.** Stream inputs to disk or process them incrementally. See section 3.5
 for why holding one in memory is a real risk rather than a style preference.
 
-**BEHAVIOUR.** There is no ceiling on the **size** of your inputs: not on one object, not
-on their total. The 1 GiB ceiling in section 3.5 applies to what you **upload**, and the
-container is given no disk quota at all — the agent sets a memory limit, a CPU limit and a
-process limit when it starts your container, and no storage limit
+**BEHAVIOUR.** Nothing in the contract or the agent puts a ceiling on the **size** of your
+inputs: not on one object, not on their total. One source of input has a limit of its own,
+applied long before your job exists: a file uploaded to a Data Source is capped at 500 MB
+by default (`pipelines/asset_views.py`). That is a limit on the size **declared** when the
+upload starts, and an installation can change it, so the pinned `size` of the object is the
+number to read, not the cap. The 1 GiB ceiling in section 3.5 applies to what you
+**upload**, and the container is given no disk quota at all — the agent sets a memory
+limit, a CPU limit and a process limit when it starts your container, and no storage limit
 (`agent/executors/docker_exec.py`). A node that downloads every input to `/tmp` and
 keeps it there can therefore fill the disk of the machine the agent runs on, which is
 somebody else's laptop or server. Delete each input when you are done with it, or stream it

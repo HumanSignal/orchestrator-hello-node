@@ -32,6 +32,17 @@ from conformance.fakes3 import Blob, Endpoint
 #: that keeps a superseded runner out of the live attempt's directory.
 BUCKET = 'humansignal-orchestrator-conformance'
 
+#: The kind every port carries unless a test names a real one. Invented on purpose: the
+#: orchestrator never emits it, so a node that started to depend on a port's kind could
+#: not pass here by coincidence.
+DEFAULT_PAYLOAD_KIND = 'conformance_bytes'
+
+#: The execution every input object names as its producer unless a test says otherwise —
+#: an integer, which is what a run started by an upstream step's completion carries. The
+#: other real value is ``None``: the launcher copies the id out of the run's own trigger
+#: and writes ``null`` when there is none there, as on a run an operator started by hand.
+DEFAULT_UPSTREAM_EXECUTION_ID = 4241
+
 
 @dataclass
 class InputSpec:
@@ -106,6 +117,8 @@ class Job:
         input_extra: dict | None = None,
         max_object_bytes: int = 256 * 1024 * 1024,
         creds_ttl_s: float | None = None,
+        payload_kind: str = DEFAULT_PAYLOAD_KIND,
+        upstream_execution_id: int | None = DEFAULT_UPSTREAM_EXECUTION_ID,
     ):
         self.image = image
         self.workdir = workdir
@@ -124,6 +137,12 @@ class Job:
         # expire, but fifteen minutes is longer than any test here runs, so an unbounded
         # one models the ordinary case exactly and only the expiry tests shorten it.
         self.creds_ttl_s = creds_ttl_s
+        # One of each per JOB, not per object, because that is how the launcher builds
+        # them (``handlers/steps/external.py``): the port takes a single kind, and the one
+        # execution id the run's trigger carried — or ``None`` — is copied onto every
+        # object. A per-object knob would let a test describe a job production cannot send.
+        self.payload_kind = payload_kind
+        self.upstream_execution_id = upstream_execution_id
         self.idempotency_key = f'exec-{execution_id}-att-{attempt}'
 
         self.key_prefix = (
@@ -152,7 +171,20 @@ class Job:
     # ------------------------------------------------------------------ documents
 
     def manifest(self) -> dict:
-        """``invocation.json`` — the job description, exactly as the launcher writes it."""
+        """``invocation.json`` — the job description, with every field the launcher writes.
+
+        **A field that is present and ``null`` is a shape of its own, and production sends
+        it.** The orchestrator serialises this document without dropping empty values
+        (``external/io.py`` dumps the whole model), so a real input object ALWAYS carries
+        ``upstream_execution_id`` — an integer, or ``null`` — a real file port ALWAYS
+        carries ``"prefix_digest": null``, and the document itself always carries
+        ``organization_id``. This method used to leave all three out, which made "the key
+        is there and its value is null" something no container in this suite had ever
+        been handed, although every real job with an input hands over at least one.
+
+        ``organization_id`` is ``null`` here: a synthetic job belongs to no organization.
+        The integer form is in the golden manifest under ``conformance/fixtures/``.
+        """
         ports: dict[str, dict] = {}
         for spec in self.inputs:
             pin = spec.pin()
@@ -160,10 +192,11 @@ class Job:
                 spec.port,
                 {
                     'name': spec.port,
-                    'payload_kind': 'conformance_bytes',
+                    'payload_kind': self.payload_kind,
                     'layout': 'file',
                     'cardinality': 'many',
                     'objects': [],
+                    'prefix_digest': None,
                 },
             )
             port['objects'].append(
@@ -172,12 +205,14 @@ class Job:
                     'sha256': pin.sha256,
                     'size': pin.size,
                     'relpath': spec.relpath,
+                    'upstream_execution_id': self.upstream_execution_id,
                 }
             )
         document = {
             'schema_version': 1,
             'execution_id': self.execution_id,
             'pipeline_id': 9,
+            'organization_id': None,
             'deployment_id': 3,
             'revision_id': 5,
             'image_digest': self.image,

@@ -16,8 +16,11 @@ which is what keeps a mistake in step 3 from being discovered in step 5.
 
 ### 1. Decide what your node consumes and produces
 
-**BEHAVIOUR.** A job with upstream artifacts receives them on one port named `input`;
-a source-style job receives no input ports. Your node returns objects grouped into output
+**BEHAVIOUR.** A job with upstream artifacts receives them on one port named `input`. A
+job without them, whose node is wired directly after a Data Source node, receives the file
+an operator uploaded there on the same port, as one object
+([PROTOCOL.md](PROTOCOL.md#22-invocationjson-field-by-field)). A source-style job, with
+neither, receives no input ports. Your node returns objects grouped into output
 ports you name yourself. Those port names become
 the artifact kinds downstream steps ask for
 ([PROTOCOL.md](PROTOCOL.md#41-where-your-output-goes)).
@@ -496,11 +499,25 @@ apart either treats advice as law or treats law as advice. Both are expensive.
       can catch a changed input.
 * [ ] **RECOMMENDATION.** Handles a job with **no** input port at all — an empty `inputs`
       list is legitimate, not an error.
+* [ ] **RECOMMENDATION.** Does not rely on the input port's `payload_kind`, or on an
+      object's `upstream_execution_id`. The kind is a label and nothing checks the bytes
+      against it: it is the first upstream artifact's kind, or, for a file an operator
+      uploaded to a Data Source, the last extension of the file's cleaned stored name. The
+      execution id is `null` whenever no execution id is known: a Data Source upload, or a
+      run of this step that was started by hand rather than by an upstream step completing
+      (`handlers/steps/external.py`).
+* [ ] **RECOMMENDATION.** Takes an uploaded file under whatever name it arrives with, not
+      a name agreed out of band. The name is cleaned when the file is uploaded — every run
+      of characters outside `A-Za-z0-9._-` becomes one `_` — so a file whose name holds
+      anything else, a space or an accented letter included, reaches the container under a
+      different one (`résumé 2026.csv` arrives as `r_sum_2026.csv`), and an archive arrives
+      as one object, not unpacked.
 * [ ] **RECOMMENDATION.** Handles two inputs that share a basename.
 * [ ] **RECOMMENDATION.** Bounds its read of the job description, and refuses a
       `schema_version` it does not implement.
-* [ ] **RECOMMENDATION.** Deletes each input when it is done with it. Nothing bounds input
-      bytes; the manifest bounds count indirectly. The container has no disk quota.
+* [ ] **RECOMMENDATION.** Deletes each input when it is done with it. Nothing in the
+      contract or the agent bounds input bytes; the manifest bounds count indirectly. The
+      container has no disk quota.
 
 #### Work
 
