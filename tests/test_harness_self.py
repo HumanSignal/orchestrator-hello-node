@@ -511,9 +511,14 @@ def test_this_harness_agrees_with_the_orchestrators_own_frozen_documents():
     a harness that shares code with the system it judges inherits its bugs. The price of
     that is drift, and this is what turns "they agree" from a claim into a check: the
     golden manifest carries a ``layout='prefix'`` port with a real ``prefix_digest``, an
-    ``organization_id``, ``upstream_execution_id`` on its objects and a ``null``
-    ``prefix_digest`` on a file port — every one of which this harness's validator ignored
-    entirely until this round.
+    integer ``organization_id``, an integer ``upstream_execution_id`` on its objects and a
+    ``null`` ``prefix_digest`` on a file port — every one of which this harness's validator
+    ignored entirely until this round.
+
+    One real form is NOT in these documents: ``upstream_execution_id`` as ``null``, which
+    is what an object carries when no producing execution is known for it.
+    ``test_this_copy_of_the_contract_accepts_an_input_whose_producing_execution_is_unknown``
+    builds that one.
     """
     manifest = json.loads((FIXTURES / 'golden_v1_manifest.json').read_bytes())
     marker = json.loads((FIXTURES / 'golden_v1_marker.json').read_bytes())
@@ -680,6 +685,58 @@ def test_the_harness_writes_a_manifest_this_copy_of_the_contract_accepts(image, 
     raw = json.dumps(job.manifest(), sort_keys=True).encode('utf-8')
     contract.validate_manifest(json.loads(raw), raw_bytes=raw)
     assert job.staging_prefix.endswith('attempts/4/gen-7/')
+
+
+@harness_self_test
+@traces_to(
+    'external/contract.py declares the provenance field of InputObject as optional AND nullable — '
+    '"upstream_execution_id: PositiveInt | None = None" — so a job description whose input objects carry '
+    'null there is a valid version-1 document. Its type says what else may stand there, only a real '
+    'integer of at least 1: "PositiveInt = Annotated[int, Field(strict=True, ge=1)]". A copy of the '
+    'contract that refused the null could not describe a job the orchestrator really sends; one that '
+    'stopped reading the field would accept documents the real parser refuses.'
+)
+def test_this_copy_of_the_contract_accepts_an_input_whose_producing_execution_is_unknown():
+    """``null`` in the provenance field is a value, not a mistake.
+
+    Setup:    the orchestrator's golden manifest — the real parser's own reference
+              document — with ``upstream_execution_id`` set to ``null`` on every object.
+              That is the one real form of the field those documents do not contain:
+              all three of their objects carry the integer 89990.
+    Action:   validate it with this harness's re-implementation of the contract; then
+              again with values that are neither ``null`` nor a real id.
+    Validate: the ``null`` form is accepted, and ``0``, ``true``, a numeric string and a
+              float are each refused.
+
+    The refusals are what make the acceptance mean something. "Accepts ``null``" is also
+    exactly what a validator that never looks at the field does, so on its own it could
+    not tell this copy of the contract from one that had stopped checking provenance
+    altogether.
+
+    ``null`` is not an exotic value. The launcher copies the id out of the run's own
+    trigger and writes ``null`` whenever there is none there — a run an operator started
+    by hand, for one. ``conformance/job.py`` can describe that job too, and without this
+    test a validator tightened to "must be an integer" would be noticed only as a
+    container test failing in ``setup()``, a long way from its cause.
+    """
+    golden = (FIXTURES / 'golden_v1_manifest.json').read_bytes()
+
+    def with_provenance(value) -> dict:
+        document = json.loads(golden)
+        objects = [obj for port in document['inputs'] for obj in port['objects']]
+        assert objects and all(obj['upstream_execution_id'] == 89990 for obj in objects), (
+            'the golden manifest no longer carries the integer form on every object; re-read the fixture '
+            'before trusting what this test says it adds'
+        )
+        for obj in objects:
+            obj['upstream_execution_id'] = value
+        return document
+
+    contract.validate_manifest(with_provenance(None))
+
+    for not_an_id in (0, True, '89990', 89990.0):
+        with pytest.raises(contract.ContractViolation):
+            contract.validate_manifest(with_provenance(not_an_id))
 
 
 @harness_self_test

@@ -23,6 +23,10 @@ name an object that really exists under it.
 
 from __future__ import annotations
 
+import io
+import json
+import zipfile
+
 import pytest
 
 from conformance import contract, docker
@@ -108,6 +112,80 @@ def test_several_inputs_are_all_copied(make_job):
     assert result.exit_code == 0, result.output
     for spec in inputs:
         assert job.endpoint.body_of(f'outputs/{spec.relpath}') == spec.data
+
+
+def _a_real_zip_archive() -> bytes:
+    """A small, genuine zip archive: deterministic, and nothing like text.
+
+    Built here rather than checked in, so the bytes are visibly what they claim to be,
+    and with a fixed timestamp so the same archive — and therefore the same pin — comes
+    out on every run. The member is STORED, not compressed, and holds every byte value
+    and a CR LF pair, so the archive itself contains NUL bytes, bytes that are not valid
+    UTF-8 and all three line endings: a step that decodes it as text, or translates a
+    line ending in either direction, cannot hand back the same bytes.
+    """
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, 'w', compression=zipfile.ZIP_STORED) as archive:
+        member = (bytes(range(256)) + b'\r\n') * 16
+        archive.writestr(zipfile.ZipInfo('rows.bin', date_time=(2026, 1, 1, 0, 0, 0)), member)
+    return buffer.getvalue()
+
+
+@conforms_today
+@reference_quality(
+    _COPYING
+    + ' What this test adds is a SHAPE, not a new expectation. Every other input in this file is a line '
+    'or two of text or a block of generated filler, under a kind this harness invented, naming an '
+    'execution that produced it. A real job can be none of those things: ONE binary file on the one port '
+    'the orchestrator really builds ("input"), under a real kind ("zip" is what the platform\'s own Zip '
+    'step publishes), with "upstream_execution_id" null — which is what the launcher writes whenever '
+    'the run carries no upstream execution id, as on a run an operator started by hand. A step that '
+    'branched on the kind or required the provenance field would pass every other test in this file and '
+    'fail one of the plainest jobs there is; one that decoded its input as text would fail, in this '
+    'file, only this test and the oversized-input one.'
+)
+def test_one_binary_input_under_a_real_kind_with_no_producing_execution_is_copied(make_job):
+    """One archive, on one port, with nobody recorded as having produced it.
+
+    Setup:    ONE input object on the port named ``input`` — a genuine zip archive, so its
+              bytes are not text — with the port's ``payload_kind`` set to ``zip`` and the
+              object's ``upstream_execution_id`` ``null``.
+    Action:   run.
+    Validate: the job description the store serves really has that shape; the step exits
+              0 with a succeeded marker; and the archive is readable at
+              ``outputs/<its relpath>``, byte for byte.
+
+    Everything asserted BEFORE the run is about this test's own fixture and this harness,
+    not about the node, and it is there on purpose. Without it the test would stay green
+    if the "archive" quietly became something a text decoder accepts, or if
+    ``conformance/job.py`` stopped writing the kind or the ``null`` and went back to
+    handing every container one invented shape.
+    """
+    archive = _a_real_zip_archive()
+    assert zipfile.is_zipfile(io.BytesIO(archive))
+    with pytest.raises(UnicodeDecodeError):
+        archive.decode('utf-8')
+
+    job = make_job(
+        inputs=[InputSpec(relpath='batch.zip', data=archive)],
+        payload_kind='zip',
+        upstream_execution_id=None,
+    )
+    served = json.loads(job.endpoint.blobs[contract.MANIFEST_FILENAME].data)
+    (port,) = served['inputs']
+    (described,) = port['objects']
+    assert (port['name'], port['payload_kind'], port['layout']) == ('input', 'zip', 'file'), port
+    assert 'upstream_execution_id' in described and described['upstream_execution_id'] is None, described
+
+    result = job.run()
+
+    assert result.exit_code == 0, result.output
+    assert job.marker()['status'] == 'succeeded'
+    copied = job.endpoint.body_of('outputs/batch.zip')
+    assert copied == archive, (
+        f'the archive did not come through unchanged: {len(archive)} bytes went in and {len(copied)} came '
+        f'out, {"the same length but different bytes" if len(copied) == len(archive) else "a different length"}'
+    )
 
 
 @conforms_today

@@ -42,6 +42,10 @@ and a checklist. This page is the two-minute version.
    which measured what it cost; what `node.py` does today is described in
    [docs/AUTHORING.md](docs/AUTHORING.md#nodepy-and-this-skeleton).
 
-5. **Rebuild, push, take the new digest, register a new revision.** A node's identity is
-   its digest; changing the code means registering the new one, which is also what makes
-   an old run reproducible.
+5. **Run the existing harness against your image.** Follow
+   [conformance/README.md](conformance/README.md). Read each failing test's label:
+   copying every input is reference behavior, and a transforming node may differ legally.
+6. **Publish a new image revision.** For customer-run mode, rebuild, push and register
+   the digest. For hosted mode, request a rebuild of the approved repository and wait
+   for a successful revision. Both paths are in [docs/OPERATIONS.md](docs/OPERATIONS.md).
+   Existing runs retain the revision they were launched with.

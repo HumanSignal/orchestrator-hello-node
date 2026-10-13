@@ -1,10 +1,11 @@
 # Working in this repository
 
 This is the template for an **external node** of the Label Studio Pipeline Orchestrator
-(LSPO): a pipeline step that runs as somebody's own container, on their own machine,
-built from their own code. The orchestrator never sees the source. It sees an image
-digest, hands the container a job description and short-lived credentials, and collects
-whatever the container declares it produced.
+(LSPO). In customer-run mode, the author builds an image and runs an agent on their
+machine; the orchestrator receives the image digest, not the source. In hosted mode,
+the platform builds an approved repository and runs the image on a managed pool. Both
+use the same container contract. [docs/OPERATIONS.md](docs/OPERATIONS.md#hosted-builds)
+distinguishes the setup paths.
 
 Two audiences read this repository, and they want opposite things. Someone building a
 node wants to copy `node.py` and start editing. Someone deciding whether the platform can
@@ -147,7 +148,7 @@ repository's own Dockerfile and never patches it — no volume over `/app/node.p
 entrypoint override — because if it could change what runs, none of its verdicts would
 mean anything.
 
-Expect a full run to take two to four minutes; several tests deliberately hold a request
+The 2026-09-10 full run took about four minutes; several tests deliberately hold a request
 open for twelve seconds or drive a stop through a thirty-second grace period.
 
 ## The expected-red mechanism
@@ -215,29 +216,31 @@ covered by a test, and none of them is enforced by the platform.
    address, `getaddrinfo` ignores it entirely (so the lookup needs a thread), and a proxy's
    CONNECT spends it a second time unless you recompute after the tunnel. Size it for a real
    job — nothing retries an external step automatically.
-7b. **One receipt, or none.** Decide what it says from the flag BEFORE composing it, protect
-   that write from your own handler, give it an elapsed deadline (a socket timeout measures
-   silence, not duration), and never write a second, correcting document to the same name: a
+7. **One receipt, or none.** Decide what it says from the flag BEFORE composing it, protect
+   that write from your own handler, and never write a second, correcting document to the same name: a
    write that failed ambiguously may still be accepted and may commit after its own
    correction. This repository shipped both repairs — abandonment, then correction — and
    both lost the same way. Give that write an ELAPSED deadline (a socket timeout measures
-   silence), and size it knowing it is best-effort: **nothing tells the container how long
-   it has after a stop** — not the injected variables, not the credentials envelope, not
-   the job description, and the orchestrator's stop object stops at the agent — so no
-   positive number survives a remaining grace of zero. What makes that safe is measured on the platform side: the
+   silence), and size it knowing it is best-effort: the envelope expiry is clamped to the
+   reporting-window ceiling and may reflect it near the end, but does not identify the
+   earlier workload kill cutoff. Earlier envelopes can expire and be refreshed. The
+   orchestrator's stop instruction is not forwarded to the workload, so no positive
+   number survives a remaining grace of zero. What makes that safe is measured on the platform side: the
    orchestrator decides an outcome from its own journal, a marker can only veto a success,
-   a stopped attempt's objects are salvaged as diagnostics rather than published, and the
+   an accepted terminal report can salvage a stopped attempt's objects as diagnostics
+   (operator cancellation normally does not collect them), and the
    operator's sentence quotes `exit_code` and `error` but never `status`.
-7. **Write the marker last**, and write one on the failure and cancellation paths too,
+8. **Write the marker last**, and write one on the failure and cancellation paths too,
    with the real exit code and an inventory of whatever already landed.
-8. **Classify exits honestly.** 0 succeeded, 1 a later attempt might survive, 10 no retry
-   can fix, 20 stopped on request. Reporting a momentary `503` from an object store as
-   permanent tells the platform never to run that work again.
-9. **Never print a credential.** A presigned URL's query string *is* the credential, and
+9. **Classify exits honestly.** 0 succeeded, 1 a later attempt might survive, 10 no retry
+   can fix, 20 stopped on request. These express the node's intent: the current platform
+   records failed external attempts as transient regardless of their exit code, and
+   retries require an operator; there is no automatic retry scheduler.
+10. **Never print a credential.** A presigned URL's query string *is* the credential, and
    container output is stored with the execution and searchable. Route every message that
    can reach a log through the redaction helper — an HTTP library puts the whole URL,
    signature included, into the text of its errors.
-10. **Run as a non-root user — any of them.** No uid has to match the agent's. The
+11. **Run as a non-root user — any of them.** No uid has to match the agent's. The
     credentials directory is mounted `0711` with the file inside it `0444`, so any user
     can open it; confidentiality comes from an ancestor directory nobody else can
     traverse. What the modes *do* still require: open the exact path in
