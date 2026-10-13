@@ -361,21 +361,27 @@ staging directory.
 
 ## Pointing a pipeline node at your deployment
 
-**BEHAVIOUR.** In the pipeline editor: **Add node → External → External node**, pick the deployment you
-registered, and wire an edge into it from the step whose output it should read. That is
-the same thing as adding a script node with this configuration, which is what it stores
-and what an API caller writes directly:
+**BEHAVIOUR.** In the pipeline editor: **Add node → External → External node**, and pick
+the deployment you registered. Wire an edge into it from whatever should feed it: the step
+whose output it should read, or a **Data Source** node holding an uploaded file. Use the
+`MANUAL` trigger on an edge from a Data Source (a newly drawn one has it by default) and
+start the run with the **Run node** button on the external node itself — a Data Source has
+no Run button of its own. Whatever the node delivers through its output ports comes back as
+that run's artifacts. The Data Source route has a section of its own:
+[Giving the node a file you uploaded](#giving-the-node-a-file-you-uploaded).
+
+**BEHAVIOUR.** Adding the node in the editor is the same thing as adding a script node with
+this configuration, which is what the editor stores and what an API caller writes directly:
 
 ```json
 {"step_kind": "external", "external_deployment_id": 12, "params": {}}
 ```
 
-**BEHAVIOUR.** Whatever the node delivers through its output ports comes back as that
-run's **artifacts**, and each one's kind is the **port name** it was delivered under. A
-downstream step configured to read `output` finds exactly what was published under
-`output` — which is why "the node ran but nothing downstream sees anything" is almost
-always a port name that does not match, or an object the marker inventoried but claimed
-under no port at all.
+**BEHAVIOUR.** Each artifact the node delivers takes its kind from the **port name** it was
+delivered under. A downstream step configured to read `output` finds exactly what was
+published under `output` — which is why "the node ran but nothing downstream sees
+anything" is almost always a port name that does not match, or an object the marker
+inventoried but claimed under no port at all.
 
 **RULE for the "Required" column, BEHAVIOUR for the rest of the table below.** The
 configuration validator refuses a node whose `external_deployment_id` is missing or is not
@@ -389,7 +395,7 @@ did set (`pipelines/config_schemas.py`).
 | `params` | object | no, default `{}` | **the only node configuration your code ever sees**, copied verbatim | **yes** |
 | `timeout_seconds` | integer > 0 or null | no | requested runtime budget. **Set this to give a node more than the 900 seconds its revision declares** — it wins over the revision and takes effect at once | **yes** |
 | `queue_timeout_seconds` | integer > 0 or null | no | how long the job stays claimable, default 3600 | no |
-| `input_payload_kind` | string or null | no | require an upstream artifact of this kind; absent means every upstream artifact, including none | indirectly |
+| `input_payload_kind` | string or null | no | shown in the editor as **Upstream artifact kind**. Require an input of this kind: an upstream artifact of that kind, or, when the input is a Data Source's uploaded file, a file of that kind — the last extension of its cleaned stored name, lower-cased (`zip` for `batch.zip`), or `file` when it has none. Kinds are compared exactly, and a file's kind is always lower case, so write `zip`, not `ZIP`. Absent means whatever is there: every upstream artifact, or the Data Source's file, including nothing at all | indirectly |
 
 **RULE.** New API writes reject unknown top-level external-step configuration keys.
 A typo such as `timeout_second` cannot be saved as a supported setting. Put the
@@ -397,13 +403,77 @@ container's own options inside `params`, whose shape the platform does not valid
 Older stored nodes with stray keys can still run; the handler ignores those keys
 (`pipelines/config_schemas.py`, `handlers/steps/external.py`).
 
-**BEHAVIOUR.** With `input_payload_kind` set and no matching upstream artifact, the step
-fails after exhausting the engine's ordinary retry ladder rather than immediately. With it
-unset and no upstream artifacts at all, the job runs with no input port, which is a
-legitimate source-style step.
+**BEHAVIOUR.** With `input_payload_kind` set and the node fed by an upstream **step**, a
+run with no upstream artifact of that kind is the ordinary missing-artifact failure: the
+step fails after exhausting the engine's ordinary retry ladder rather than immediately,
+because the upstream step may still produce the artifact.
+
+**RULE.** With `input_payload_kind` set and the input a **Data Source's uploaded file** —
+the node is wired directly after a Data Source and the run carries no upstream artifacts —
+the run fails **immediately** when the file is of another kind, or when the Data Source
+holds no uploaded file at all (`handlers/steps/external.py`). That failure is terminal:
+nothing is retried and no job is queued, because no amount of waiting uploads a file. When
+the run does carry upstream artifacts, the paragraph above applies instead.
+
+**BEHAVIOUR.** With it unset, the node gets whatever is there: every upstream artifact, or
+the Data Source's uploaded file. When there is neither, the job runs with no input port,
+which is a legitimate source-style step.
 
 **BEHAVIOUR.** A folder (prefix layout) artifact upstream is refused immediately and
 permanently, with a message naming the artifact. It is not retried.
+
+### Giving the node a file you uploaded
+
+**BEHAVIOUR.** An external node wired directly after a **Data Source** node — a pipeline
+node that holds files an operator uploads in the editor — receives that Data Source's
+uploaded file as its one input, with no Import step and no other step in between, whenever
+the run carries no upstream artifacts (`handlers/steps/external.py`).
+
+1. Add a **Data Source** node, open it and upload the file. The newest upload is the
+   **Active** one unless you chose another with **Make active**.
+2. Draw an edge from the Data Source to the external node. It has to be on the `MANUAL`
+   trigger: an edge newly drawn from a Data Source has that by default, and an edge drawn
+   earlier keeps the trigger it was given, so check it.
+3. Start the run with the **Run node** button on the **external node**. A Data Source has
+   no Run button of its own.
+
+**BEHAVIOUR.** Which file a run gets is settled at that click. It is the one that was
+Active when Run was clicked (pinned at that moment), if it is still an uploaded file of that
+Data Source; otherwise the Data Source's active file, which is the one explicitly made
+Active, else the newest upload. While the upload pinned at the click still exists, a file
+uploaded afterwards does not replace it: a **retry** keeps the file the run was started
+with, and a newer upload reaches the node only through a fresh Run. When that upload has
+been deleted, the Data Source's active file is used instead and a warning is logged, and if
+the Data Source then holds no file the retry launches with zero inputs unless a kind is
+required. A run started while the Data Source held no file pinned nothing, so a retry of it
+reads whatever file is active by then.
+
+**BEHAVIOUR.** The container is handed one object on the `input` port, pinned by `sha256`
+and `size` and downloaded through a presigned link like any other input. Its name is
+the file's cleaned stored name — every run of characters outside `A-Za-z0-9._-` became one
+`_` at upload — and the port's kind is that name's last extension, lower-cased, or `file`
+when it has none ([PROTOCOL.md](PROTOCOL.md#22-invocationjson-field-by-field)). The run's
+log has a line naming the Data Source, the file as it was uploaded and its kind, and its
+start line reports `inputs=1`.
+
+**BEHAVIOUR, for every bullet below.** These are the limits of it.
+
+* **Uploaded files only.** An S3 address typed into the Data Source's settings is not
+  delivered to an external node.
+* **One file per run, and never alongside upstream artifacts.** A run that carries upstream
+  artifacts gets those, handled and retried as for any other source, and the uploaded file
+  is not added.
+* **No file is not an error, unless a kind is required.** With no uploaded file on the Data
+  Source and `input_payload_kind` unset, the job launches with `"inputs": []`. With the
+  setting present the run fails at once, as described above.
+* **Uploads are capped at 500 MB by default.** That is a limit on the **declared** size of
+  an upload, and an installation can change it.
+* **Deleting an upload does not stop a hand-over.** It removes the upload's row, not the
+  stored object, so a job already queued still receives the file. Cancelling the run is the
+  stop control.
+* **External nodes only, and no change to the wire contract.** No other kind of step is
+  handed the file this way, and the job description is still version 1 with no field added
+  ([PROTOCOL.md](PROTOCOL.md#22-invocationjson-field-by-field)).
 
 ---
 
@@ -493,7 +563,9 @@ which you cannot change from a node.
 * **No aggregate upload quota.** One object is bounded at 1 GiB. Nothing caps the number of
   objects or the total bytes a container may upload before its credentials expire.
 * **No limit on the SIZE of inputs, and an indirect one on their number.** Nothing caps one
-  input object or their total bytes. The count, however, is capped after all: every input
+  input object or their total bytes — except at the one place an operator uploads an input
+  directly: a file uploaded to a Data Source is capped at 500 MB by default, a limit on the
+  declared size of the upload. The count, however, is capped after all: every input
   and its metadata are written into the job description, and the writer refuses to publish
   one over 8 MiB (`external/io.py`). Measured against the real models, that is
   roughly **25,000 inputs** with 95-character URIs, at about 330 bytes each. A step wired
@@ -618,6 +690,10 @@ two rows where that distinction bites are marked inline.
 | Logs never appear at all | a logging library that defaults to WARNING and to stderr only, or a buffered stdout | Unchecked | configure the logger explicitly and set `PYTHONUNBUFFERED=1` |
 | A container's output is gone before you could read it | the agent removes a job's container when the job ends | BEHAVIOUR — exited containers are removed unless the agent enables `LSPO_AGENT_KEEP_CONTAINERS` | attach at the start instead: [Watching a run, live](#watching-a-run-live) |
 | Log lines arrive mangled, with stray `[31m` in them | you printed ANSI colour; the escape byte is stripped as a control character and the rest survives | BEHAVIOUR | print plain text |
+| The node is wired straight after a **Data Source** node and starts with no inputs (`"inputs": []`), or with inputs that are not the uploaded file | no inputs: the Data Source holds no uploaded file, or the orchestrator predates this capability. Only an uploaded file is delivered, never an S3 address typed into the Data Source's settings; and a retry launches with none when the file the run was started with has been deleted and the Data Source holds no other. Other inputs: the run carried upstream artifacts, which are then the node's inputs, and the uploaded file is not added to them | BEHAVIOUR — a job with no inputs is legitimate, so nothing refuses it | upload the file on the Data Source, check that it is the **Active** one, then start a fresh run with **Run node** on the external node. The run's log names the file that was handed over, and its start line reports `inputs=1`. Nothing to fix in the node: the empty list is the platform's answer, not a fault in your reader ([above](#giving-the-node-a-file-you-uploaded)) |
+| The external node is wired after a Data Source and never starts, or shows no **Run node** button | the edge from the Data Source is on the "upstream complete" trigger. That trigger fires when an execution **into** the edge's source node completes, and a Data Source with no edge into it never has one. A node shows its Run button only for an incoming edge on the manual trigger. An edge newly drawn from a Data Source has that trigger by default; an edge drawn earlier keeps the one it was given | BEHAVIOUR — the trigger is honoured as set, and no job is created | switch that edge to the manual (`MANUAL`) trigger in the pipeline editor, then start the run with **Run node** on the external node — a Data Source has no Run button of its own. Nothing to fix in the node or the agent: neither was asked to do anything, so neither has a log line about it |
+| The run retries for a long time, then fails naming the upstream node and a kind | **Upstream artifact kind** (`input_payload_kind`) is set on the node, and the upstream **step** produced no artifact of that kind | BEHAVIOUR — the run fails only after the engine's ordinary retry ladder, not at once ([above](#pointing-a-pipeline-node-at-your-deployment)) | compare the setting with what the upstream step really publishes. When that step is itself an external node, the kind is the **port name** its output was delivered under |
+| The run fails at once, with no job queued, naming a Data Source and the kind of its file, or saying the Data Source has no uploaded file | **Upstream artifact kind** (`input_payload_kind`) is set on a node whose input is a Data Source's uploaded file, and that file is of another kind — its kind is the last extension of its cleaned stored name, lower-cased, or `file` when it has none — or the Data Source holds no uploaded file at all | RULE — checked before the job is created, and not retried (`handlers/steps/external.py`) | make the setting match the file's kind exactly (`zip` for `batch.zip`, never `ZIP`), or clear it to accept any file, or upload a file of the required kind and make it Active. Then start a fresh run: a retry keeps the file the run was started with for as long as that upload exists |
 | The node runs but downstream steps see nothing | the objects were inventoried but claimed under no output port | BEHAVIOUR — an unclaimed object is verified and kept, but not offered downstream | claim them under a port; `produced_ports` is what becomes downstream artifacts |
 | Saving external-node configuration rejects a key | unknown top-level configuration key | RULE — external configuration is closed at the API write boundary | check the table above; put container-specific options inside `params` |
 | The disk on the agent's machine fills up | inputs downloaded and never deleted; no storage limit exists | Unchecked | delete each input when done; see the residual limits above |
