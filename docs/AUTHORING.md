@@ -466,9 +466,9 @@ everything the skeleton above shows: it reads `LSPO_CREDENTIALS_FILE`, re-reads 
 credentials, streams in both directions, keeps its inventory at module scope, handles a
 stop request, writes the marker last on every path with the exit code the process really
 returns, classifies transient and permanent failures apart, and redacts every URL before
-it reaches a log. The 2026-09-10 audit ran all 141 tests successfully, including the
-current-platform
-citation check; see [CONFORMANCE-BASELINE.md](../CONFORMANCE-BASELINE.md).
+it reaches a log. The 2026-10-13 verification ran all 153 tests successfully, including the
+citation check against the orchestrator commit in production that day; see
+[CONFORMANCE-BASELINE.md](../CONFORMANCE-BASELINE.md).
 
 **The defects it used to have are still worth reading**, because each one is a mistake a
 first version makes and the record says what each cost:

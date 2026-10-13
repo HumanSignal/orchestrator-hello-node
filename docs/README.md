@@ -154,15 +154,45 @@ reports it.
 
 ## Provenance
 
-This section is **background**. The documentation was reviewed on **2026-09-10** against
-the fetched default branches: this repository's `main` at
-`c768c02f4ef734d1571133adae076f7c78900b4a`, and the orchestrator's **`master`** at
-`30b0950a`. The orchestrator also has an older branch named `main`; it is not the
-default branch and does not contain the external-node implementation.
+This section is **background**. Two dated checks stand behind these documents, and they
+are not the same kind of check.
 
-All twelve tracked Markdown files were read. The current reference was checked against
-`node.py`, its Dockerfile, the harness, tests and CI workflow, and against these platform
-sources:
+**The full review, 2026-09-10.** The documentation was reviewed against the fetched default
+branches: this repository's `main` at `c768c02f4ef734d1571133adae076f7c78900b4a`, and the
+orchestrator's **`master`** at `30b0950a`. The orchestrator also has an older branch named
+`main`; it is not the default branch and does not contain the external-node implementation.
+All twelve tracked Markdown files were read. The reference was checked against `node.py`,
+its Dockerfile, the harness, tests and CI workflow, and against the platform sources in the
+first six rows of the table below.
+
+**The recheck, 2026-10-13.** This repository at `main` `a9ca5b8` plus pull request #12 at
+branch commit `0f19d5d`; the orchestrator's `master` at `86461801`, which has been in
+production since 2026-10-13. Two things were done, and nothing beyond them is claimed:
+
+1. **A verbatim citation check.** The suite's own check was run against `86461801`: the
+   38 citations in the test files carry 90 quoted fragments, and every fragment was found
+   in the file its citation names.
+2. **A file-by-file diff review.** For each of the 55 orchestrator files in the table
+   below, the history and the diff between `30b0950a` and `86461801` were read. 29 of them
+   changed and 26 did not. For every behavioural change in those diffs that these
+   documents describe, the statement was found and held against the file at `86461801`.
+
+It was not a second full review. The Markdown files were not all re-read on that date, and
+a statement about a file that did not change between the two commits rests on the
+2026-09-10 review. The passages written since then — a Data Source's uploaded file as a
+node's input, and search facts — describe the two orchestrator changes that introduced
+them, `9fdafaa8` and `86461801`, and those are among the diffs step 2 read.
+
+Step 2 corrected three statements, each of which had been true at `30b0950a`:
+
+* Registration lives under the top-bar link **Organization**. It was called Settings until
+  orchestrator commit `0c39b8df`, and OPERATIONS and this repository's `CLAUDE.md` still
+  said Settings.
+* The setup command's printed step 2 sends you to the pipeline editor. OPERATIONS still
+  described the older text, which said there was no user interface for external nodes, and
+  called it stale.
+* PROTOCOL section 5 points at a paragraph of the orchestrator's `external/README.md` by
+  its opening words, and those words changed; the pointer now quotes the current ones.
 
 | Area | Sources in the orchestrator |
 |---|---|
@@ -172,6 +202,12 @@ sources:
 | Container environment, permissions and signals | `agent/runner.py`, `agent/creds.py`, `agent/config.py`, `agent/executors/docker_exec.py`, `agent/identity.py` |
 | Logs and publication | `agent/logbuf.py`, `agent/redact.py`, `pipelines/log_stream.py`, `pipelines/external_finalize.py`, `pipelines/cancellation.py` |
 | Registration and hosted builds | `noderegistry/services.py`, `noderegistry/serializers.py`, `noderegistry/building.py`, `noderegistry/hosted_views.py`, `noderegistry/models.py`, `noderegistry/management/commands/external_demo_setup.py`, `frontend/src/pages/ExternalNodesPage.tsx`, `lspo/settings/base.py` |
+| A Data Source's uploaded file as the input | `pipelines/source_assets.py`, `pipelines/manual_trigger.py`, `pipelines/models.py`, `pipelines/asset_views.py`, `storage_connectors/services.py`, `handlers/base.py` |
+| Search facts | `pipelines/facts.py`, `pipelines/run_search.py`, with `external/io.py`, `external/contract.py` and `pipelines/external_finalize.py` from the rows above |
+| Retries of a failed step | `pipelines/tasks.py`, `pipelines/retry.py` |
+| The pipeline editor: wiring, the Run button, a new edge's trigger | `frontend/src/components/graph/PipelineGraph.helpers.ts`, `frontend/src/components/graph/PipelineGraph.tsx`, `frontend/src/components/graph/PipelineNode.tsx`, `frontend/src/components/graph/nodeCatalog.ts`, `frontend/src/components/graph/dataSource/DataSourceConfigFields.tsx`, `frontend/src/components/graph/step-forms/ExternalForm.tsx` |
+| Where registration lives in the interface, and the product's own setup text | `frontend/src/components/Layout.tsx`, `frontend/src/pages/SettingsPage.tsx`, `frontend/src/App.tsx`, `frontend/src/components/externalNodes/nodePromptTemplate.ts`, `frontend/src/components/externalNodes/HowToBuildNodeDialog.tsx` |
+| Named in passing by these pages or by a test's citation | `external/hashing.py`, `runners/auth.py`, `runners/enrollment.py`, `runners/serializers.py`, `agent/README.md`, `external/README.md` |
 
 **Historical parser evidence (2026-08-08).** At orchestrator commit
 `6b2ff82c70f26d0ceaa1a841137f1b3cfb08186b`, the original audit read the parser's model
@@ -179,7 +215,7 @@ definitions, listed every declared field and cross-field check, and fed about ni
 mutated markers to the parser one at a time, recording accepted and refused cases. Every
 field and cross-field check had at least one refusal exercised. This is what **"exercised"**
 means in the marker-refusal lists in PROTOCOL and CONFORMANCE. It is a record of that audit,
-not a claim that the enumeration was rerun in September. The same audit measured the
+not a claim that the enumeration was rerun in September or in October. The same audit measured the
 input-count illustration by widening real manifests until the 8 MiB writer limit refused
 one. Its old deadline experiment predates the stop-window implementation and is superseded
 by the current source-based account in PROTOCOL section 7.
@@ -189,19 +225,22 @@ The original audit recorded a checker over all five guides for label coverage, l
 opening their blocks, and the distinction between rules, behavior and recommendations.
 It reported zero uncovered blocks, mislabelled blocks and inherited bold ledes. A mutation
 check caught four of five injected gaps; deleting a label from a legitimate continuation
-remained undetectable. This historical checker was not rerun for the September update.
+remained undetectable. This historical checker was not rerun for the September update or
+for the October recheck.
 
-The frozen wire-document examples remain byte-identical to the platform's fixtures.
+The frozen wire-document examples were compared again on 2026-10-13 and are byte-identical
+to the platform's fixtures at `86461801`.
 Current verification results are recorded in the opening note of
 [CONFORMANCE-BASELINE.md](../CONFORMANCE-BASELINE.md). That file preserves the older
 measurements, including claims about platform behavior that were true only at their
 recorded commits. The archived README is also historical, not an operator guide.
 
-This audit does not establish which flags, images or settings a live installation uses.
+Neither check establishes which flags, images or settings a live installation uses.
 The current runtime-deadline account comes from the code and its existing tests; older
 measurements of a deadline rejecting every terminal report do not describe the default
 stop-window implementation now. No production run or real S3 transfer was performed for
-this documentation update.
+either documentation update: "in production since 2026-10-13" above says which orchestrator
+commit was read, not that this node was run against it.
 
 Source paths are provenance, not generated documentation. When these pages disagree
 with the referenced source, the source is authoritative and the discrepancy is a

@@ -9,8 +9,14 @@ Every statement is labelled **RULE** (the platform refuses or fails the run),
 (what a good node does; the platform permits otherwise). Unlabelled text is background.
 
 Also **background**: code claims and citations were rechecked against the orchestrator at
-default-branch commit `30b0950a` (`master`, reviewed 2026-09-10). Historical measurements
-retain their original dates and commits; they were not all rerun. Source paths give provenance; [README.md](README.md#provenance) records the scope.
+default-branch commit `86461801` (`master`, in production since 2026-10-13). That recheck,
+made on 2026-10-13, was two things and no more: the suite's verbatim citation check run at
+`86461801`, and a file-by-file review of what changed in the cited sources since
+`30b0950a` — the commit of the full review of 2026-09-10 — with each behavioural change
+these documents describe held against the statement that describes it. It was not a second
+full reading.
+Historical measurements retain their original dates and commits; they were not all rerun.
+Source paths give provenance; [README.md](README.md#provenance) records the scope.
 
 ---
 
@@ -762,8 +768,8 @@ after a stop.
 ### 4.4 `result.json`
 
 Background: this section describes the orchestrator change **"search facts for external
-nodes"**, which landed AFTER the commit the preamble names. Its provenance is that change,
-not that commit's tree.
+nodes"**. That change is the commit the preamble names, `86461801`; the commit before it
+read nothing out of `result.json` at all.
 
 **BEHAVIOUR. The orchestrator reads exactly one thing out of `result.json`: the optional
 `facts` list.** Nothing reads its `metrics` or its `summary` — there is still no caller of
@@ -1011,7 +1017,8 @@ hour later.
 **RECOMMENDATION.** On a failed or cancelled run, write a marker too. The contract invites
 it and collection reads it: your `error` and `exit_code` become the execution's failure
 reason, and every object you inventoried is salvaged through the same verified path
-(`external/README.md`, "A failed or cancelled marker is read, not discarded"). It is not
+(`external/README.md`, "When collection runs, a failed or cancelled marker is read, not
+discarded"). It is not
 required, and a failing node that writes nothing loses all of that.
 
 **BEHAVIOUR.** Salvage requires a terminal report that actually arms collection. Your

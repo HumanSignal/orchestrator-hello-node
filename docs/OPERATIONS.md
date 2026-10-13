@@ -25,8 +25,10 @@ position is that this is the customer's trusted code rather than hostile code.
 
 ## Registering a node
 
-**BEHAVIOUR.** Settings → **External Nodes** → **Connect node** offers image
-registration and, when enabled, hosted builds. The image path takes a name and a
+**BEHAVIOUR.** Organization → **External Nodes** → **Connect node** offers image
+registration and, when enabled, hosted builds. (The top-bar link was called **Settings**
+until orchestrator commit `0c39b8df`, and an old `/settings` link still redirects to the
+same screen.) The image path takes a name and a
 digest-pinned image and creates or reuses a pool, deployment and revision. Registration
 does not start an agent or execute a pipeline.
 
@@ -61,9 +63,12 @@ and agent start command; it prints a registration token only when newly minted.
 `--timeout-seconds` defaults to **900**. `--rotate-token` deliberately replaces the
 registration token; `--confirm-pool-move` permits moving away from an occupied pool.
 
-**BEHAVIOUR.** The command's printed step 2 still says there is no user interface for
-external nodes. That instruction is stale: use the Settings registration tab and the
-pipeline editor's **Add node → External → External node** entry described below.
+**BEHAVIOUR.** The command's printed next steps agree with these pages: step 2 sends you
+to the pipeline editor's **Add node → External → External node** entry, and step 3 says
+what to wire into the node — an upstream step, or a Data Source — which is covered
+[below](#pointing-a-pipeline-node-at-your-deployment). An orchestrator older than commit
+`9fdafaa8` still prints a step 2 saying there is no user interface for external nodes;
+that sentence was already stale there, and the editor entry is the one to use.
 
 **BEHAVIOUR.** Rotating the pool token, or disabling new registrations, does not stop
 already enrolled agents. They authenticate using their own runner tokens. Retiring a
@@ -523,9 +528,10 @@ nothing and the job stays queued for someone else.
 
 ## Residual limits, stated plainly
 
-**BEHAVIOUR, for every bullet below.** Each is a real gap at the commit these documents were
-verified against, and none is a rumour: they are things the platform does, or does not do,
-which you cannot change from a node.
+**BEHAVIOUR, for every bullet below.** Each is a real gap at the orchestrator commit these
+documents were last checked against — `86461801`; [README.md](README.md#provenance) says
+what that check covered and what it did not — and none is a rumour: they are things the
+platform does, or does not do, which you cannot change from a node.
 
 * **No watchdog.** Nothing reclaims a job that nobody ever claims, or one whose agent
   disappears after claiming it. The queue deadline only makes the claim scan skip the row.
