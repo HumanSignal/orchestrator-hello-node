@@ -92,6 +92,49 @@ where possible, and attempt the final receipt with fresh credentials. Nothing te
 the container how much of the configured stop window remains. A receipt deadline is
 therefore your own best-effort limit, not proof that a stop will preserve the result.
 
+### 6. Make the run findable
+
+**RECOMMENDATION, and it costs about four lines.** Write the ids of the things your step
+touched into `result.json` as **search facts**, so that six weeks later somebody can find
+this run by typing one of them. Every entry in the document's optional `facts` list is
+recorded against the execution and becomes a search term in the Runs panel — `task:41`,
+`input:rows.csv`, `design:AF7…` — and without them a finished external run is findable only
+by an execution number that whoever is asking does not have. The shape, the rules each
+entry is held to, and the fact that a bad entry costs itself and nothing else are all in
+[PROTOCOL.md](PROTOCOL.md#44-resultjson).
+
+```json
+"facts": [{"key": "task", "value": "41"}, {"key": "input", "value": "rows.csv"}]
+```
+
+**RECOMMENDATION.** Record **identities, not descriptions**. The value of a fact is that
+somebody types it from memory or pastes it from a ticket: an id, a filename, a batch name.
+Use `task` and `annotation` for Label Studio ids, because those are the keys the platform's
+own steps write and a search for one finds your run beside theirs; invent your own key for
+anything else, avoiding the search box's own field names
+([PROTOCOL.md](PROTOCOL.md#44-resultjson) lists them).
+
+**RECOMMENDATION.** Write the document on your **failure** path too, carrying the facts
+you had collected by then, and write it **before** the completion marker. The run somebody
+comes looking for is usually the one that went wrong, and the facts it collected before it
+died are as true as any others. This is the same reasoning as the marker-last rule, and it
+costs the same one `try` block: a step that only reports after everything worked answers
+the question for every run except the interesting one.
+
+**RECOMMENDATION — and NOT on the cancellation path.** A step that is stopping has, by its
+own design, given up its remaining requests: the whole point of noticing a stop is to
+abandon the transfers in flight and start no more, and the completion marker is the one
+request it still makes. So there is no connection left to write a report over, and a step
+that tries anyway spends what little of the grace it has and then prints a failure of its
+own making on a run that was stopped deliberately. **BEHAVIOUR.** What survives a
+cancellation is whatever was written **before** the stop: the orchestrator reads a document
+found beside a `cancelled` marker exactly as it reads one beside a successful marker, so a
+step that reports as it goes keeps its facts and one that would only have written them on
+the way out keeps none. That is when a marker is read at all: after an operator's Cancel of
+running work none is, and no facts are recorded
+([PROTOCOL.md](PROTOCOL.md#7-cancellation)). `node.py` says so in one plain line and writes
+nothing.
+
 ---
 
 ## The skeleton
@@ -423,9 +466,9 @@ everything the skeleton above shows: it reads `LSPO_CREDENTIALS_FILE`, re-reads 
 credentials, streams in both directions, keeps its inventory at module scope, handles a
 stop request, writes the marker last on every path with the exit code the process really
 returns, classifies transient and permanent failures apart, and redacts every URL before
-it reaches a log. The 2026-09-10 audit ran all 141 tests successfully, including the
-current-platform
-citation check; see [CONFORMANCE-BASELINE.md](../CONFORMANCE-BASELINE.md).
+it reaches a log. The 2026-10-13 verification ran all 153 tests successfully, including the
+citation check against the orchestrator commit deployed to production that day; see
+[CONFORMANCE-BASELINE.md](../CONFORMANCE-BASELINE.md).
 
 **The defects it used to have are still worth reading**, because each one is a mistake a
 first version makes and the record says what each cost:
@@ -436,7 +479,7 @@ The input check requires a hash pin and compares the byte count when `size` is a
 integer, matching `node.py`. Normal platform-launched inputs carry both fields, but the
 reference does not independently reject a missing or non-integer size in the envelope.
 
-Two things in `node.py` are still worth pointing at rather than copying blindly:
+Three things in `node.py` are still worth pointing at rather than copying blindly:
 
 * **It has no HTTP-library dependency, and that is deliberate.** `requests` builds a
   multipart upload body in memory, so `files={'file': ...}` holds the whole object — the
@@ -456,6 +499,21 @@ Two things in `node.py` are still worth pointing at rather than copying blindly:
   of the two because an upload's ending is the ambiguous one — the store may already have
   committed the object — so waiting longer only buys a clearer answer about something that
   has already happened.
+
+* **It inventories its report document AFTER uploading it, and everything else before.**
+  Recording an object before its upload starts is the rule everywhere else in that file,
+  and it is right for work, for one reason: an ambiguous upload may still commit after the
+  client has gone, and an object nobody named is never looked at again — so the cost of
+  naming something that never arrives is smaller than the cost of losing something that
+  did. The report document written on the way out of a failure inverts both halves of that
+  sum, which is why it is the exception. Its search facts are read from the staging prefix
+  **by name**, not from the marker's inventory, so a copy the receipt never mentions still
+  delivers everything anybody reads it for — there is nothing to lose by naming it late.
+  And it is written when the run is already ending, on credentials that may have died with
+  it, so an upload that simply fails is the ordinary case rather than the remote one — and
+  a receipt naming a document the store never took sends salvage looking for a file that is
+  not there. If you copy the pattern, copy the reasoning with it: the ordering is not a
+  preference, and it is not a rule you can lift into the rest of your step either.
 
 `node.py` claims `result.json` under `report`, separately from the copied files under
 `output`. Both port names are the example's choices. The report echoes `params` while
@@ -554,6 +612,16 @@ apart either treats advice as law or treats law as advice. Both are expensive.
 * [ ] **RECOMMENDATION.** Retries once on an expiry refusal, only when the envelope
       actually changed (compared by contents, not by object identity), and never blindly
       on an ambiguous POST failure.
+* [ ] **RECOMMENDATION.** Records what the run touched as search facts in `result.json`,
+      on the failure path as well as the success one — and not on the cancellation path,
+      where the connection to write one no longer exists — so the run can be found
+      afterwards by an id somebody actually has (section 6 above). Nothing checks it, and a
+      run nobody can find is a run nobody can answer questions about.
+* [ ] **RECOMMENDATION.** Applies the orchestrator's own recording rules to each fact
+      BEFORE writing it (non-blank, at most 512 characters, no control characters, at most
+      10,000 entries) and says in the summary what it could not claim. An entry that breaks
+      one is dropped on the far side, in a log you will never read, and the run is simply
+      unfindable with nothing to explain why.
 
 #### Marker
 
@@ -572,7 +640,9 @@ apart either treats advice as law or treats law as advice. Both are expensive.
       discarded.
 * [ ] **RECOMMENDATION.** Written on the failure and cancellation paths too, with the
       inventory of whatever was already uploaded. Not required — and a failing node that
-      writes nothing loses every object it had produced.
+      writes nothing loses every object it had produced. (This is the MARKER. The report
+      document is a different question and a different answer: failure path yes,
+      cancellation path no — section 6 says why.)
 * [ ] **RECOMMENDATION.** `exit_code` in the marker equals the code the process returns.
 
 #### Ending

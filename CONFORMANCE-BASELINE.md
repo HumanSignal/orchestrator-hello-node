@@ -1,6 +1,88 @@
 # Conformance baseline — current verification and historical measurements
 
+## Verification on 2026-10-13
+
+The reference implementation as pull request #12 leaves it — `main` at `a9ca5b8` plus the
+pull request's branch at commit `0f19d5d`; the squash commit that will carry it into `main`
+does not exist yet — was exercised in real Docker containers with the harness. Platform
+citations were read from orchestrator **`master` at `86461801`**, the commit that was
+deployed to production on 2026-10-13:
+
+```text
+LSPO_ORCHESTRATOR_SRC=/path/to/orchestrator LSPO_ORCHESTRATOR_REF=86461801 python -m pytest -q -p no:cacheprovider
+153 passed in 252.85s (0:04:12)
+
+python -m pytest -q -p no:cacheprovider        # no orchestrator checkout: what CI runs
+152 passed, 1 skipped in 252.37s (0:04:12)
+
+python verify_mutations.py
+12/12 claims verified red against the current suite
+```
+
+The one skip in the second run is the verbatim citation check, which needs the
+orchestrator's sources and says so. In the first run it ran: it read 38 citations carrying
+90 quoted fragments out of the test files and found every fragment in the file its
+citation names, at `86461801`.
+
+Collection (`python -m pytest --collect-only -q --print-labels`) reports 153 tests: 62
+`conforms_today`, 67 `subject_is_platform` and 24 `harness_self_test`, with no
+`expected_red_until_fixed`. Bases: 83 contract, 45 reference-quality and 25
+repository-policy tests.
+
+**What moved the totals since 2026-09-10.** Collected the same way on this date, the tree
+of that verification (`c768c02`) has 141 tests and `main` at `a9ca5b8` has 143. The two
+that arrived with a Data Source's uploaded file as an input (#14) are one in
+`tests/test_inputs.py`, a `conforms_today` test on a reference-quality basis, and one in
+`tests/test_harness_self.py`, a harness self-test on a contract basis. The ten that arrive
+with this pull request are all about search facts: six in `tests/test_documents.py`, two
+in `tests/test_failures.py`, one in `tests/test_cancellation.py` and one in
+`tests/test_harness_self.py`. Nine of them are `conforms_today` on a reference-quality
+basis and the tenth is a harness self-test on a repository-policy basis.
+
+Why each of those ten exists is the pull request's own account of its review rounds, as
+its first commit (`813cc68`, 2026-08-28) has it. It is kept here as that account; none of
+it was re-measured on this date. THREE came when the feature was built — the node's own
+report document on the successful path and on the failed one, and the harness's new
+report-rather-than-refuse channel held to being both — and SEVEN across three rounds of
+review, each round finding something the one before it had not. A cancelled run that
+reported a failure of its own making (measured then: every stopped run printed `could not
+write result.json … stop requested while this connection was being made`, because the
+report write is refused by the same transport rule that makes a stop prompt). A fact
+written at a length the orchestrator will not store, and the entry cap applied at the
+producer rather than left to the far side. A KEY the producer never checked at all, though
+its own docstring said it applied the orchestrator's rules. A size warning that blamed the
+facts for a document the `params` echo had filled — and, in the last round, the same line
+blaming the echo for a document the FACTS had filled. And a report the store refused: the
+ordinary write had already put it in the inventory, so the marker claimed an object nobody
+holds and the failure path, asking only whether the name was already there, decided it had
+nothing left to do.
+
+The platform's three golden wire documents at `86461801` were compared byte for byte with
+the copies checked in under `conformance/fixtures/`: all three are identical.
+
+The two hand-written runs of
+[docs/CONFORMANCE.md](docs/CONFORMANCE.md#level-1-run-it-with-a-hand-written-envelope)
+(runs A and B) and its missing-envelope case were re-run as written, at branch commit
+`0f19d5d` with Python 3.13.3 and no Docker. Both runs printed the four lines the document
+shows, byte for byte, exited 0 and left exactly the three files it lists; the
+missing-envelope case printed the one line it shows on stderr, exited 1 and left the
+staging directory empty. The hand-written manifest and the marker and `result.json` both
+runs produced were then parsed with the platform's own parser at `86461801`, and all were
+accepted.
+
+**What was not done on this date.** `--red-for-real` was not run; the flag only changes how
+a test in the `expected_red_until_fixed` group is reported, and the collection above has
+none. The GitHub workflow itself was not run: all three commands above ran on one machine
+with Python 3.13.3, and the workflow installs Python 3.12. No real S3 transfer was made
+and nothing was run against a live orchestrator: the Docker suite exercises the S3-shaped
+fake. The documents themselves were not all re-read; what was rechecked on the
+orchestrator's side, file by file, and what that corrected is in
+[docs/README.md](docs/README.md#provenance).
+
 ## Verification on 2026-09-10
+
+*Superseded by the 2026-10-13 verification above. Kept as the dated record of that run:
+its counts and commits are what was measured then.*
 
 The unchanged reference implementation at `main` commit `c768c02` was exercised in
 real Docker containers with the existing harness. Platform citations were read from
@@ -752,6 +834,16 @@ orchestrator was happy to write (3 MiB, well inside the 8 MiB manifest ceiling) 
 document the contract's own reader is forbidden to read. **Honest caveat:** nothing in the
 current collection path calls `read_result`, so today the oversized document is written and
 never read.
+
+*Note added 2026-10-13, checked against orchestrator `86461801`.* That caveat has expired,
+and it is kept above rather than deleted because it was measured: when this defect was
+written up, nothing in the collection path read `result.json` at all. Collection now reads
+it for the optional `facts` list, under the same 1 MiB bound, so an oversized document
+loses the run its search facts. Still without failing it, and not silently on the
+platform's side — the reader logs a warning naming the document. Silent where it matters,
+though: nothing reaches the node, its author or the run, so the only symptom anybody here
+sees is a run that answers to nothing when it is searched for
+([docs/PROTOCOL.md](docs/PROTOCOL.md#44-resultjson)).
 
 The test forbids the oversized document and nothing else. `external/io.py` explicitly wants
 a producer to *"fail loudly at the point of the mistake"*, so ending the run non-zero is a

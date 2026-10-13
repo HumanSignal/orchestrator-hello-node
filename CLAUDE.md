@@ -99,7 +99,7 @@ and the stale copy is the one somebody is reading.
 6. **Hand back the digest, and where to paste it.** Point the human at the registration
    steps instead of summarising them, and hand over the start line the registration reply
    prints instead of one you wrote yourself. **BEHAVIOUR.** A node is registered from
-   Settings, the **External Nodes** tab, **Connect node**, where that digest is pasted; the
+   Organization, the **External Nodes** tab, **Connect node**, where that digest is pasted; the
    reply creates the pool, the deployment and the revision, and prints the agent's
    `docker run` line already filled in with the orchestrator's address, the pool name and —
    only when that registration minted one — the pool token
@@ -148,8 +148,9 @@ repository's own Dockerfile and never patches it — no volume over `/app/node.p
 entrypoint override — because if it could change what runs, none of its verdicts would
 mean anything.
 
-The 2026-09-10 full run took about four minutes; several tests deliberately hold a request
-open for twelve seconds or drive a stop through a thirty-second grace period.
+The 2026-10-13 full run took a little over four minutes (252.85 seconds); several tests
+deliberately hold a request open for twelve seconds or drive a stop through a thirty-second
+grace period.
 
 ## The expected-red mechanism
 

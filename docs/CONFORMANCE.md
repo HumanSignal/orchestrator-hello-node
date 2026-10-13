@@ -193,9 +193,10 @@ historical parser/refusal measurements are described in
 the current audit's verification are recorded separately in
 [CONFORMANCE-BASELINE.md](../CONFORMANCE-BASELINE.md). No production run or real S3 upload was performed for
 this update. Both documented commands (runs A and B) and the missing-envelope case
-were rerun on **2026-09-10** at hello-node commit `c768c02`, reproducing the transcripts,
-exit codes and output files shown here. Their manifest and marker also parsed with the
-platform at `30b0950a`.
+were rerun on **2026-10-13** at hello-node branch commit `0f19d5d` (pull request #12 on top
+of `main` at `a9ca5b8`), reproducing the transcripts, exit codes and output files shown
+here. Their manifest, marker and `result.json` also parsed with the platform's own parser
+at `86461801`.
 
 **What level 1 proves.** From run B: that your program finds its credentials through the
 one variable the platform sets. From either run: that it parses both documents, verifies

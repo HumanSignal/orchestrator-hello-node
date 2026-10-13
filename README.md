@@ -8,11 +8,12 @@ use the same job description, short-lived credentials and completion marker.
 
 ## Read this before you copy anything
 
-**Start from `node.py`, then test your changes.** On 2026-09-10 the existing harness
-passed **141 tests** against this checkout in real Docker containers, including its
-citations checked against orchestrator `master` at `30b0950a`. This is evidence for the
-tested reference, not a guarantee about a modified node or a live installation. The
-verification and earlier repair history are in [CONFORMANCE-BASELINE.md](CONFORMANCE-BASELINE.md).
+**Start from `node.py`, then test your changes.** On 2026-10-13 the existing harness
+passed **153 tests** against this reference node in real Docker containers, including its
+citations checked against orchestrator `master` at `86461801`, the commit deployed to
+production that day. This is evidence for the tested reference, not a guarantee about a modified
+node or a live installation. The exact commits, what else was run that day and the earlier
+repair history are in [CONFORMANCE-BASELINE.md](CONFORMANCE-BASELINE.md).
 
 Twenty tests failed before the original reference-node repair, and
 [CONFORMANCE-BASELINE.md](CONFORMANCE-BASELINE.md) is the measured record of what each one
@@ -30,7 +31,12 @@ one of which decides whether a real job survives:
   memory and would contradict the very rule this file exists to demonstrate;
 * it re-reads its credentials, so a run longer than fifteen minutes can still upload;
 * it keeps its inventory where the failure path can see it, and records an object before
-  the upload starts;
+  the upload starts — with one deliberate exception, its own report document on the way out
+  of a failure, which is named only once the store has taken it
+  ([docs/AUTHORING.md](docs/AUTHORING.md#nodepy-and-this-skeleton) says why);
+* it records what the run touched as **search facts** in `result.json`, on the failure path
+  as well as the successful one, so the run can afterwards be found by the name of an input
+  it copied instead of by an execution number nobody has;
 * it handles a stop request — stops taking on new work instead of running to completion
   for nobody, and *notices* the stop instead of sitting in a socket call until it times
   out, which is the half a handler usually leaves out;
