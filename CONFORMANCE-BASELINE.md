@@ -5,8 +5,8 @@
 The reference implementation as pull request #12 leaves it — `main` at `a9ca5b8` plus the
 pull request's branch at commit `0f19d5d`; the squash commit that will carry it into `main`
 does not exist yet — was exercised in real Docker containers with the harness. Platform
-citations were read from orchestrator **`master` at `86461801`**, the commit that has been
-in production since 2026-10-13:
+citations were read from orchestrator **`master` at `86461801`**, the commit that was
+deployed to production on 2026-10-13:
 
 ```text
 LSPO_ORCHESTRATOR_SRC=/path/to/orchestrator LSPO_ORCHESTRATOR_REF=86461801 python -m pytest -q -p no:cacheprovider

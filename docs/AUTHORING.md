@@ -467,7 +467,7 @@ credentials, streams in both directions, keeps its inventory at module scope, ha
 stop request, writes the marker last on every path with the exit code the process really
 returns, classifies transient and permanent failures apart, and redacts every URL before
 it reaches a log. The 2026-10-13 verification ran all 153 tests successfully, including the
-citation check against the orchestrator commit in production that day; see
+citation check against the orchestrator commit deployed to production that day; see
 [CONFORMANCE-BASELINE.md](../CONFORMANCE-BASELINE.md).
 
 **The defects it used to have are still worth reading**, because each one is a mistake a

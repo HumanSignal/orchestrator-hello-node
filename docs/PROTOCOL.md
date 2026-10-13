@@ -9,7 +9,7 @@ Every statement is labelled **RULE** (the platform refuses or fails the run),
 (what a good node does; the platform permits otherwise). Unlabelled text is background.
 
 Also **background**: code claims and citations were rechecked against the orchestrator at
-default-branch commit `86461801` (`master`, in production since 2026-10-13). That recheck,
+default-branch commit `86461801` (`master`, deployed to production on 2026-10-13). That recheck,
 made on 2026-10-13, was two things and no more: the suite's verbatim citation check run at
 `86461801`, and a file-by-file review of what changed in the cited sources since
 `30b0950a` — the commit of the full review of 2026-09-10 — with each behavioural change

@@ -10,8 +10,8 @@ use the same job description, short-lived credentials and completion marker.
 
 **Start from `node.py`, then test your changes.** On 2026-10-13 the existing harness
 passed **153 tests** against this reference node in real Docker containers, including its
-citations checked against orchestrator `master` at `86461801`, the commit in production
-since that day. This is evidence for the tested reference, not a guarantee about a modified
+citations checked against orchestrator `master` at `86461801`, the commit deployed to
+production that day. This is evidence for the tested reference, not a guarantee about a modified
 node or a live installation. The exact commits, what else was run that day and the earlier
 repair history are in [CONFORMANCE-BASELINE.md](CONFORMANCE-BASELINE.md).
 

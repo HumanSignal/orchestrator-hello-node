@@ -166,8 +166,8 @@ its Dockerfile, the harness, tests and CI workflow, and against the platform sou
 first six rows of the table below.
 
 **The recheck, 2026-10-13.** This repository at `main` `a9ca5b8` plus pull request #12 at
-branch commit `0f19d5d`; the orchestrator's `master` at `86461801`, which has been in
-production since 2026-10-13. Two things were done, and nothing beyond them is claimed:
+branch commit `0f19d5d`; the orchestrator's `master` at `86461801`, which was deployed to
+production on 2026-10-13. Two things were done, and nothing beyond them is claimed:
 
 1. **A verbatim citation check.** The suite's own check was run against `86461801`: the
    38 citations in the test files carry 90 quoted fragments, and every fragment was found
@@ -244,7 +244,7 @@ Neither check establishes which flags, images or settings a live installation us
 The current runtime-deadline account comes from the code and its existing tests; older
 measurements of a deadline rejecting every terminal report do not describe the default
 stop-window implementation now. No production run or real S3 transfer was performed for
-either documentation update: "in production since 2026-10-13" above says which orchestrator
+either documentation update: "deployed to production on 2026-10-13" above says which orchestrator
 commit was read, not that this node was run against it.
 
 Source paths are provenance, not generated documentation. When these pages disagree
