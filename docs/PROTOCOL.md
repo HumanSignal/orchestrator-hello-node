@@ -1238,6 +1238,16 @@ cannot report still do not.
 downstream step configured to read `output` finds exactly what you published under
 `output`.
 
+**BEHAVIOUR.** `output` is also the port the orchestrator's **Import** step reads with
+nothing configured — the step that turns a file into Label Studio tasks. It reads the one
+artifact of kind `source_data`, else the one of kind `output`; when the Import node's
+**Upstream artifact kind** names a kind, it reads exactly that kind instead
+(`handlers/steps/import_tasks.py`, since orchestrator commit `8d8a5e2a`). It reads exactly
+one file: deliver two or more objects under the port it reads and the Import run fails at
+once, naming them. Its built-in `ls_tasks_json` importer expects Label Studio tasks JSON —
+one object, or an array of objects, each either the task data itself or a complete task
+with a `data` object (`handlers/importers/ls_tasks_json.py`).
+
 **BEHAVIOUR.** The published location contains an identifier of the collection that won,
 which you cannot predict. Never construct a published URI by hand; follow the URIs in the
 execution's result (`pipelines/external_finalize.py`).
