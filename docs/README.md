@@ -112,6 +112,7 @@ own label.
 | How my logs reach the run view, and what is lost | [PROTOCOL.md](PROTOCOL.md#33-logging) |
 | How to report progress | [PROTOCOL.md](PROTOCOL.md#34-progress) |
 | What the platform does after my container exits | [PROTOCOL.md](PROTOCOL.md#8-what-happens-after-you-exit) |
+| Which port name the orchestrator's Import step reads, to turn my output into Label Studio tasks | [PROTOCOL.md](PROTOCOL.md#8-what-happens-after-you-exit) |
 | A skeleton to copy, in the right shape | [AUTHORING.md](AUTHORING.md#the-skeleton) |
 | The order to build things in | [AUTHORING.md](AUTHORING.md#the-recipe) |
 | A checklist before I ship | [AUTHORING.md](AUTHORING.md#the-checklist) |
@@ -198,6 +199,13 @@ Step 2 corrected three statements, each of which had been true at `30b0950a`:
   called it stale.
 * PROTOCOL section 5 points at a paragraph of the orchestrator's `external/README.md` by
   its opening words, and those words changed; the pointer now quotes the current ones.
+
+**One statement added on 2026-10-14.** PROTOCOL section 8 now says which port the
+orchestrator's Import step reads. Import learned to read `output` in orchestrator commit
+`8d8a5e2a`, deployed to production on 2026-10-13 after the recheck above, so that statement
+was held against `handlers/steps/import_tasks.py` and `handlers/importers/ls_tasks_json.py`
+at `8d8a5e2a`; neither file changed on `master` up to `1561fa1a`. Nothing else in these
+documents was rechecked against those commits.
 
 | Area | Sources in the orchestrator |
 |---|---|
